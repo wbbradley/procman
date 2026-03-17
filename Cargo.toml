@@ -2,5 +2,14 @@
 name = "procman"
 version = "0.1.0"
 edition = "2024"
+description = "A foreman-like process supervisor"
+license = "MIT"
+repository = "https://github.com/wbbradley/procman"
+readme = "README.md"
+keywords = ["process", "supervisor", "procfile", "foreman"]
+categories = ["command-line-utilities"]
 
 [dependencies]
+anyhow = "1.0.102"
+nix = { version = "0.31.2", features = ["signal", "process"] }
+signal-hook = "0.4.3"

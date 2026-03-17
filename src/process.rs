@@ -1,0 +1,192 @@
+use std::{
+    io::BufRead,
+    os::unix::process::CommandExt,
+    process::Stdio,
+    sync::{
+        Arc,
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+use anyhow::{Context, Result};
+use nix::{
+    libc,
+    sys::{
+        signal::{self, Signal},
+        wait::{WaitPidFlag, WaitStatus, waitpid},
+    },
+    unistd::Pid,
+};
+
+use crate::{log::Logger, procfile::Command};
+
+pub struct ProcessGroup {
+    pgid: Pid,
+    children: Vec<(Pid, String)>,
+    reader_threads: Vec<thread::JoinHandle<()>>,
+}
+
+impl ProcessGroup {
+    pub fn spawn(commands: &[Command], logger: Arc<Mutex<Logger>>) -> Result<Self> {
+        let mut children = Vec::new();
+        let mut reader_threads = Vec::new();
+        let mut pgid: Option<Pid> = None;
+
+        for cmd in commands {
+            let mut child_cmd = std::process::Command::new(&cmd.program);
+            child_cmd.args(&cmd.args);
+            child_cmd.env_clear();
+            child_cmd.envs(&cmd.env);
+            child_cmd.stdout(Stdio::piped());
+            child_cmd.stderr(Stdio::piped());
+
+            let pgid_val = pgid;
+            unsafe {
+                child_cmd.pre_exec(move || {
+                    // Merge stderr into stdout
+                    let r = libc::dup2(1, 2);
+                    if r == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    // Set process group
+                    match pgid_val {
+                        Some(pg) => {
+                            let r = libc::setpgid(0, pg.as_raw());
+                            if r == -1 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                        }
+                        None => {
+                            // First child: create new process group
+                            let r = libc::setpgid(0, 0);
+                            if r == -1 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                        }
+                    }
+                    Ok(())
+                });
+            }
+
+            let mut child = child_cmd
+                .spawn()
+                .with_context(|| format!("spawning {}", cmd.name))?;
+
+            let pid = Pid::from_raw(child.id() as i32);
+            if pgid.is_none() {
+                pgid = Some(pid);
+            }
+
+            let name = cmd.name.clone();
+            children.push((pid, name.clone()));
+
+            // Reader thread for stdout
+            let stdout = child.stdout.take().unwrap();
+            let logger_clone = Arc::clone(&logger);
+            let name_clone = name.clone();
+            reader_threads.push(thread::spawn(move || {
+                let reader = std::io::BufReader::new(stdout);
+                for line in reader.lines() {
+                    match line {
+                        Ok(line) => {
+                            let mut log = logger_clone.lock().unwrap();
+                            log.log_line(&name_clone, &line);
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }));
+
+            // We need to drop the Child so that we can waitpid on the raw pid.
+            // stderr is already duped to stdout in pre_exec, and stdout pipe is taken.
+            // Forget the Child to avoid double-wait.
+            std::mem::forget(child);
+        }
+
+        Ok(Self {
+            pgid: pgid.unwrap(),
+            children,
+            reader_threads,
+        })
+    }
+
+    pub fn wait_and_shutdown(self, shutdown: Arc<AtomicBool>) -> i32 {
+        let pgid = self.pgid;
+
+        // Wait for any child to exit or a signal
+        let mut first_exit_code: Option<i32> = None;
+        let mut remaining: Vec<Pid> = self.children.iter().map(|(pid, _)| *pid).collect();
+
+        loop {
+            if shutdown.load(Ordering::Relaxed) || first_exit_code.is_some() {
+                break;
+            }
+
+            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::Exited(pid, code)) => {
+                    remaining.retain(|p| *p != pid);
+                    if first_exit_code.is_none() {
+                        first_exit_code = Some(code);
+                    }
+                }
+                Ok(WaitStatus::Signaled(pid, _sig, _)) => {
+                    remaining.retain(|p| *p != pid);
+                    if first_exit_code.is_none() {
+                        first_exit_code = Some(1);
+                    }
+                }
+                Ok(WaitStatus::StillAlive) => {
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                Err(nix::errno::Errno::ECHILD) => break,
+                _ => {
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+            }
+        }
+
+        // SIGTERM the group
+        let _ = signal::killpg(pgid, Signal::SIGTERM);
+
+        // Poll for up to 2 seconds
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !remaining.is_empty() && Instant::now() < deadline {
+            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::Exited(pid, code)) => {
+                    remaining.retain(|p| *p != pid);
+                    if first_exit_code.is_none() {
+                        first_exit_code = Some(code);
+                    }
+                }
+                Ok(WaitStatus::Signaled(pid, _, _)) => {
+                    remaining.retain(|p| *p != pid);
+                }
+                Err(nix::errno::Errno::ECHILD) => break,
+                _ => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+
+        // SIGKILL if any remain
+        if !remaining.is_empty() {
+            let _ = signal::killpg(pgid, Signal::SIGKILL);
+            // Reap remaining
+            for pid in &remaining {
+                let _ = waitpid(*pid, None);
+            }
+        }
+
+        // Join reader threads
+        for handle in self.reader_threads {
+            let _ = handle.join();
+        }
+
+        first_exit_code.unwrap_or(1)
+    }
+}
