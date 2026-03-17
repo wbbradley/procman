@@ -5,11 +5,48 @@ mod signal;
 
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
+use clap::Parser;
+use nix::fcntl::{Flock, FlockArg};
+
+#[derive(Parser)]
+#[command(version)]
+struct Cli {
+    /// Path to Procfile
+    #[arg(default_value = "Procfile")]
+    procfile: String,
+
+    /// Run in server mode, listening on the named FIFO
+    #[arg(short, long)]
+    server: Option<String>,
+
+    /// Send a command to a running server via the named FIFO
+    #[arg(short, long, conflicts_with = "server")]
+    client: Option<String>,
+
+    /// Command string to send (used with --client)
+    #[arg(requires = "client")]
+    command: Option<String>,
+}
 
 fn main() -> Result<()> {
-    let procfile_path = std::env::args().nth(1).unwrap_or_else(|| "Procfile".into());
-    let procfile = procfile::parse(&procfile_path)?;
+    let cli = Cli::parse();
+
+    if cli.client.is_some() {
+        bail!("client mode not yet implemented");
+    }
+
+    let lock_file =
+        std::fs::File::open(&cli.procfile).with_context(|| format!("opening {}", cli.procfile))?;
+    let _lock = Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(|(_, errno)| {
+        anyhow::anyhow!(
+            "another procman instance appears to be running (could not lock {}): {}",
+            cli.procfile,
+            errno
+        )
+    })?;
+
+    let procfile = procfile::parse(&cli.procfile)?;
 
     let shutdown = signal::setup()?;
 

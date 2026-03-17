@@ -11,5 +11,7 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0.102"
-nix = { version = "0.31.2", features = ["signal", "process"] }
+clap = { version = "4.6.0", features = ["derive"] }
+nix = { version = "0.31.2", features = ["signal", "process", "fs"] }
+shell-words = "1.1.1"
 signal-hook = "0.4.3"

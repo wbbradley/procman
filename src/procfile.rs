@@ -79,8 +79,11 @@ pub fn parse(path: &str) -> Result<Procfile> {
 
     for line in &lines {
         if !seen_command {
-            // Check if entire line is a simple KEY=value (no spaces before '=')
-            if let Some((key, val)) = is_env_assignment(line) {
+            // A global env line is a single KEY=value with no additional tokens.
+            let tokens = shell_words::split(line).unwrap_or_default();
+            if tokens.len() == 1
+                && let Some((key, val)) = is_env_assignment(&tokens[0])
+            {
                 global_env.insert(key.to_string(), val.to_string());
                 continue;
             }
@@ -101,7 +104,7 @@ pub fn parse(path: &str) -> Result<Procfile> {
     let mut name_counts: HashMap<String, usize> = HashMap::new();
 
     for line in &command_lines {
-        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let tokens = shell_words::split(line).unwrap_or_default();
         if tokens.is_empty() {
             continue;
         }
@@ -135,7 +138,7 @@ pub fn parse(path: &str) -> Result<Procfile> {
         }
 
         // Substitute program and args
-        let program = substitute(tokens[program_idx], &env)?;
+        let program = substitute(&tokens[program_idx], &env)?;
         let args: Vec<String> = tokens[program_idx + 1..]
             .iter()
             .map(|a| substitute(a, &env))

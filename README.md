@@ -28,9 +28,10 @@ worker process-jobs --db $DATABASE_URL
 - Lines starting with `#` are comments.
 - Trailing `\` joins continuation lines.
 - `KEY=value` lines before the first command set global environment variables.
-- Inline `KEY=value` tokens at the start of a command line set per-command env vars.
+- Inline `KEY=value` tokens at the start of a command line set per-command env vars. Values may be quoted: `FOO="hello world" myprogram`.
 - `$VAR` references are substituted from the merged environment (inherited + global + inline). Undefined variables are a hard error — nothing is spawned.
 - Process names are derived from the program basename. Duplicates get `.1`, `.2` suffixes.
+- **Note:** Unlike a POSIX shell, inline env vars are passed to the child process *and* substituted into the command line. `FOO="abc" echo $FOO` will print `abc`, whereas a shell would expand `$FOO` before the assignment takes effect and print an empty line.
 
 ## Behavior
 
