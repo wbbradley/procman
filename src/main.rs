@@ -3,7 +3,7 @@ mod process;
 mod procfile;
 mod signal;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -53,7 +53,10 @@ fn main() -> Result<()> {
     let names: Vec<String> = procfile.commands.iter().map(|c| c.name.clone()).collect();
     let logger = Arc::new(Mutex::new(log::Logger::new(&names)?));
 
-    let group = process::ProcessGroup::spawn(&procfile.commands, logger)?;
-    let exit_code = group.wait_and_shutdown(shutdown);
+    let (tx, rx) = mpsc::channel::<procfile::Command>();
+    drop(tx);
+
+    let group = process::ProcessGroup::spawn(&procfile.commands, Arc::clone(&logger))?;
+    let exit_code = group.wait_and_shutdown(shutdown, rx, logger);
     std::process::exit(exit_code);
 }

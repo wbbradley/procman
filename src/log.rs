@@ -27,6 +27,14 @@ impl Logger {
         })
     }
 
+    pub fn add_process(&mut self, name: &str) -> Result<()> {
+        self.max_name_len = self.max_name_len.max(name.len());
+        let file = File::create(format!("logs/{name}.log"))
+            .with_context(|| format!("creating log file for {name}"))?;
+        self.log_files.insert(name.to_string(), file);
+        Ok(())
+    }
+
     pub fn log_line(&mut self, name: &str, line: &str) {
         let padded = format!("{:>width$}", name, width = self.max_name_len);
         println!("{padded} | {line}");
