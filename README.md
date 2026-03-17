@@ -1,5 +1,7 @@
 # procman
 
+[![crates.io](https://img.shields.io/crates/v/procman.svg)](https://crates.io/crates/procman)
+
 A foreman-like process supervisor written in Rust. Reads a `Procfile`, spawns all listed commands, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives.
 
 ## Usage
