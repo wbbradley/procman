@@ -95,17 +95,16 @@ pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
     fn write_yaml(content: &str) -> String {
-        let dir = std::env::temp_dir().join(format!(
-            "procman_yaml_test_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("procman_yaml_test_{}_{id}", std::process::id(),));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("Procfile.yaml");
         std::fs::write(&path, content).unwrap();
