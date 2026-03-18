@@ -42,7 +42,7 @@ The `serve`/`start` pattern enables imperative orchestration — start a supervi
 ```bash
 procman serve /tmp/myapp.fifo &
 while ! curl -sf http://localhost:8080/health; do sleep 1; done
-procman start /tmp/myapp.fifo "worker process-jobs"
+procman start /tmp/myapp.fifo "redis-server --port 6380"
 ```
 
 An advisory `flock` on the Procfile prevents multiple instances from managing the same file simultaneously.

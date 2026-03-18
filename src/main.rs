@@ -19,12 +19,16 @@ EXAMPLES:
     # Run all Procfile commands (default)
     procman run
 
-    # Accept dynamic commands via a FIFO
+    # Run Procfile commands and accept dynamic additions via a FIFO
     procman serve /tmp/myapp.fifo &
 
     # Scripted service bringup — wait for health, then add a worker
     while ! curl -sf http://localhost:8080/health; do sleep 1; done
-    procman start /tmp/myapp.fifo \"worker process-jobs\""
+    procman start /tmp/myapp.fifo \"redis-server --port 6380\"
+
+SIGNALS:
+    On SIGINT or SIGTERM, all children receive SIGTERM. After a 2-second
+    grace period, remaining processes are sent SIGKILL."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -42,15 +46,15 @@ enum Commands {
 
     /// Run Procfile commands and listen on a FIFO for dynamically added commands
     ///
-    /// Scripts can use `procman start` to send commands to this instance,
-    /// enabling imperative service bringup — start a database, poll until
-    /// healthy, then add dependent services.
+    /// Starts all commands from the Procfile, then listens on the given FIFO
+    /// for additional commands sent via `procman start`. The process name is
+    /// derived from the program basename.
     Serve {
+        /// Path for the named FIFO (created automatically, removed on exit)
+        fifo: String,
         /// Path to Procfile
         #[arg(default_value = "Procfile")]
         procfile: String,
-        /// Path for the named FIFO (created automatically, removed on exit)
-        fifo: String,
     },
 
     /// Send a command to a running `procman serve` instance
@@ -61,7 +65,8 @@ enum Commands {
     Start {
         /// Path to the FIFO of the running server
         fifo: String,
-        /// Command line to send (e.g. "redis-server --port 6380")
+        /// Command line to send — the process name is derived from the program
+        /// basename (e.g. "redis-server --port 6380" runs as "redis-server")
         command: String,
     },
 }
