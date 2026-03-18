@@ -1,3 +1,4 @@
+mod fifo;
 mod log;
 mod process;
 mod procfile;
@@ -46,7 +47,7 @@ fn main() -> Result<()> {
         )
     })?;
 
-    let procfile = procfile::parse(&cli.procfile)?;
+    let (procfile, parser) = procfile::parse(&cli.procfile)?;
 
     let shutdown = signal::setup()?;
 
@@ -54,9 +55,27 @@ fn main() -> Result<()> {
     let logger = Arc::new(Mutex::new(log::Logger::new(&names)?));
 
     let (tx, rx) = mpsc::channel::<procfile::Command>();
-    drop(tx);
+
+    let fifo_server = if let Some(ref fifo_path) = cli.server {
+        let parser = Arc::new(Mutex::new(parser));
+        Some(fifo::FifoServer::start(
+            fifo_path.clone(),
+            tx,
+            parser,
+            Arc::clone(&shutdown),
+            Arc::clone(&logger),
+        )?)
+    } else {
+        drop(tx);
+        None
+    };
 
     let group = process::ProcessGroup::spawn(&procfile.commands, Arc::clone(&logger))?;
     let exit_code = group.wait_and_shutdown(shutdown, rx, logger);
+
+    if let Some(server) = fifo_server {
+        server.stop();
+    }
+
     std::process::exit(exit_code);
 }
