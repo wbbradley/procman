@@ -16,7 +16,9 @@ pub struct Logger {
 
 impl Logger {
     pub fn new(names: &[String]) -> Result<Self> {
-        Self::with_options(names, PathBuf::from("logs"), true)
+        let log_dir = PathBuf::from("procman-logs");
+        let _ = fs::remove_dir_all(&log_dir);
+        Self::with_options(names, log_dir, true)
     }
 
     fn with_options(names: &[String], log_dir: PathBuf, print_to_stdout: bool) -> Result<Self> {
