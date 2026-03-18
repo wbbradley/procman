@@ -6,7 +6,7 @@ mod signal;
 
 use std::sync::{Arc, Mutex, mpsc};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Parser;
 use nix::fcntl::{Flock, FlockArg};
 
@@ -30,11 +30,32 @@ struct Cli {
     command: Option<String>,
 }
 
+fn run_client(fifo_path: &str, command: &str) -> Result<()> {
+    use std::io::Write;
+
+    use nix::{
+        fcntl::{OFlag, open},
+        sys::stat::Mode,
+    };
+
+    let fd = open(
+        fifo_path,
+        OFlag::O_WRONLY | OFlag::O_NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(|_| anyhow::anyhow!("no procman server listening on {fifo_path}"))?;
+
+    let mut file = std::fs::File::from(fd);
+    writeln!(file, "{command}")?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    if cli.client.is_some() {
-        bail!("client mode not yet implemented");
+    if let Some(ref fifo_path) = cli.client {
+        let command = cli.command.as_deref().unwrap_or("");
+        return run_client(fifo_path, command);
     }
 
     let lock_file =
