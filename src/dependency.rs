@@ -63,6 +63,7 @@ fn wait_for_dependencies(
             .build(),
     );
     let mut satisfied = vec![false; config.depends.len()];
+    let mut first_failure_logged = vec![false; config.depends.len()];
     let starts: Vec<Instant> = config.depends.iter().map(|_| Instant::now()).collect();
 
     loop {
@@ -97,6 +98,14 @@ fn wait_for_dependencies(
             } else {
                 all_satisfied = false;
                 min_interval = min_interval.min(poll_interval(dep));
+                if !first_failure_logged[i] {
+                    first_failure_logged[i] = true;
+                    let desc = description(dep);
+                    logger
+                        .lock()
+                        .unwrap()
+                        .log_line(&config.name, &format!("dependency not ready: {desc}"));
+                }
             }
         }
 

@@ -98,6 +98,10 @@ impl FifoServer {
                     }
                 };
 
+                logger
+                    .lock()
+                    .unwrap()
+                    .log_line("procman", &format!("{} submitted via FIFO", cmd.name));
                 if tx.send(cmd).is_err() {
                     return;
                 }

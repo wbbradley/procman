@@ -112,27 +112,44 @@ fn run_supervisor(procfile_path: String, fifo_path: Option<String>) -> Result<()
 
     let shutdown = signal::setup()?;
 
-    let names: Vec<String> = configs.iter().map(|c| c.name.clone()).collect();
+    let mut names: Vec<String> = configs.iter().map(|c| c.name.clone()).collect();
+    names.insert(0, "procman".to_string());
     let logger = Arc::new(Mutex::new(log::Logger::new(&names)?));
+
+    let mode = if fifo_path.is_some() { "serve" } else { "run" };
+    logger.lock().unwrap().log_line(
+        "procman",
+        &format!("started with {} process(es), mode={mode}", configs.len()),
+    );
 
     let (tx, rx) = mpsc::channel::<config::ProcessConfig>();
 
     let fifo_server = if let Some(ref fifo_path) = fifo_path {
         let parser = Arc::new(Mutex::new(parser));
-        Some(fifo::FifoServer::start(
+        let server = fifo::FifoServer::start(
             fifo_path.clone(),
             tx.clone(),
             parser,
             Arc::clone(&shutdown),
             Arc::clone(&logger),
-        )?)
+        )?;
+        logger
+            .lock()
+            .unwrap()
+            .log_line("procman", &format!("FIFO server listening on {fifo_path}"));
+        Some(server)
     } else {
         None
     };
 
     let group =
         process::ProcessGroup::spawn(&configs, tx, Arc::clone(&shutdown), Arc::clone(&logger))?;
-    let exit_code = group.wait_and_shutdown(shutdown, rx, logger);
+    let exit_code = group.wait_and_shutdown(shutdown, rx, Arc::clone(&logger));
+
+    logger.lock().unwrap().log_line(
+        "procman",
+        &format!("shutting down with exit code {exit_code}"),
+    );
 
     if let Some(server) = fifo_server {
         server.stop();

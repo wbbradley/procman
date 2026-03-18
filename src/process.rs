@@ -26,7 +26,7 @@ use crate::{config::ProcessConfig, dependency, log::Logger};
 
 pub struct ProcessGroup {
     pgid: Option<Pid>,
-    children: Vec<(Pid, String)>,
+    children: Vec<(Pid, String, Instant)>,
     reader_threads: Vec<thread::JoinHandle<()>>,
     waiter_threads: Vec<thread::JoinHandle<()>>,
     pending_deps: Arc<AtomicUsize>,
@@ -78,7 +78,11 @@ impl ProcessGroup {
         }
 
         let name = cmd.name.clone();
-        self.children.push((pid, name.clone()));
+        self.children.push((pid, name.clone(), Instant::now()));
+        logger
+            .lock()
+            .unwrap()
+            .log_line(&name, &format!("[{pid}] started"));
 
         let stdout = child.stdout.take().unwrap();
         let logger_clone = Arc::clone(logger);
@@ -142,7 +146,10 @@ impl ProcessGroup {
         while let Ok(cmd) = rx.try_recv() {
             logger.lock().unwrap().add_process(&cmd.name).ok();
             if let Err(e) = self.spawn_one(&cmd, logger) {
-                eprintln!("error spawning {}: {e}", cmd.name);
+                logger
+                    .lock()
+                    .unwrap()
+                    .log_line("procman", &format!("error spawning {}: {e}", cmd.name));
             }
         }
     }
@@ -154,7 +161,7 @@ impl ProcessGroup {
         logger: Arc<Mutex<Logger>>,
     ) -> i32 {
         let mut first_exit_code: Option<i32> = None;
-        let mut remaining: Vec<Pid> = self.children.iter().map(|(pid, _)| *pid).collect();
+        let mut remaining: Vec<Pid> = self.children.iter().map(|(pid, _, _)| *pid).collect();
 
         loop {
             if shutdown.load(Ordering::Relaxed) || first_exit_code.is_some() {
@@ -164,19 +171,37 @@ impl ProcessGroup {
             match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
                 Ok(WaitStatus::Exited(pid, code)) => {
                     remaining.retain(|p| *p != pid);
+                    if let Some((_, name, started)) =
+                        self.children.iter().find(|(p, _, _)| *p == pid)
+                    {
+                        let elapsed = started.elapsed().as_secs_f64();
+                        logger.lock().unwrap().log_line(
+                            name,
+                            &format!("[{pid}] exited with code {code} after {elapsed:.1}s"),
+                        );
+                    }
                     if first_exit_code.is_none() {
                         first_exit_code = Some(code);
                     }
                 }
-                Ok(WaitStatus::Signaled(pid, _sig, _)) => {
+                Ok(WaitStatus::Signaled(pid, sig, _)) => {
                     remaining.retain(|p| *p != pid);
+                    if let Some((_, name, started)) =
+                        self.children.iter().find(|(p, _, _)| *p == pid)
+                    {
+                        let elapsed = started.elapsed().as_secs_f64();
+                        logger.lock().unwrap().log_line(
+                            name,
+                            &format!("[{pid}] killed by {sig} after {elapsed:.1}s"),
+                        );
+                    }
                     if first_exit_code.is_none() {
                         first_exit_code = Some(1);
                     }
                 }
                 Ok(WaitStatus::StillAlive) => {
                     self.try_accept_new(&rx, &logger);
-                    for (pid, _) in &self.children {
+                    for (pid, _, _) in &self.children {
                         if !remaining.contains(pid) {
                             remaining.push(*pid);
                         }
@@ -187,7 +212,7 @@ impl ProcessGroup {
                 Err(nix::errno::Errno::ECHILD) => {
                     self.try_accept_new(&rx, &logger);
                     if !self.children.is_empty() {
-                        remaining = self.children.iter().map(|(pid, _)| *pid).collect();
+                        remaining = self.children.iter().map(|(pid, _, _)| *pid).collect();
                         continue;
                     }
                     if self.pending_deps.load(Ordering::Relaxed) == 0 {
