@@ -5,7 +5,7 @@ use std::{
     sync::{
         Arc,
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     thread,
@@ -22,12 +22,14 @@ use nix::{
     unistd::Pid,
 };
 
-use crate::{config::ProcessConfig, log::Logger};
+use crate::{config::ProcessConfig, dependency, log::Logger};
 
 pub struct ProcessGroup {
     pgid: Option<Pid>,
     children: Vec<(Pid, String)>,
     reader_threads: Vec<thread::JoinHandle<()>>,
+    waiter_threads: Vec<thread::JoinHandle<()>>,
+    pending_deps: Arc<AtomicUsize>,
 }
 
 impl ProcessGroup {
@@ -102,17 +104,37 @@ impl ProcessGroup {
         Ok(pid)
     }
 
-    pub fn spawn(commands: &[ProcessConfig], logger: Arc<Mutex<Logger>>) -> Result<Self> {
+    pub fn spawn(
+        commands: &[ProcessConfig],
+        tx: mpsc::Sender<ProcessConfig>,
+        shutdown: Arc<AtomicBool>,
+        logger: Arc<Mutex<Logger>>,
+    ) -> Result<Self> {
         let mut group = Self {
             pgid: None,
             children: Vec::new(),
             reader_threads: Vec::new(),
+            waiter_threads: Vec::new(),
+            pending_deps: Arc::new(AtomicUsize::new(0)),
         };
 
         for cmd in commands {
-            group.spawn_one(cmd, &logger)?;
+            if cmd.depends.is_empty() {
+                group.spawn_one(cmd, &logger)?;
+            } else {
+                logger.lock().unwrap().add_process(&cmd.name).ok();
+                group.pending_deps.fetch_add(1, Ordering::Relaxed);
+                group.waiter_threads.push(dependency::spawn_waiter(
+                    cmd.clone(),
+                    tx.clone(),
+                    Arc::clone(&shutdown),
+                    Arc::clone(&logger),
+                    Arc::clone(&group.pending_deps),
+                ));
+            }
         }
 
+        drop(tx);
         Ok(group)
     }
 
@@ -162,7 +184,18 @@ impl ProcessGroup {
                     thread::sleep(Duration::from_millis(50));
                     continue;
                 }
-                Err(nix::errno::Errno::ECHILD) => break,
+                Err(nix::errno::Errno::ECHILD) => {
+                    self.try_accept_new(&rx, &logger);
+                    if !self.children.is_empty() {
+                        remaining = self.children.iter().map(|(pid, _)| *pid).collect();
+                        continue;
+                    }
+                    if self.pending_deps.load(Ordering::Relaxed) == 0 {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
                 _ => {
                     thread::sleep(Duration::from_millis(50));
                     continue;
@@ -205,6 +238,11 @@ impl ProcessGroup {
 
         // Join reader threads
         for handle in self.reader_threads {
+            let _ = handle.join();
+        }
+
+        // Join waiter threads
+        for handle in self.waiter_threads {
             let _ = handle.join();
         }
 

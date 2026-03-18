@@ -28,6 +28,9 @@ impl Logger {
     }
 
     pub fn add_process(&mut self, name: &str) -> Result<()> {
+        if self.log_files.contains_key(name) {
+            return Ok(());
+        }
         self.max_name_len = self.max_name_len.max(name.len());
         let file = File::create(format!("logs/{name}.log"))
             .with_context(|| format!("creating log file for {name}"))?;

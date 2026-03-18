@@ -17,3 +17,4 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
 shell-words = "1.1.1"
 signal-hook = "0.4.3"
+ureq = "3.2.0"

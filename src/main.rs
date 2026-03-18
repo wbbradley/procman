@@ -1,4 +1,5 @@
 mod config;
+mod dependency;
 mod fifo;
 mod log;
 mod process;
@@ -120,17 +121,17 @@ fn run_supervisor(procfile_path: String, fifo_path: Option<String>) -> Result<()
         let parser = Arc::new(Mutex::new(parser));
         Some(fifo::FifoServer::start(
             fifo_path.clone(),
-            tx,
+            tx.clone(),
             parser,
             Arc::clone(&shutdown),
             Arc::clone(&logger),
         )?)
     } else {
-        drop(tx);
         None
     };
 
-    let group = process::ProcessGroup::spawn(&configs, Arc::clone(&logger))?;
+    let group =
+        process::ProcessGroup::spawn(&configs, tx, Arc::clone(&shutdown), Arc::clone(&logger))?;
     let exit_code = group.wait_and_shutdown(shutdown, rx, logger);
 
     if let Some(server) = fifo_server {
