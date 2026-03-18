@@ -49,6 +49,39 @@ An advisory `flock` on the Procfile prevents multiple instances from managing th
 
 ## Procfile Format
 
+procman supports two Procfile formats: **YAML** and **legacy text**. It auto-detects the format (tries YAML first, falls back to text).
+
+### YAML format
+
+```yaml
+web:
+  env:
+    PORT: "3000"
+  run: serve --port $PORT
+
+worker:
+  depends:
+    - url: http://localhost:3000/health
+      code: 200
+      poll_interval: 2s
+      timeout: 30s
+  run: process-jobs
+
+setup:
+  depends:
+    - path: /tmp/ready.flag
+  run: post-setup-task
+```
+
+- Each top-level key is a process name.
+- `run` (required): the command to execute (parsed with POSIX shell quoting).
+- `env` (optional): per-process environment variables.
+- `depends` (optional): list of dependencies that must be satisfied before the process starts.
+  - **HTTP health check**: `url` + `code` (expected status), with optional `poll_interval` and `timeout`.
+  - **File exists**: `path` to a file that must exist.
+
+### Legacy text format
+
 ```
 # Global environment variables (before any command lines)
 DATABASE_URL=postgres://localhost/myapp

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0] - 2026-03-18
+
+### Added
+- YAML Procfile format with structured process definitions (`run`, `env`, `depends` fields). Auto-detected; falls back to legacy text format.
+- Dependency checking and startup ordering: processes can declare `depends` with HTTP health check (`url` + `code`, optional `poll_interval`/`timeout`) or file-exists (`path`) conditions. Dependent processes are held until all dependencies are satisfied; a timeout triggers shutdown.
+- Lifecycle logging via a `procman` pseudo-process: supervisor startup/shutdown, process spawn/exit events with PID and elapsed time, dependency status, and FIFO command submissions.
+
+### Fixed
+- Race condition in `FifoServer::stop()` where a single wake-up open could miss the reader thread between its shutdown check and blocking `File::open`, causing a hang. Now retries until the thread exits.
+- Test temp directory collisions under parallel execution (replaced nanosecond timestamps with atomic counters).
+
 ## [0.3.1] - 2026-03-17
 
 ### Fixed
