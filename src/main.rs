@@ -100,3 +100,122 @@ fn main() -> Result<()> {
 
     std::process::exit(exit_code);
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::*;
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_fifo_path(name: &str) -> String {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir()
+            .join(format!(
+                "procman_test_main_{name}_{}_{id}",
+                std::process::id()
+            ))
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn run_client_writes_command() {
+        use std::io::Read;
+
+        let path = test_fifo_path("writes_cmd");
+        let _ = std::fs::remove_file(&path);
+        nix::unistd::mkfifo(
+            path.as_str(),
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            let mut f = std::fs::File::open(&reader_path).unwrap();
+            let mut buf = String::new();
+            f.read_to_string(&mut buf).unwrap();
+            buf
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        run_client(&path, "sleep 123").unwrap();
+
+        let received = reader.join().unwrap();
+        assert_eq!(received, "sleep 123\n");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn run_client_error_no_fifo() {
+        let path = test_fifo_path("no_fifo");
+        let _ = std::fs::remove_file(&path);
+        let result = run_client(&path, "sleep 1");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no procman server listening"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn run_client_error_no_reader() {
+        let path = test_fifo_path("no_reader");
+        let _ = std::fs::remove_file(&path);
+        nix::unistd::mkfifo(
+            path.as_str(),
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+
+        let result = run_client(&path, "sleep 1");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no procman server listening"),
+            "unexpected error: {err}"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn integration_server_and_client() {
+        let fifo_path = test_fifo_path("integration");
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("procman_integration_{}_{id}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let procfile_path = dir.join("Procfile");
+        std::fs::write(&procfile_path, "echo placeholder\n").unwrap();
+
+        let (_pf, parser) = procfile::parse(procfile_path.to_str().unwrap()).unwrap();
+        let parser = Arc::new(Mutex::new(parser));
+        let logger = Arc::new(Mutex::new(log::Logger::new(&["fifo".to_string()]).unwrap()));
+
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let server = fifo::FifoServer::start(
+            fifo_path.clone(),
+            tx,
+            Arc::clone(&parser),
+            Arc::clone(&shutdown),
+            Arc::clone(&logger),
+        )
+        .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        run_client(&fifo_path, "cat /etc/hostname").unwrap();
+
+        let cmd = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        assert_eq!(cmd.program, "cat");
+        assert_eq!(cmd.args, vec!["/etc/hostname"]);
+
+        server.stop();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
