@@ -186,7 +186,10 @@ mod tests {
 
     fn make_logger(names: &[&str]) -> Arc<Mutex<Logger>> {
         let names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
-        Arc::new(Mutex::new(Logger::new(&names).unwrap()))
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let log_dir =
+            std::env::temp_dir().join(format!("procman_dep_log_{}_{id}", std::process::id()));
+        Arc::new(Mutex::new(Logger::new_for_test(&names, log_dir).unwrap()))
     }
 
     #[test]

@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 pub struct Logger {
     max_name_len: usize,
     log_files: HashMap<String, File>,
+    combined_log: Option<File>,
     log_dir: PathBuf,
     print_to_stdout: bool,
 }
@@ -18,14 +19,25 @@ impl Logger {
     pub fn new(names: &[String]) -> Result<Self> {
         let log_dir = PathBuf::from("procman-logs");
         let _ = fs::remove_dir_all(&log_dir);
-        Self::with_options(names, log_dir, true)
+        fs::create_dir_all(&log_dir).context("creating logs directory")?;
+        let combined_log =
+            File::create(log_dir.join("procman.log")).context("creating combined log file")?;
+        Self::with_options(names, log_dir, true, Some(combined_log))
     }
 
-    fn with_options(names: &[String], log_dir: PathBuf, print_to_stdout: bool) -> Result<Self> {
+    fn with_options(
+        names: &[String],
+        log_dir: PathBuf,
+        print_to_stdout: bool,
+        combined_log: Option<File>,
+    ) -> Result<Self> {
         fs::create_dir_all(&log_dir).context("creating logs directory")?;
         let max_name_len = names.iter().map(|n| n.len()).max().unwrap_or(0);
         let mut log_files = HashMap::new();
         for name in names {
+            if name == "procman" {
+                continue;
+            }
             let file = File::create(log_dir.join(format!("{name}.log")))
                 .context("creating log file for {name}")?;
             log_files.insert(name.clone(), file);
@@ -33,6 +45,7 @@ impl Logger {
         Ok(Self {
             max_name_len,
             log_files,
+            combined_log,
             log_dir,
             print_to_stdout,
         })
@@ -40,7 +53,7 @@ impl Logger {
 
     #[cfg(test)]
     pub fn new_for_test(names: &[String], log_dir: PathBuf) -> Result<Self> {
-        Self::with_options(names, log_dir, false)
+        Self::with_options(names, log_dir, false, None)
     }
 
     pub fn add_process(&mut self, name: &str) -> Result<()> {
@@ -56,6 +69,9 @@ impl Logger {
 
     pub fn log_line(&mut self, name: &str, line: &str) {
         let padded = format!("{:>width$}", name, width = self.max_name_len);
+        if let Some(f) = &mut self.combined_log {
+            let _ = writeln!(f, "{padded} | {line}");
+        }
         if self.print_to_stdout {
             println!("{padded} | {line}");
         }
