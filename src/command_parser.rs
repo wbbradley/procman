@@ -17,50 +17,6 @@ impl CommandParser {
         }
     }
 
-    /// Build base_env and collect command lines from a Procfile.
-    /// Returns (parser, command_line_strings).
-    fn from_procfile_globals(path: &str) -> Result<(Self, Vec<String>)> {
-        let content = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
-        let content = content.replace("\\\n", "");
-
-        let lines: Vec<&str> = content
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .collect();
-
-        let mut global_env: HashMap<String, String> = HashMap::new();
-        let mut command_lines: Vec<String> = Vec::new();
-        let mut seen_command = false;
-
-        for line in &lines {
-            if !seen_command {
-                let tokens = shell_words::split(line).unwrap_or_default();
-                if tokens.len() == 1
-                    && let Some((key, val)) = is_env_assignment(&tokens[0])
-                {
-                    global_env.insert(key.to_string(), val.to_string());
-                    continue;
-                }
-            }
-            seen_command = true;
-            command_lines.push(line.to_string());
-        }
-
-        let mut base_env: HashMap<String, String> = std::env::vars().collect();
-        for (k, v) in &global_env {
-            base_env.insert(k.clone(), substitute(v, &base_env)?);
-        }
-
-        Ok((
-            Self {
-                base_env,
-                name_counts: HashMap::new(),
-            },
-            command_lines,
-        ))
-    }
-
     /// Parse a single command line string into a ProcessConfig.
     pub fn parse_command_line(&mut self, line: &str) -> Result<ProcessConfig> {
         let tokens = shell_words::split(line).unwrap_or_default();
@@ -168,21 +124,6 @@ fn substitute(s: &str, env: &HashMap<String, String>) -> Result<String> {
     Ok(result)
 }
 
-pub fn parse(path: &str) -> Result<(Vec<ProcessConfig>, CommandParser)> {
-    let (mut parser, command_lines) = CommandParser::from_procfile_globals(path)?;
-
-    let mut configs = Vec::new();
-    for line in &command_lines {
-        configs.push(parser.parse_command_line(line)?);
-    }
-
-    if configs.is_empty() {
-        bail!("no commands found in {path}");
-    }
-
-    Ok((configs, parser))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,19 +174,5 @@ mod tests {
     fn empty_line_is_error() {
         let mut parser = make_parser();
         assert!(parser.parse_command_line("").is_err());
-    }
-
-    #[test]
-    fn parse_procfile() {
-        let dir = std::env::temp_dir().join("procman_test_parse");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("Procfile");
-        std::fs::write(&path, "echo hello\necho world\n").unwrap();
-        let (configs, _parser) = parse(path.to_str().unwrap()).unwrap();
-        assert_eq!(configs.len(), 2);
-        assert_eq!(configs[0].name, "echo");
-        assert_eq!(configs[1].name, "echo.1");
-        assert!(configs[0].depends.is_empty());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

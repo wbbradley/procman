@@ -106,7 +106,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("procman_yaml_test_{}_{id}", std::process::id(),));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("Procfile.yaml");
+        let path = dir.join("procman.yaml");
         std::fs::write(&path, content).unwrap();
         path.to_str().unwrap().to_string()
     }

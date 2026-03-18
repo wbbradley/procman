@@ -2,7 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/procman.svg)](https://crates.io/crates/procman)
 
-A foreman-like process supervisor written in Rust. Reads a `Procfile`, spawns all listed commands, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives.
+A foreman-like process supervisor written in Rust. Reads a `procman.yaml`, spawns all listed commands, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives.
 
 ## Usage
 
@@ -10,11 +10,11 @@ A foreman-like process supervisor written in Rust. Reads a `Procfile`, spawns al
 cargo install --path .
 ```
 
-### `procman run` — run all Procfile commands
+### `procman run` — run all commands
 
 ```bash
-procman run              # uses ./Procfile
-procman run myapp.proc   # custom Procfile path
+procman run                  # uses ./procman.yaml
+procman run myapp.yaml       # custom config path
 ```
 
 Bare `procman` with no subcommand is equivalent to `procman run`.
@@ -25,7 +25,7 @@ Bare `procman` with no subcommand is equivalent to `procman run`.
 procman serve /tmp/myapp.fifo &
 ```
 
-Runs all Procfile commands and listens on a named FIFO for dynamically added commands. The FIFO is created automatically and removed on exit.
+Runs all procman.yaml commands and listens on a named FIFO for dynamically added commands. The FIFO is created automatically and removed on exit.
 
 ### `procman start` — send a command to a running server
 
@@ -33,7 +33,7 @@ Runs all Procfile commands and listens on a named FIFO for dynamically added com
 procman start /tmp/myapp.fifo "redis-server --port 6380"
 ```
 
-Opens the FIFO for writing and sends the command line. Fails immediately if no server is listening. The server parses the command using the same rules as Procfile entries (including env var substitution).
+Opens the FIFO for writing and sends the command line. Fails immediately if no server is listening. The server parses the command using the same rules as command lines (including env var substitution).
 
 ### Scripted service bringup
 
@@ -45,13 +45,9 @@ while ! curl -sf http://localhost:8080/health; do sleep 1; done
 procman start /tmp/myapp.fifo "redis-server --port 6380"
 ```
 
-An advisory `flock` on the Procfile prevents multiple instances from managing the same file simultaneously.
+An advisory `flock` on procman.yaml prevents multiple instances from managing the same file simultaneously.
 
-## Procfile Format
-
-procman supports two Procfile formats: **YAML** and **legacy text**. It auto-detects the format (tries YAML first, falls back to text).
-
-### YAML format
+## procman.yaml Format
 
 ```yaml
 web:
@@ -79,26 +75,6 @@ setup:
 - `depends` (optional): list of dependencies that must be satisfied before the process starts.
   - **HTTP health check**: `url` + `code` (expected status), with optional `poll_interval` and `timeout`.
   - **File exists**: `path` to a file that must exist.
-
-### Legacy text format
-
-```
-# Global environment variables (before any command lines)
-DATABASE_URL=postgres://localhost/myapp
-PORT=3000
-
-# Commands — one per line
-web serve --port $PORT
-worker process-jobs --db $DATABASE_URL
-```
-
-- Lines starting with `#` are comments.
-- Trailing `\` joins continuation lines.
-- `KEY=value` lines before the first command set global environment variables.
-- Inline `KEY=value` tokens at the start of a command line set per-command env vars. Values may be quoted: `FOO="hello world" myprogram`.
-- `$VAR` references are substituted from the merged environment (inherited + global + inline). Undefined variables are a hard error — nothing is spawned.
-- Process names are derived from the program basename. Duplicates get `.1`, `.2` suffixes.
-- **Note:** Unlike a POSIX shell, inline env vars are passed to the child process *and* substituted into the command line. `FOO="abc" echo $FOO` will print `abc`, whereas a shell would expand `$FOO` before the assignment takes effect and print an empty line.
 
 ## Behavior
 

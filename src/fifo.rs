@@ -18,7 +18,7 @@ use nix::{
     unistd::mkfifo,
 };
 
-use crate::{config::ProcessConfig, log::Logger, procfile::CommandParser};
+use crate::{command_parser::CommandParser, config::ProcessConfig, log::Logger};
 
 pub struct FifoServer {
     path: String,
@@ -154,12 +154,10 @@ mod tests {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("procman_parser_{}_{id}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("Procfile");
-        std::fs::write(&path, "echo placeholder\n").unwrap();
-        let (_pf, parser) = crate::procfile::parse(path.to_str().unwrap()).unwrap();
         let log_dir = dir.join("logs");
         let logger =
             Logger::new_for_test(&["fifo".to_string(), "procman".to_string()], log_dir).unwrap();
+        let parser = CommandParser::new();
         (Arc::new(Mutex::new(parser)), Arc::new(Mutex::new(logger)))
     }
 

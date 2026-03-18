@@ -6,7 +6,7 @@ description = "A foreman-like process supervisor"
 license = "MIT"
 repository = "https://github.com/wbbradley/procman"
 readme = "README.md"
-keywords = ["process", "supervisor", "procfile", "foreman"]
+keywords = ["process", "supervisor", "yaml", "foreman"]
 categories = ["command-line-utilities"]
 
 [dependencies]

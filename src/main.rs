@@ -1,10 +1,10 @@
+mod command_parser;
 mod config;
+mod config_parser;
 mod dependency;
 mod fifo;
 mod log;
 mod process;
-mod procfile;
-mod procfile_yaml;
 mod signal;
 
 use std::sync::{Arc, Mutex, mpsc};
@@ -16,13 +16,13 @@ use nix::fcntl::{Flock, FlockArg};
 #[derive(Parser)]
 #[command(
     version,
-    about = "A process supervisor for Procfile-based workflows",
+    about = "A process supervisor driven by procman.yaml",
     after_help = "\
 EXAMPLES:
-    # Run all Procfile commands (default)
+    # Run all procman.yaml commands (default)
     procman run
 
-    # Run Procfile commands and accept dynamic additions via a FIFO
+    # Run procman.yaml commands and accept dynamic additions via a FIFO
     procman serve /tmp/myapp.fifo &
 
     # Scripted service bringup — wait for health, then add a worker
@@ -40,31 +40,31 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Spawn all Procfile commands and wait for exit or signal
+    /// Spawn all procman.yaml commands and wait for exit or signal
     Run {
-        /// Path to Procfile
-        #[arg(default_value = "Procfile")]
-        procfile: String,
+        /// Path to config file
+        #[arg(default_value = "procman.yaml")]
+        config: String,
     },
 
-    /// Run Procfile commands and listen on a FIFO for dynamically added commands
+    /// Run procman.yaml commands and listen on a FIFO for dynamically added commands
     ///
-    /// Starts all commands from the Procfile, then listens on the given FIFO
+    /// Starts all commands from procman.yaml, then listens on the given FIFO
     /// for additional commands sent via `procman start`. The process name is
     /// derived from the program basename.
     Serve {
         /// Path for the named FIFO (created automatically, removed on exit)
         fifo: String,
-        /// Path to Procfile
-        #[arg(default_value = "Procfile")]
-        procfile: String,
+        /// Path to config file
+        #[arg(default_value = "procman.yaml")]
+        config: String,
     },
 
     /// Send a command to a running `procman serve` instance
     ///
     /// Opens the FIFO for writing and sends the command line. Fails immediately
     /// if no server is listening. The server parses the command using the same
-    /// rules as Procfile entries (including env var substitution).
+    /// rules as command lines (including env var substitution).
     Start {
         /// Path to the FIFO of the running server
         fifo: String,
@@ -94,21 +94,19 @@ fn run_client(fifo_path: &str, command: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_supervisor(procfile_path: String, fifo_path: Option<String>) -> Result<()> {
-    let lock_file = std::fs::File::open(&procfile_path)
-        .with_context(|| format!("opening {}", procfile_path))?;
+fn run_supervisor(config_path: String, fifo_path: Option<String>) -> Result<()> {
+    let lock_file =
+        std::fs::File::open(&config_path).with_context(|| format!("opening {}", config_path))?;
     let _lock = Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(|(_, errno)| {
         anyhow::anyhow!(
             "another procman instance appears to be running (could not lock {}): {}",
-            procfile_path,
+            config_path,
             errno
         )
     })?;
 
-    let (configs, parser) = match procfile_yaml::parse(&procfile_path) {
-        Ok(configs) => (configs, procfile::CommandParser::new()),
-        Err(_) => procfile::parse(&procfile_path)?,
-    };
+    let configs = config_parser::parse(&config_path)?;
+    let parser = command_parser::CommandParser::new();
 
     let shutdown = signal::setup()?;
 
@@ -162,13 +160,13 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let command = cli.command.unwrap_or(Commands::Run {
-        procfile: "Procfile".to_string(),
+        config: "procman.yaml".to_string(),
     });
 
     match command {
         Commands::Start { fifo, command } => run_client(&fifo, &command),
-        Commands::Run { procfile } => run_supervisor(procfile, None),
-        Commands::Serve { procfile, fifo } => run_supervisor(procfile, Some(fifo)),
+        Commands::Run { config } => run_supervisor(config, None),
+        Commands::Serve { config, fifo } => run_supervisor(config, Some(fifo)),
     }
 }
 
@@ -271,11 +269,10 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("procman_integration_{}_{id}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let procfile_path = dir.join("Procfile");
-        std::fs::write(&procfile_path, "echo placeholder\n").unwrap();
+        let config_path = dir.join("procman.yaml");
+        std::fs::write(&config_path, "placeholder:\n  run: echo placeholder\n").unwrap();
 
-        let (_pf, parser) = procfile::parse(procfile_path.to_str().unwrap()).unwrap();
-        let parser = Arc::new(Mutex::new(parser));
+        let parser = Arc::new(Mutex::new(command_parser::CommandParser::new()));
         let log_dir = dir.join("logs");
         let logger = Arc::new(Mutex::new(
             log::Logger::new_for_test(&["fifo".to_string(), "procman".to_string()], log_dir)
