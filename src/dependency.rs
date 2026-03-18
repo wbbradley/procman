@@ -181,6 +181,7 @@ mod tests {
             program: "true".to_string(),
             args: vec![],
             depends,
+            once: false,
         }
     }
 

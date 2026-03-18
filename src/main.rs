@@ -94,6 +94,7 @@ fn build_run_message(command: &str) -> Result<String> {
         run: command.to_string(),
         env: None,
         depends: None,
+        once: None,
     };
     Ok(serde_json::to_string(&msg)?)
 }

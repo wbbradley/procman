@@ -30,7 +30,7 @@ use crate::{
 
 pub struct ProcessGroup {
     pgid: Option<Pid>,
-    children: Vec<(Pid, String, Instant)>,
+    children: Vec<(Pid, String, Instant, bool)>,
     reader_threads: Vec<thread::JoinHandle<()>>,
     waiter_threads: Vec<thread::JoinHandle<()>>,
     pending_deps: Arc<AtomicUsize>,
@@ -82,7 +82,8 @@ impl ProcessGroup {
         }
 
         let name = cmd.name.clone();
-        self.children.push((pid, name.clone(), Instant::now()));
+        self.children
+            .push((pid, name.clone(), Instant::now(), cmd.once));
         logger
             .lock()
             .unwrap()
@@ -181,7 +182,7 @@ impl ProcessGroup {
         logger: Arc<Mutex<Logger>>,
     ) -> i32 {
         let mut first_exit_code: Option<i32> = None;
-        let mut remaining: Vec<Pid> = self.children.iter().map(|(pid, _, _)| *pid).collect();
+        let mut remaining: Vec<Pid> = self.children.iter().map(|(pid, _, _, _)| *pid).collect();
 
         loop {
             if shutdown.load(Ordering::Relaxed) || first_exit_code.is_some() {
@@ -191,10 +192,17 @@ impl ProcessGroup {
             match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
                 Ok(WaitStatus::Exited(pid, code)) => {
                     remaining.retain(|p| *p != pid);
-                    if let Some((_, name, started)) =
-                        self.children.iter().find(|(p, _, _)| *p == pid)
+                    if let Some((_, name, started, once)) =
+                        self.children.iter().find(|(p, _, _, _)| *p == pid)
                     {
                         let elapsed = started.elapsed().as_secs_f64();
+                        if *once && code == 0 {
+                            logger
+                                .lock()
+                                .unwrap()
+                                .log_line(name, &format!("[{pid}] completed after {elapsed:.1}s"));
+                            continue;
+                        }
                         logger.lock().unwrap().log_line(
                             name,
                             &format!("[{pid}] exited with code {code} after {elapsed:.1}s"),
@@ -206,8 +214,8 @@ impl ProcessGroup {
                 }
                 Ok(WaitStatus::Signaled(pid, sig, _)) => {
                     remaining.retain(|p| *p != pid);
-                    if let Some((_, name, started)) =
-                        self.children.iter().find(|(p, _, _)| *p == pid)
+                    if let Some((_, name, started, _)) =
+                        self.children.iter().find(|(p, _, _, _)| *p == pid)
                     {
                         let elapsed = started.elapsed().as_secs_f64();
                         logger.lock().unwrap().log_line(
@@ -221,7 +229,7 @@ impl ProcessGroup {
                 }
                 Ok(WaitStatus::StillAlive) => {
                     self.try_accept_new(&rx, &shutdown, &logger);
-                    for (pid, _, _) in &self.children {
+                    for (pid, _, _, _) in &self.children {
                         if !remaining.contains(pid) {
                             remaining.push(*pid);
                         }
@@ -232,7 +240,7 @@ impl ProcessGroup {
                 Err(nix::errno::Errno::ECHILD) => {
                     self.try_accept_new(&rx, &shutdown, &logger);
                     if !self.children.is_empty() {
-                        remaining = self.children.iter().map(|(pid, _, _)| *pid).collect();
+                        remaining = self.children.iter().map(|(pid, _, _, _)| *pid).collect();
                         continue;
                     }
                     if self.pending_deps.load(Ordering::Relaxed) == 0 {

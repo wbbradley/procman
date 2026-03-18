@@ -35,6 +35,8 @@ pub enum FifoMessage {
         env: Option<HashMap<String, String>>,
         #[serde(default)]
         depends: Option<Vec<DependencyDef>>,
+        #[serde(default)]
+        once: Option<bool>,
     },
     Shutdown {
         #[serde(default)]
@@ -55,6 +57,7 @@ impl FifoMessage {
                 run,
                 env,
                 depends,
+                once,
             } => {
                 let tokens = shell_words::split(&run)
                     .with_context(|| format!("parsing run command for {name}"))?;
@@ -84,6 +87,7 @@ impl FifoMessage {
                     program,
                     args,
                     depends,
+                    once: once.unwrap_or(false),
                 }))
             }
             FifoMessage::Shutdown { user, message } => {
@@ -465,6 +469,34 @@ mod tests {
                 assert_eq!(c2.name, "worker.1");
             }
             _ => panic!("expected Spawn commands"),
+        }
+
+        server.stop();
+    }
+
+    #[test]
+    fn fifo_receives_once_flag() {
+        let path = test_fifo_path("once_flag");
+        let (tx, rx) = mpsc::channel();
+        let logger = make_logger();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server = FifoServer::start(path.clone(), tx, Arc::clone(&shutdown), logger).unwrap();
+
+        {
+            let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"run","name":"migrate","run":"echo done","once":true}}"#
+            )
+            .unwrap();
+        }
+
+        let cmd = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        match cmd {
+            SupervisorCommand::Spawn(config) => {
+                assert!(config.once);
+            }
+            _ => panic!("expected Spawn"),
         }
 
         server.stop();

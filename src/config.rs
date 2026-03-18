@@ -9,6 +9,7 @@ pub struct ProcessConfig {
     pub program: String,
     pub args: Vec<String>,
     pub depends: Vec<Dependency>,
+    pub once: bool,
 }
 
 #[derive(Clone)]

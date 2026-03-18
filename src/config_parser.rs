@@ -10,6 +10,7 @@ struct YamlProcessDef {
     env: Option<HashMap<String, String>>,
     run: String,
     depends: Option<Vec<DependencyDef>>,
+    once: Option<bool>,
 }
 
 pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
@@ -54,6 +55,7 @@ pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
             program,
             args,
             depends,
+            once: def.once.unwrap_or(false),
         });
     }
 
@@ -90,6 +92,7 @@ mod tests {
         assert_eq!(configs[0].program, "echo");
         assert_eq!(configs[0].args, vec!["hello"]);
         assert!(configs[0].depends.is_empty());
+        assert!(!configs[0].once);
     }
 
     #[test]
@@ -189,5 +192,13 @@ mod tests {
     fn parse_missing_run_returns_error() {
         let path = write_yaml("web:\n  env:\n    FOO: bar\n");
         assert!(parse(&path).is_err());
+    }
+
+    #[test]
+    fn parse_with_once_flag() {
+        let path = write_yaml("migrate:\n  run: echo done\n  once: true\n");
+        let configs = parse(&path).unwrap();
+        assert_eq!(configs.len(), 1);
+        assert!(configs[0].once);
     }
 }
