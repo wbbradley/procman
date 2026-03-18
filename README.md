@@ -8,28 +8,42 @@ A foreman-like process supervisor written in Rust. Reads a `Procfile`, spawns al
 
 ```
 cargo install --path .
-procman [OPTIONS] [PROCFILE]
 ```
 
-Defaults to `Procfile` in the current directory if no path is given.
+### `procman run` — run all Procfile commands
 
-### Server mode
-
-Run procman with a named FIFO to accept new process commands at runtime:
-
-```
-procman --server /tmp/procman.fifo
+```bash
+procman run              # uses ./Procfile
+procman run myapp.proc   # custom Procfile path
 ```
 
-### Client mode
+Bare `procman` with no subcommand is equivalent to `procman run`.
 
-Send a command to a running procman server:
+### `procman serve` — accept dynamic commands via a FIFO
 
+```bash
+procman serve /tmp/myapp.fifo &
 ```
-procman --client /tmp/procman.fifo "redis-server --port 6380"
+
+Runs all Procfile commands and listens on a named FIFO for dynamically added commands. The FIFO is created automatically and removed on exit.
+
+### `procman start` — send a command to a running server
+
+```bash
+procman start /tmp/myapp.fifo "redis-server --port 6380"
 ```
 
-The server parses the command line using the same rules as Procfile entries (including environment variable substitution) and spawns it into the existing process group.
+Opens the FIFO for writing and sends the command line. Fails immediately if no server is listening. The server parses the command using the same rules as Procfile entries (including env var substitution).
+
+### Scripted service bringup
+
+The `serve`/`start` pattern enables imperative orchestration — start a supervisor, wait for dependencies to become healthy, then add dependent services:
+
+```bash
+procman serve /tmp/myapp.fifo &
+while ! curl -sf http://localhost:8080/health; do sleep 1; done
+procman start /tmp/myapp.fifo "worker process-jobs"
+```
 
 An advisory `flock` on the Procfile prevents multiple instances from managing the same file simultaneously.
 

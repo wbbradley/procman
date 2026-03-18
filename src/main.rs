@@ -7,27 +7,63 @@ mod signal;
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use nix::fcntl::{Flock, FlockArg};
 
 #[derive(Parser)]
-#[command(version)]
+#[command(
+    version,
+    about = "A process supervisor for Procfile-based workflows",
+    after_help = "\
+EXAMPLES:
+    # Run all Procfile commands (default)
+    procman run
+
+    # Accept dynamic commands via a FIFO
+    procman serve /tmp/myapp.fifo &
+
+    # Scripted service bringup — wait for health, then add a worker
+    while ! curl -sf http://localhost:8080/health; do sleep 1; done
+    procman start /tmp/myapp.fifo \"worker process-jobs\""
+)]
 struct Cli {
-    /// Path to Procfile
-    #[arg(default_value = "Procfile")]
-    procfile: String,
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
 
-    /// Run in server mode, listening on the named FIFO
-    #[arg(short, long)]
-    server: Option<String>,
+#[derive(Subcommand)]
+enum Commands {
+    /// Spawn all Procfile commands and wait for exit or signal
+    Run {
+        /// Path to Procfile
+        #[arg(default_value = "Procfile")]
+        procfile: String,
+    },
 
-    /// Send a command to a running server via the named FIFO
-    #[arg(short, long, conflicts_with = "server")]
-    client: Option<String>,
+    /// Run Procfile commands and listen on a FIFO for dynamically added commands
+    ///
+    /// Scripts can use `procman start` to send commands to this instance,
+    /// enabling imperative service bringup — start a database, poll until
+    /// healthy, then add dependent services.
+    Serve {
+        /// Path to Procfile
+        #[arg(default_value = "Procfile")]
+        procfile: String,
+        /// Path for the named FIFO (created automatically, removed on exit)
+        fifo: String,
+    },
 
-    /// Command string to send (used with --client)
-    #[arg(requires = "client")]
-    command: Option<String>,
+    /// Send a command to a running `procman serve` instance
+    ///
+    /// Opens the FIFO for writing and sends the command line. Fails immediately
+    /// if no server is listening. The server parses the command using the same
+    /// rules as Procfile entries (including env var substitution).
+    Start {
+        /// Path to the FIFO of the running server
+        fifo: String,
+        /// Command line to send (e.g. "redis-server --port 6380")
+        command: String,
+    },
 }
 
 fn run_client(fifo_path: &str, command: &str) -> Result<()> {
@@ -50,25 +86,18 @@ fn run_client(fifo_path: &str, command: &str) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-
-    if let Some(ref fifo_path) = cli.client {
-        let command = cli.command.as_deref().unwrap_or("");
-        return run_client(fifo_path, command);
-    }
-
-    let lock_file =
-        std::fs::File::open(&cli.procfile).with_context(|| format!("opening {}", cli.procfile))?;
+fn run_supervisor(procfile_path: String, fifo_path: Option<String>) -> Result<()> {
+    let lock_file = std::fs::File::open(&procfile_path)
+        .with_context(|| format!("opening {}", procfile_path))?;
     let _lock = Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(|(_, errno)| {
         anyhow::anyhow!(
             "another procman instance appears to be running (could not lock {}): {}",
-            cli.procfile,
+            procfile_path,
             errno
         )
     })?;
 
-    let (procfile, parser) = procfile::parse(&cli.procfile)?;
+    let (procfile, parser) = procfile::parse(&procfile_path)?;
 
     let shutdown = signal::setup()?;
 
@@ -77,7 +106,7 @@ fn main() -> Result<()> {
 
     let (tx, rx) = mpsc::channel::<procfile::Command>();
 
-    let fifo_server = if let Some(ref fifo_path) = cli.server {
+    let fifo_server = if let Some(ref fifo_path) = fifo_path {
         let parser = Arc::new(Mutex::new(parser));
         Some(fifo::FifoServer::start(
             fifo_path.clone(),
@@ -99,6 +128,20 @@ fn main() -> Result<()> {
     }
 
     std::process::exit(exit_code);
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    let command = cli.command.unwrap_or(Commands::Run {
+        procfile: "Procfile".to_string(),
+    });
+
+    match command {
+        Commands::Start { fifo, command } => run_client(&fifo, &command),
+        Commands::Run { procfile } => run_supervisor(procfile, None),
+        Commands::Serve { procfile, fifo } => run_supervisor(procfile, Some(fifo)),
+    }
 }
 
 #[cfg(test)]
