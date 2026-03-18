@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.2.0] - 2026-03-17
+
+### Breaking Changes
+- `procfile::parse()` now returns `(Procfile, CommandParser)` instead of just `Procfile`
+- `ProcessGroup::wait_and_shutdown()` requires two additional parameters: `mpsc::Receiver<Command>` and `Arc<Mutex<Logger>>`
+- Procfile command-line tokenization now uses POSIX shell quoting (`shell_words`) instead of naive whitespace splitting; quoted strings are handled correctly but Procfiles relying on the old literal behavior may parse differently
+
+### Added
+- Server mode (`--server` / `-s`): run with a named FIFO that accepts new process commands at runtime
+- Client mode (`--client` / `-c`): send a command string to a running server via its FIFO
+- Advisory `flock` on the Procfile to prevent multiple instances managing the same file
+- `--version` flag via clap
+- `CommandParser` type for parsing individual command lines into `Command` values
+- `Logger::add_process()` for registering new process names after startup
+- Unit and integration tests for FIFO server/client and Procfile parsing
+
+### Changed
+- CLI parsing switched from raw `std::env::args()` to clap derive API
+- `ProcessGroup` supports dynamic process spawning via mpsc channel
+
 ## 0.1.0
 
 - Initial release of procman, a foreman-like process supervisor

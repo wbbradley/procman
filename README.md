@@ -8,10 +8,30 @@ A foreman-like process supervisor written in Rust. Reads a `Procfile`, spawns al
 
 ```
 cargo install --path .
-procman [Procfile]
+procman [OPTIONS] [PROCFILE]
 ```
 
 Defaults to `Procfile` in the current directory if no path is given.
+
+### Server mode
+
+Run procman with a named FIFO to accept new process commands at runtime:
+
+```
+procman --server /tmp/procman.fifo
+```
+
+### Client mode
+
+Send a command to a running procman server:
+
+```
+procman --client /tmp/procman.fifo "redis-server --port 6380"
+```
+
+The server parses the command line using the same rules as Procfile entries (including environment variable substitution) and spawns it into the existing process group.
+
+An advisory `flock` on the Procfile prevents multiple instances from managing the same file simultaneously.
 
 ## Procfile Format
 
