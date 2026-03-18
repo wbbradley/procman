@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0] - 2026-03-18
+
+### Breaking Changes
+- Default config file is now `procman.yaml` (was `Procfile`).
+- Removed legacy text Procfile format; only YAML config files are supported.
+- Log directory moved from `./logs/` to `./procman-logs/` and is wiped clean at the start of each session.
+
+### Changed
+- CLI positional argument renamed from `procfile` to `config` in `run` and `serve` subcommands.
+
+### Removed
+- Legacy text Procfile parser and fallback logic.
+- Legacy text format documentation from README.
+
 ## [0.4.0] - 2026-03-18
 
 ### Added
