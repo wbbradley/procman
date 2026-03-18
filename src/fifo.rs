@@ -274,7 +274,6 @@ mod tests {
         let server =
             FifoServer::start(path.clone(), tx, parser, Arc::clone(&shutdown), logger).unwrap();
 
-        thread::sleep(Duration::from_millis(50));
         server.stop();
         assert!(!std::path::Path::new(&path).exists());
     }

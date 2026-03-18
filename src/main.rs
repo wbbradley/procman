@@ -121,6 +121,18 @@ mod tests {
             .to_string()
     }
 
+    /// Retry run_client until the reader thread is blocked in File::open.
+    /// Each failed attempt (ENXIO) is a no-op; the first success writes exactly once.
+    fn run_client_until_ready(path: &str, command: &str) {
+        for _ in 0..100_000 {
+            if run_client(path, command).is_ok() {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        panic!("run_client never succeeded — reader never became ready");
+    }
+
     #[test]
     fn run_client_writes_command() {
         use std::io::Read;
@@ -141,8 +153,7 @@ mod tests {
             buf
         });
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        run_client(&path, "sleep 123").unwrap();
+        run_client_until_ready(&path, "sleep 123");
 
         let received = reader.join().unwrap();
         assert_eq!(received, "sleep 123\n");
@@ -208,8 +219,7 @@ mod tests {
         )
         .unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        run_client(&fifo_path, "cat /etc/hostname").unwrap();
+        run_client_until_ready(&fifo_path, "cat /etc/hostname");
 
         let cmd = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
         assert_eq!(cmd.program, "cat");
