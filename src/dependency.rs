@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    config::{Dependency, ProcessConfig},
+    config::{Dependency, ProcessConfig, SupervisorCommand},
     log::Logger,
 };
 
@@ -119,7 +119,7 @@ fn wait_for_dependencies(
 
 pub fn spawn_waiter(
     config: ProcessConfig,
-    tx: mpsc::Sender<ProcessConfig>,
+    tx: mpsc::Sender<SupervisorCommand>,
     shutdown: Arc<AtomicBool>,
     logger: Arc<Mutex<Logger>>,
     pending: Arc<AtomicUsize>,
@@ -144,7 +144,7 @@ pub fn spawn_waiter(
                 .lock()
                 .unwrap()
                 .log_line(&name, "all dependencies satisfied, starting");
-            let _ = tx.send(config);
+            let _ = tx.send(SupervisorCommand::Spawn(config));
         } else if !shutdown.load(Ordering::Relaxed) {
             // Dependency timed out — trigger shutdown
             shutdown.store(true, Ordering::Relaxed);
@@ -236,7 +236,10 @@ mod tests {
         std::fs::write(&path, "").unwrap();
 
         let received = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(received.name, "waiter");
+        match received {
+            SupervisorCommand::Spawn(config) => assert_eq!(config.name, "waiter"),
+            _ => panic!("expected Spawn"),
+        }
         assert_eq!(pending.load(Ordering::Relaxed), 0);
 
         std::fs::remove_file(&path).unwrap();

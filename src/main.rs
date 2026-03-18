@@ -1,4 +1,3 @@
-mod command_parser;
 mod config;
 mod config_parser;
 mod dependency;
@@ -28,6 +27,9 @@ EXAMPLES:
     # Scripted service bringup — wait for health, then add a worker
     while ! curl -sf http://localhost:8080/health; do sleep 1; done
     procman start /tmp/myapp.fifo \"redis-server --port 6380\"
+
+    # Gracefully shut down a running server
+    procman stop /tmp/myapp.fifo
 
 SIGNALS:
     On SIGINT or SIGTERM, all children receive SIGTERM. After a 2-second
@@ -62,9 +64,8 @@ enum Commands {
 
     /// Send a command to a running `procman serve` instance
     ///
-    /// Opens the FIFO for writing and sends the command line. Fails immediately
-    /// if no server is listening. The server parses the command using the same
-    /// rules as command lines (including env var substitution).
+    /// Opens the FIFO for writing and sends the command as a JSON message.
+    /// Fails immediately if no server is listening.
     Start {
         /// Path to the FIFO of the running server
         fifo: String,
@@ -72,9 +73,40 @@ enum Commands {
         /// basename (e.g. "redis-server --port 6380" runs as "redis-server")
         command: String,
     },
+
+    /// Send a shutdown command to a running `procman serve` instance
+    Stop {
+        /// Path to the FIFO of the running server
+        fifo: String,
+    },
 }
 
-fn run_client(fifo_path: &str, command: &str) -> Result<()> {
+fn build_run_message(command: &str) -> Result<String> {
+    let tokens =
+        shell_words::split(command).with_context(|| format!("parsing command: {command}"))?;
+    anyhow::ensure!(!tokens.is_empty(), "empty command");
+    let name = std::path::Path::new(&tokens[0])
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| tokens[0].clone());
+    let msg = fifo::FifoMessage::Run {
+        name,
+        run: command.to_string(),
+        env: None,
+        depends: None,
+    };
+    Ok(serde_json::to_string(&msg)?)
+}
+
+fn build_shutdown_message() -> String {
+    let msg = fifo::FifoMessage::Shutdown {
+        user: std::env::var("USER").ok(),
+        message: Some("User-initiated via CLI".to_string()),
+    };
+    serde_json::to_string(&msg).unwrap()
+}
+
+fn write_to_fifo(fifo_path: &str, payload: &str) -> Result<()> {
     use std::io::Write;
 
     use nix::{
@@ -90,7 +122,7 @@ fn run_client(fifo_path: &str, command: &str) -> Result<()> {
     .map_err(|_| anyhow::anyhow!("no procman server listening on {fifo_path}"))?;
 
     let mut file = std::fs::File::from(fd);
-    writeln!(file, "{command}")?;
+    writeln!(file, "{payload}")?;
     Ok(())
 }
 
@@ -106,7 +138,6 @@ fn run_supervisor(config_path: String, fifo_path: Option<String>) -> Result<()> 
     })?;
 
     let configs = config_parser::parse(&config_path)?;
-    let parser = command_parser::CommandParser::new();
 
     let shutdown = signal::setup()?;
 
@@ -120,14 +151,12 @@ fn run_supervisor(config_path: String, fifo_path: Option<String>) -> Result<()> 
         &format!("started with {} process(es), mode={mode}", configs.len()),
     );
 
-    let (tx, rx) = mpsc::channel::<config::ProcessConfig>();
+    let (tx, rx) = mpsc::channel::<config::SupervisorCommand>();
 
     let fifo_server = if let Some(ref fifo_path) = fifo_path {
-        let parser = Arc::new(Mutex::new(parser));
         let server = fifo::FifoServer::start(
             fifo_path.clone(),
             tx.clone(),
-            parser,
             Arc::clone(&shutdown),
             Arc::clone(&logger),
         )?;
@@ -164,7 +193,14 @@ fn main() -> Result<()> {
     });
 
     match command {
-        Commands::Start { fifo, command } => run_client(&fifo, &command),
+        Commands::Start { fifo, command } => {
+            let payload = build_run_message(&command)?;
+            write_to_fifo(&fifo, &payload)
+        }
+        Commands::Stop { fifo } => {
+            let payload = build_shutdown_message();
+            write_to_fifo(&fifo, &payload)
+        }
         Commands::Run { config } => run_supervisor(config, None),
         Commands::Serve { config, fifo } => run_supervisor(config, Some(fifo)),
     }
@@ -190,23 +226,23 @@ mod tests {
             .to_string()
     }
 
-    /// Retry run_client until the reader thread is blocked in File::open.
+    /// Retry write_to_fifo until the reader thread is blocked in File::open.
     /// Each failed attempt (ENXIO) is a no-op; the first success writes exactly once.
-    fn run_client_until_ready(path: &str, command: &str) {
+    fn write_to_fifo_until_ready(path: &str, payload: &str) {
         for _ in 0..100_000 {
-            if run_client(path, command).is_ok() {
+            if write_to_fifo(path, payload).is_ok() {
                 return;
             }
             std::thread::yield_now();
         }
-        panic!("run_client never succeeded — reader never became ready");
+        panic!("write_to_fifo never succeeded — reader never became ready");
     }
 
     #[test]
-    fn run_client_writes_command() {
+    fn write_to_fifo_writes_json() {
         use std::io::Read;
 
-        let path = test_fifo_path("writes_cmd");
+        let path = test_fifo_path("writes_json");
         let _ = std::fs::remove_file(&path);
         nix::unistd::mkfifo(
             path.as_str(),
@@ -222,18 +258,22 @@ mod tests {
             buf
         });
 
-        run_client_until_ready(&path, "sleep 123");
+        let payload = build_run_message("sleep 123").unwrap();
+        write_to_fifo_until_ready(&path, &payload);
 
         let received = reader.join().unwrap();
-        assert_eq!(received, "sleep 123\n");
+        let parsed: serde_json::Value = serde_json::from_str(received.trim()).unwrap();
+        assert_eq!(parsed["type"], "run");
+        assert_eq!(parsed["name"], "sleep");
+        assert_eq!(parsed["run"], "sleep 123");
         std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
-    fn run_client_error_no_fifo() {
+    fn write_to_fifo_error_no_fifo() {
         let path = test_fifo_path("no_fifo");
         let _ = std::fs::remove_file(&path);
-        let result = run_client(&path, "sleep 1");
+        let result = write_to_fifo(&path, "test");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -243,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn run_client_error_no_reader() {
+    fn write_to_fifo_error_no_reader() {
         let path = test_fifo_path("no_reader");
         let _ = std::fs::remove_file(&path);
         nix::unistd::mkfifo(
@@ -252,7 +292,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = run_client(&path, "sleep 1");
+        let result = write_to_fifo(&path, "test");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -272,7 +312,6 @@ mod tests {
         let config_path = dir.join("procman.yaml");
         std::fs::write(&config_path, "placeholder:\n  run: echo placeholder\n").unwrap();
 
-        let parser = Arc::new(Mutex::new(command_parser::CommandParser::new()));
         let log_dir = dir.join("logs");
         let logger = Arc::new(Mutex::new(
             log::Logger::new_for_test(&["fifo".to_string(), "procman".to_string()], log_dir)
@@ -285,17 +324,22 @@ mod tests {
         let server = fifo::FifoServer::start(
             fifo_path.clone(),
             tx,
-            Arc::clone(&parser),
             Arc::clone(&shutdown),
             Arc::clone(&logger),
         )
         .unwrap();
 
-        run_client_until_ready(&fifo_path, "cat /etc/hostname");
+        let payload = build_run_message("cat /etc/hostname").unwrap();
+        write_to_fifo_until_ready(&fifo_path, &payload);
 
         let cmd = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
-        assert_eq!(cmd.program, "cat");
-        assert_eq!(cmd.args, vec!["/etc/hostname"]);
+        match cmd {
+            config::SupervisorCommand::Spawn(config) => {
+                assert_eq!(config.program, "cat");
+                assert_eq!(config.args, vec!["/etc/hostname"]);
+            }
+            _ => panic!("expected Spawn"),
+        }
 
         server.stop();
         std::fs::remove_dir_all(&dir).unwrap();

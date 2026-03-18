@@ -1,48 +1,15 @@
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::config::{Dependency, ProcessConfig};
+use crate::config::{Dependency, DependencyDef, ProcessConfig};
 
 #[derive(Deserialize)]
 struct YamlProcessDef {
     env: Option<HashMap<String, String>>,
     run: String,
-    depends: Option<Vec<YamlDependency>>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum YamlDependency {
-    HttpHealthCheck {
-        url: String,
-        code: u16,
-        poll_interval: Option<f64>,
-        timeout_seconds: Option<u64>,
-    },
-    FileExists {
-        path: String,
-    },
-}
-
-impl YamlDependency {
-    fn into_dependency(self) -> Dependency {
-        match self {
-            YamlDependency::HttpHealthCheck {
-                url,
-                code,
-                poll_interval,
-                timeout_seconds,
-            } => Dependency::HttpHealthCheck {
-                url,
-                code,
-                poll_interval: poll_interval.map(Duration::from_secs_f64),
-                timeout: timeout_seconds.map(Duration::from_secs),
-            },
-            YamlDependency::FileExists { path } => Dependency::FileExists { path },
-        }
-    }
+    depends: Option<Vec<DependencyDef>>,
 }
 
 pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
@@ -78,7 +45,7 @@ pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
             .depends
             .unwrap_or_default()
             .into_iter()
-            .map(YamlDependency::into_dependency)
+            .map(DependencyDef::into_dependency)
             .collect();
 
         configs.push(ProcessConfig {
@@ -95,7 +62,10 @@ pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     use super::*;
 

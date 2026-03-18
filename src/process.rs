@@ -22,7 +22,11 @@ use nix::{
     unistd::Pid,
 };
 
-use crate::{config::ProcessConfig, dependency, log::Logger};
+use crate::{
+    config::{ProcessConfig, SupervisorCommand},
+    dependency,
+    log::Logger,
+};
 
 pub struct ProcessGroup {
     pgid: Option<Pid>,
@@ -110,7 +114,7 @@ impl ProcessGroup {
 
     pub fn spawn(
         commands: &[ProcessConfig],
-        tx: mpsc::Sender<ProcessConfig>,
+        tx: mpsc::Sender<SupervisorCommand>,
         shutdown: Arc<AtomicBool>,
         logger: Arc<Mutex<Logger>>,
     ) -> Result<Self> {
@@ -142,14 +146,30 @@ impl ProcessGroup {
         Ok(group)
     }
 
-    fn try_accept_new(&mut self, rx: &mpsc::Receiver<ProcessConfig>, logger: &Arc<Mutex<Logger>>) {
+    fn try_accept_new(
+        &mut self,
+        rx: &mpsc::Receiver<SupervisorCommand>,
+        shutdown: &Arc<AtomicBool>,
+        logger: &Arc<Mutex<Logger>>,
+    ) {
         while let Ok(cmd) = rx.try_recv() {
-            logger.lock().unwrap().add_process(&cmd.name).ok();
-            if let Err(e) = self.spawn_one(&cmd, logger) {
-                logger
-                    .lock()
-                    .unwrap()
-                    .log_line("procman", &format!("error spawning {}: {e}", cmd.name));
+            match cmd {
+                SupervisorCommand::Spawn(config) => {
+                    logger.lock().unwrap().add_process(&config.name).ok();
+                    if let Err(e) = self.spawn_one(&config, logger) {
+                        logger
+                            .lock()
+                            .unwrap()
+                            .log_line("procman", &format!("error spawning {}: {e}", config.name));
+                    }
+                }
+                SupervisorCommand::Shutdown { message } => {
+                    logger
+                        .lock()
+                        .unwrap()
+                        .log_line("procman", &format!("shutdown: {message}"));
+                    shutdown.store(true, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -157,7 +177,7 @@ impl ProcessGroup {
     pub fn wait_and_shutdown(
         mut self,
         shutdown: Arc<AtomicBool>,
-        rx: mpsc::Receiver<ProcessConfig>,
+        rx: mpsc::Receiver<SupervisorCommand>,
         logger: Arc<Mutex<Logger>>,
     ) -> i32 {
         let mut first_exit_code: Option<i32> = None;
@@ -200,7 +220,7 @@ impl ProcessGroup {
                     }
                 }
                 Ok(WaitStatus::StillAlive) => {
-                    self.try_accept_new(&rx, &logger);
+                    self.try_accept_new(&rx, &shutdown, &logger);
                     for (pid, _, _) in &self.children {
                         if !remaining.contains(pid) {
                             remaining.push(*pid);
@@ -210,7 +230,7 @@ impl ProcessGroup {
                     continue;
                 }
                 Err(nix::errno::Errno::ECHILD) => {
-                    self.try_accept_new(&rx, &logger);
+                    self.try_accept_new(&rx, &shutdown, &logger);
                     if !self.children.is_empty() {
                         remaining = self.children.iter().map(|(pid, _, _)| *pid).collect();
                         continue;
