@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1] - 2026-03-18
+
+### Added
+- Combined log file: all formatted log output (the `"name | line"` view shown on stdout) is now also written to `procman-logs/procman.log`, providing a single file with interleaved output from all processes.
+
+### Changed
+- The internal "procman" pseudo-process no longer produces a redundant per-process log file; its output is captured in the combined `procman.log` instead.
+
 ## [0.5.0] - 2026-03-18
 
 ### Breaking Changes

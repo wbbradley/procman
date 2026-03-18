@@ -82,6 +82,7 @@ setup:
 - stderr is merged into stdout per-process.
 - Output is prefixed with the process name, right-aligned and padded.
 - Per-process logs are written to `./procman-logs/<name>.log` (directory is recreated each run).
+- A combined `./procman-logs/procman.log` contains the full interleaved formatted output (same as stdout).
 - On SIGINT or SIGTERM, all children receive SIGTERM. After a 2-second grace period, remaining processes are sent SIGKILL.
 - procman exits with the first child's exit code.
 
