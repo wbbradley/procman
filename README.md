@@ -33,7 +33,15 @@ Runs all procman.yaml commands and listens on a named FIFO for dynamically added
 procman start /tmp/myapp.fifo "redis-server --port 6380"
 ```
 
-Opens the FIFO for writing and sends the command line. Fails immediately if no server is listening. The server parses the command using the same rules as command lines (including env var substitution).
+Opens the FIFO for writing and sends a JSON message. Fails immediately if no server is listening.
+
+### `procman stop` — gracefully shut down a running server
+
+```bash
+procman stop /tmp/myapp.fifo
+```
+
+Sends a shutdown command to the server via the FIFO. The server logs the request and terminates cleanly.
 
 ### Scripted service bringup
 
@@ -55,13 +63,18 @@ web:
     PORT: "3000"
   run: serve --port $PORT
 
-worker:
+migrate:
+  run: db-migrate up
+  once: true
+
+api:
   depends:
+    - process_exited: migrate
     - url: http://localhost:3000/health
       code: 200
-      poll_interval: 2s
-      timeout: 30s
-  run: process-jobs
+      poll_interval: 0.5
+      timeout_seconds: 30
+  run: api-server start
 
 setup:
   depends:
@@ -72,9 +85,11 @@ setup:
 - Each top-level key is a process name.
 - `run` (required): the command to execute (parsed with POSIX shell quoting).
 - `env` (optional): per-process environment variables.
+- `once` (optional): if `true`, the process exits cleanly on success (code 0) without triggering supervisor shutdown.
 - `depends` (optional): list of dependencies that must be satisfied before the process starts.
-  - **HTTP health check**: `url` + `code` (expected status), with optional `poll_interval` and `timeout`.
+  - **HTTP health check**: `url` + `code` (expected status), with optional `poll_interval` and `timeout_seconds`.
   - **File exists**: `path` to a file that must exist.
+  - **Process exited**: `process_exited` names a `once: true` process that must complete successfully before this process starts.
 
 ## Behavior
 

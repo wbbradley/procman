@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0] - 2026-03-18
+
+### Breaking Changes
+- FIFO wire protocol replaced with JSON. Direct FIFO writers (e.g., `echo "command" > /tmp/fifo`) must now send JSON messages (`{"type":"run","name":"...","run":"..."}`). The `procman start` CLI handles this transparently.
+
+### Added
+- `procman stop <FIFO>` subcommand for graceful remote shutdown of a running `procman serve` instance.
+- `once: true` process mode. Run-once processes exit cleanly on success (code 0) without triggering supervisor shutdown. Non-zero exit still triggers shutdown.
+- `process_exited` dependency type. Processes can depend on a `once: true` process completing successfully before starting (e.g., `depends: [{process_exited: migrate}]`).
+
+### Removed
+- Plain-text FIFO protocol and `CommandParser` module (replaced by JSON wire protocol).
+
 ## [0.5.1] - 2026-03-18
 
 ### Added
