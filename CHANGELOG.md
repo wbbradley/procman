@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.1] - 2026-03-17
+
+### Fixed
+- Fix `procman serve` panic caused by a required positional argument (`fifo`) appearing after an optional one (`procfile`). The `serve` subcommand was unusable in 0.3.0.
+
+### Changed
+- `procman serve` now takes `<FIFO> [PROCFILE]` (required arg first) instead of the broken `[PROCFILE] <FIFO>` order from 0.3.0.
+- Improved help text: clearer `serve` and `start` descriptions, added `SIGNALS` section documenting shutdown behavior.
+- Updated examples to use unambiguous command (`redis-server --port 6380` instead of `worker process-jobs`).
+
 ## [0.3.0] - 2026-03-17
 
 ### Breaking Changes
