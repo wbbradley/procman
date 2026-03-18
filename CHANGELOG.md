@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0] - 2026-03-17
+
+### Breaking Changes
+- CLI: replaced `--server`/`--client` flags with `run`/`serve`/`start` subcommands. Scripts using `--server <FIFO>` must switch to `procman serve <FIFO>`. Scripts using `--client <FIFO> <CMD>` must switch to `procman start <FIFO> <CMD>`. Bare `procman` (no arguments) continues to work unchanged.
+
+### Added
+- Each subcommand has dedicated `--help` with contextual documentation
+- Top-level `--help` includes an `EXAMPLES` section showing the scripted service bringup pattern
+
+### Changed
+- `serve` takes `procfile` as the first positional and `fifo` as the second (previously Procfile was top-level and FIFO was via `--server`)
+
+### Removed
+- `-s`/`--server` and `-c`/`--client` flags
+
 ## [0.2.0] - 2026-03-17
 
 ### Breaking Changes
