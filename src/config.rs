@@ -23,6 +23,9 @@ pub enum Dependency {
     FileExists {
         path: String,
     },
+    ProcessExited {
+        name: String,
+    },
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -36,6 +39,9 @@ pub enum DependencyDef {
     },
     FileExists {
         path: String,
+    },
+    ProcessExited {
+        process_exited: String,
     },
 }
 
@@ -54,6 +60,9 @@ impl DependencyDef {
                 timeout: timeout_seconds.map(Duration::from_secs),
             },
             DependencyDef::FileExists { path } => Dependency::FileExists { path },
+            DependencyDef::ProcessExited { process_exited } => Dependency::ProcessExited {
+                name: process_exited,
+            },
         }
     }
 }

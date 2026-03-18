@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::Path,
     sync::{
         Arc,
@@ -15,13 +16,18 @@ use crate::{
     log::Logger,
 };
 
-fn check(dep: &Dependency, agent: &ureq::Agent) -> bool {
+fn check(
+    dep: &Dependency,
+    agent: &ureq::Agent,
+    exit_registry: &Arc<Mutex<HashSet<String>>>,
+) -> bool {
     match dep {
         Dependency::HttpHealthCheck { url, code, .. } => match agent.get(url).call() {
             Ok(response) => response.status() == *code,
             Err(_) => false,
         },
         Dependency::FileExists { path } => Path::new(path).exists(),
+        Dependency::ProcessExited { name } => exit_registry.lock().unwrap().contains(name),
     }
 }
 
@@ -31,6 +37,7 @@ fn poll_interval(dep: &Dependency) -> Duration {
             poll_interval.unwrap_or(Duration::from_secs(1))
         }
         Dependency::FileExists { .. } => Duration::from_secs(1),
+        Dependency::ProcessExited { .. } => Duration::from_millis(100),
     }
 }
 
@@ -38,6 +45,7 @@ fn timeout(dep: &Dependency) -> Duration {
     match dep {
         Dependency::HttpHealthCheck { timeout, .. } => timeout.unwrap_or(Duration::from_secs(60)),
         Dependency::FileExists { .. } => Duration::from_secs(60),
+        Dependency::ProcessExited { .. } => Duration::from_secs(60),
     }
 }
 
@@ -49,6 +57,9 @@ fn description(dep: &Dependency) -> String {
         Dependency::FileExists { path } => {
             format!("file exists: {path}")
         }
+        Dependency::ProcessExited { name } => {
+            format!("process exited: {name}")
+        }
     }
 }
 
@@ -56,6 +67,7 @@ fn wait_for_dependencies(
     config: &ProcessConfig,
     shutdown: &AtomicBool,
     logger: &Arc<Mutex<Logger>>,
+    exit_registry: &Arc<Mutex<HashSet<String>>>,
 ) -> bool {
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
@@ -88,7 +100,7 @@ fn wait_for_dependencies(
                 return false;
             }
 
-            if check(dep, &agent) {
+            if check(dep, &agent, exit_registry) {
                 satisfied[i] = true;
                 let desc = description(dep);
                 logger
@@ -123,6 +135,7 @@ pub fn spawn_waiter(
     shutdown: Arc<AtomicBool>,
     logger: Arc<Mutex<Logger>>,
     pending: Arc<AtomicUsize>,
+    exit_registry: Arc<Mutex<HashSet<String>>>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let name = config.name.clone();
@@ -139,7 +152,7 @@ pub fn spawn_waiter(
             ),
         );
 
-        if wait_for_dependencies(&config, &shutdown, &logger) {
+        if wait_for_dependencies(&config, &shutdown, &logger, &exit_registry) {
             logger
                 .lock()
                 .unwrap()
@@ -159,6 +172,10 @@ mod tests {
     use std::{collections::HashMap, sync::atomic::AtomicUsize};
 
     use super::*;
+
+    fn make_exit_registry() -> Arc<Mutex<HashSet<String>>> {
+        Arc::new(Mutex::new(HashSet::new()))
+    }
 
     static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -204,9 +221,10 @@ mod tests {
                 .build(),
         );
 
-        assert!(!check(&dep, &agent));
+        let exit_registry = make_exit_registry();
+        assert!(!check(&dep, &agent, &exit_registry));
         std::fs::write(&path, "").unwrap();
-        assert!(check(&dep, &agent));
+        assert!(check(&dep, &agent, &exit_registry));
         std::fs::remove_file(&path).unwrap();
     }
 
@@ -230,6 +248,7 @@ mod tests {
             Arc::clone(&shutdown),
             logger,
             Arc::clone(&pending),
+            make_exit_registry(),
         );
 
         // Create the file after a short delay
@@ -268,6 +287,7 @@ mod tests {
             Arc::clone(&shutdown),
             logger,
             Arc::clone(&pending),
+            make_exit_registry(),
         );
         handle.join().unwrap();
 
@@ -295,12 +315,65 @@ mod tests {
             Arc::clone(&shutdown),
             logger,
             Arc::clone(&pending),
+            make_exit_registry(),
         );
 
         // Set shutdown immediately
         shutdown.store(true, Ordering::Relaxed);
         handle.join().unwrap();
 
+        assert_eq!(pending.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn process_exited_check_returns_false_then_true() {
+        let dep = Dependency::ProcessExited {
+            name: "migrate".to_string(),
+        };
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build(),
+        );
+        let exit_registry = make_exit_registry();
+
+        assert!(!check(&dep, &agent, &exit_registry));
+        exit_registry.lock().unwrap().insert("migrate".to_string());
+        assert!(check(&dep, &agent, &exit_registry));
+    }
+
+    #[test]
+    fn wait_for_process_exited_dependency() {
+        let config = make_config(
+            "api",
+            vec![Dependency::ProcessExited {
+                name: "migrate".to_string(),
+            }],
+        );
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let logger = make_logger(&["api"]);
+        let pending = Arc::new(AtomicUsize::new(1));
+        let exit_registry = make_exit_registry();
+
+        let _handle = spawn_waiter(
+            config,
+            tx,
+            Arc::clone(&shutdown),
+            logger,
+            Arc::clone(&pending),
+            Arc::clone(&exit_registry),
+        );
+
+        // Insert after short delay
+        thread::sleep(Duration::from_millis(100));
+        exit_registry.lock().unwrap().insert("migrate".to_string());
+
+        let received = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        match received {
+            SupervisorCommand::Spawn(config) => assert_eq!(config.name, "api"),
+            _ => panic!("expected Spawn"),
+        }
         assert_eq!(pending.load(Ordering::Relaxed), 0);
     }
 }

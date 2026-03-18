@@ -195,6 +195,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_with_process_exited_dependency() {
+        let path = write_yaml(
+            "api:\n  depends:\n    - process_exited: db-migrate\n  run: api-server start\n",
+        );
+        let configs = parse(&path).unwrap();
+        assert_eq!(configs[0].depends.len(), 1);
+        match &configs[0].depends[0] {
+            Dependency::ProcessExited { name } => {
+                assert_eq!(name, "db-migrate");
+            }
+            _ => panic!("expected ProcessExited"),
+        }
+    }
+
+    #[test]
     fn parse_with_once_flag() {
         let path = write_yaml("migrate:\n  run: echo done\n  once: true\n");
         let configs = parse(&path).unwrap();

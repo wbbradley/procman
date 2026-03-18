@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io::BufRead,
     os::unix::process::CommandExt,
     process::Stdio,
@@ -34,6 +35,7 @@ pub struct ProcessGroup {
     reader_threads: Vec<thread::JoinHandle<()>>,
     waiter_threads: Vec<thread::JoinHandle<()>>,
     pending_deps: Arc<AtomicUsize>,
+    exit_registry: Arc<Mutex<HashSet<String>>>,
 }
 
 impl ProcessGroup {
@@ -125,6 +127,7 @@ impl ProcessGroup {
             reader_threads: Vec::new(),
             waiter_threads: Vec::new(),
             pending_deps: Arc::new(AtomicUsize::new(0)),
+            exit_registry: Arc::new(Mutex::new(HashSet::new())),
         };
 
         for cmd in commands {
@@ -139,6 +142,7 @@ impl ProcessGroup {
                     Arc::clone(&shutdown),
                     Arc::clone(&logger),
                     Arc::clone(&group.pending_deps),
+                    Arc::clone(&group.exit_registry),
                 ));
             }
         }
@@ -197,6 +201,7 @@ impl ProcessGroup {
                     {
                         let elapsed = started.elapsed().as_secs_f64();
                         if *once && code == 0 {
+                            self.exit_registry.lock().unwrap().insert(name.clone());
                             logger
                                 .lock()
                                 .unwrap()
