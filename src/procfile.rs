@@ -2,16 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 
-pub struct Procfile {
-    pub commands: Vec<Command>,
-}
-
-pub struct Command {
-    pub env: HashMap<String, String>,
-    pub program: String,
-    pub args: Vec<String>,
-    pub name: String,
-}
+use crate::config::ProcessConfig;
 
 pub struct CommandParser {
     base_env: HashMap<String, String>,
@@ -19,6 +10,13 @@ pub struct CommandParser {
 }
 
 impl CommandParser {
+    pub fn new() -> Self {
+        Self {
+            base_env: std::env::vars().collect(),
+            name_counts: HashMap::new(),
+        }
+    }
+
     /// Build base_env and collect command lines from a Procfile.
     /// Returns (parser, command_line_strings).
     fn from_procfile_globals(path: &str) -> Result<(Self, Vec<String>)> {
@@ -63,8 +61,8 @@ impl CommandParser {
         ))
     }
 
-    /// Parse a single command line string into a Command.
-    pub fn parse_command_line(&mut self, line: &str) -> Result<Command> {
+    /// Parse a single command line string into a ProcessConfig.
+    pub fn parse_command_line(&mut self, line: &str) -> Result<ProcessConfig> {
         let tokens = shell_words::split(line).unwrap_or_default();
         if tokens.is_empty() {
             bail!("empty command line");
@@ -114,11 +112,12 @@ impl CommandParser {
         };
         *self.name_counts.get_mut(&basename).unwrap() += 1;
 
-        Ok(Command {
+        Ok(ProcessConfig {
+            name,
             env,
             program,
             args,
-            name,
+            depends: Vec::new(),
         })
     }
 }
@@ -169,19 +168,19 @@ fn substitute(s: &str, env: &HashMap<String, String>) -> Result<String> {
     Ok(result)
 }
 
-pub fn parse(path: &str) -> Result<(Procfile, CommandParser)> {
+pub fn parse(path: &str) -> Result<(Vec<ProcessConfig>, CommandParser)> {
     let (mut parser, command_lines) = CommandParser::from_procfile_globals(path)?;
 
-    let mut commands = Vec::new();
+    let mut configs = Vec::new();
     for line in &command_lines {
-        commands.push(parser.parse_command_line(line)?);
+        configs.push(parser.parse_command_line(line)?);
     }
 
-    if commands.is_empty() {
+    if configs.is_empty() {
         bail!("no commands found in {path}");
     }
 
-    Ok((Procfile { commands }, parser))
+    Ok((configs, parser))
 }
 
 #[cfg(test)]
@@ -242,10 +241,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("Procfile");
         std::fs::write(&path, "echo hello\necho world\n").unwrap();
-        let (procfile, _parser) = parse(path.to_str().unwrap()).unwrap();
-        assert_eq!(procfile.commands.len(), 2);
-        assert_eq!(procfile.commands[0].name, "echo");
-        assert_eq!(procfile.commands[1].name, "echo.1");
+        let (configs, _parser) = parse(path.to_str().unwrap()).unwrap();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].name, "echo");
+        assert_eq!(configs[1].name, "echo.1");
+        assert!(configs[0].depends.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

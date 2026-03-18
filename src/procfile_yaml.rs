@@ -1,0 +1,224 @@
+use std::{collections::HashMap, time::Duration};
+
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+
+use crate::config::{Dependency, ProcessConfig};
+
+#[derive(Deserialize)]
+struct YamlProcessDef {
+    env: Option<HashMap<String, String>>,
+    run: String,
+    depends: Option<Vec<YamlDependency>>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum YamlDependency {
+    HttpHealthCheck {
+        url: String,
+        code: u16,
+        poll_interval: Option<f64>,
+        timeout_seconds: Option<u64>,
+    },
+    FileExists {
+        path: String,
+    },
+}
+
+impl YamlDependency {
+    fn into_dependency(self) -> Dependency {
+        match self {
+            YamlDependency::HttpHealthCheck {
+                url,
+                code,
+                poll_interval,
+                timeout_seconds,
+            } => Dependency::HttpHealthCheck {
+                url,
+                code,
+                poll_interval: poll_interval.map(Duration::from_secs_f64),
+                timeout: timeout_seconds.map(Duration::from_secs),
+            },
+            YamlDependency::FileExists { path } => Dependency::FileExists { path },
+        }
+    }
+}
+
+pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
+    let content = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
+    let defs: HashMap<String, YamlProcessDef> =
+        serde_yaml::from_str(&content).with_context(|| format!("parsing YAML from {path}"))?;
+
+    if defs.is_empty() {
+        bail!("no processes found in {path}");
+    }
+
+    let base_env: HashMap<String, String> = std::env::vars().collect();
+
+    let mut configs = Vec::new();
+    for (name, def) in defs {
+        let mut env = base_env.clone();
+        if let Some(proc_env) = def.env {
+            for (k, v) in proc_env {
+                env.insert(k, v);
+            }
+        }
+
+        let tokens = shell_words::split(&def.run)
+            .with_context(|| format!("parsing run command for process {name}"))?;
+        if tokens.is_empty() {
+            bail!("empty run command for process {name}");
+        }
+
+        let program = tokens[0].clone();
+        let args = tokens[1..].to_vec();
+
+        let depends = def
+            .depends
+            .unwrap_or_default()
+            .into_iter()
+            .map(YamlDependency::into_dependency)
+            .collect();
+
+        configs.push(ProcessConfig {
+            name,
+            env,
+            program,
+            args,
+            depends,
+        });
+    }
+
+    Ok(configs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_yaml(content: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "procman_yaml_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Procfile.yaml");
+        std::fs::write(&path, content).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn parse_simple_run() {
+        let path = write_yaml("web:\n  run: echo hello\n");
+        let configs = parse(&path).unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "web");
+        assert_eq!(configs[0].program, "echo");
+        assert_eq!(configs[0].args, vec!["hello"]);
+        assert!(configs[0].depends.is_empty());
+    }
+
+    #[test]
+    fn parse_with_env() {
+        let path = write_yaml(
+            "worker:\n  env:\n    RUST_LOG: debug\n    PORT: \"3000\"\n  run: my-server --port 3000\n",
+        );
+        let configs = parse(&path).unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "worker");
+        assert_eq!(configs[0].env.get("RUST_LOG").unwrap(), "debug");
+        assert_eq!(configs[0].env.get("PORT").unwrap(), "3000");
+        assert_eq!(configs[0].program, "my-server");
+        assert_eq!(configs[0].args, vec!["--port", "3000"]);
+    }
+
+    #[test]
+    fn parse_with_http_dependency() {
+        let path = write_yaml(
+            "api:\n  depends:\n    - url: http://localhost:8080/health\n      code: 200\n  run: worker start\n",
+        );
+        let configs = parse(&path).unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].depends.len(), 1);
+        match &configs[0].depends[0] {
+            Dependency::HttpHealthCheck {
+                url,
+                code,
+                poll_interval,
+                timeout,
+            } => {
+                assert_eq!(url, "http://localhost:8080/health");
+                assert_eq!(*code, 200);
+                assert!(poll_interval.is_none());
+                assert!(timeout.is_none());
+            }
+            _ => panic!("expected HttpHealthCheck"),
+        }
+    }
+
+    #[test]
+    fn parse_with_file_dependency() {
+        let path =
+            write_yaml("api:\n  depends:\n    - path: /tmp/ready.flag\n  run: worker start\n");
+        let configs = parse(&path).unwrap();
+        assert_eq!(configs[0].depends.len(), 1);
+        match &configs[0].depends[0] {
+            Dependency::FileExists { path } => {
+                assert_eq!(path, "/tmp/ready.flag");
+            }
+            _ => panic!("expected FileExists"),
+        }
+    }
+
+    #[test]
+    fn parse_with_http_dependency_options() {
+        let path = write_yaml(
+            "api:\n  depends:\n    - url: http://localhost:8080/\n      code: 200\n      poll_interval: 0.5\n      timeout_seconds: 30\n  run: worker\n",
+        );
+        let configs = parse(&path).unwrap();
+        match &configs[0].depends[0] {
+            Dependency::HttpHealthCheck {
+                poll_interval,
+                timeout,
+                ..
+            } => {
+                assert_eq!(*poll_interval, Some(Duration::from_millis(500)));
+                assert_eq!(*timeout, Some(Duration::from_secs(30)));
+            }
+            _ => panic!("expected HttpHealthCheck"),
+        }
+    }
+
+    #[test]
+    fn parse_multiple_processes() {
+        let path = write_yaml("web:\n  run: echo web\nworker:\n  run: echo worker\n");
+        let configs = parse(&path).unwrap();
+        assert_eq!(configs.len(), 2);
+        let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"web"));
+        assert!(names.contains(&"worker"));
+    }
+
+    #[test]
+    fn parse_invalid_yaml_returns_error() {
+        let path = write_yaml("not: valid: yaml: [[[");
+        assert!(parse(&path).is_err());
+    }
+
+    #[test]
+    fn parse_empty_processes_returns_error() {
+        let path = write_yaml("{}");
+        assert!(parse(&path).is_err());
+    }
+
+    #[test]
+    fn parse_missing_run_returns_error() {
+        let path = write_yaml("web:\n  env:\n    FOO: bar\n");
+        assert!(parse(&path).is_err());
+    }
+}

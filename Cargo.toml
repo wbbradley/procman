@@ -13,5 +13,7 @@ categories = ["command-line-utilities"]
 anyhow = "1.0.102"
 clap = { version = "4.6.0", features = ["derive"] }
 nix = { version = "0.31.2", features = ["signal", "process", "fs"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_yaml = "0.9.34"
 shell-words = "1.1.1"
 signal-hook = "0.4.3"

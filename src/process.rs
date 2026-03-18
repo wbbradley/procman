@@ -22,7 +22,7 @@ use nix::{
     unistd::Pid,
 };
 
-use crate::{log::Logger, procfile::Command};
+use crate::{config::ProcessConfig, log::Logger};
 
 pub struct ProcessGroup {
     pgid: Option<Pid>,
@@ -31,7 +31,7 @@ pub struct ProcessGroup {
 }
 
 impl ProcessGroup {
-    fn spawn_one(&mut self, cmd: &Command, logger: &Arc<Mutex<Logger>>) -> Result<Pid> {
+    fn spawn_one(&mut self, cmd: &ProcessConfig, logger: &Arc<Mutex<Logger>>) -> Result<Pid> {
         let mut child_cmd = std::process::Command::new(&cmd.program);
         child_cmd.args(&cmd.args);
         child_cmd.env_clear();
@@ -102,7 +102,7 @@ impl ProcessGroup {
         Ok(pid)
     }
 
-    pub fn spawn(commands: &[Command], logger: Arc<Mutex<Logger>>) -> Result<Self> {
+    pub fn spawn(commands: &[ProcessConfig], logger: Arc<Mutex<Logger>>) -> Result<Self> {
         let mut group = Self {
             pgid: None,
             children: Vec::new(),
@@ -116,7 +116,7 @@ impl ProcessGroup {
         Ok(group)
     }
 
-    fn try_accept_new(&mut self, rx: &mpsc::Receiver<Command>, logger: &Arc<Mutex<Logger>>) {
+    fn try_accept_new(&mut self, rx: &mpsc::Receiver<ProcessConfig>, logger: &Arc<Mutex<Logger>>) {
         while let Ok(cmd) = rx.try_recv() {
             logger.lock().unwrap().add_process(&cmd.name).ok();
             if let Err(e) = self.spawn_one(&cmd, logger) {
@@ -128,7 +128,7 @@ impl ProcessGroup {
     pub fn wait_and_shutdown(
         mut self,
         shutdown: Arc<AtomicBool>,
-        rx: mpsc::Receiver<Command>,
+        rx: mpsc::Receiver<ProcessConfig>,
         logger: Arc<Mutex<Logger>>,
     ) -> i32 {
         let mut first_exit_code: Option<i32> = None;

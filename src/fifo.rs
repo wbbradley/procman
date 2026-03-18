@@ -18,10 +18,7 @@ use nix::{
     unistd::mkfifo,
 };
 
-use crate::{
-    log::Logger,
-    procfile::{Command, CommandParser},
-};
+use crate::{config::ProcessConfig, log::Logger, procfile::CommandParser};
 
 pub struct FifoServer {
     path: String,
@@ -32,7 +29,7 @@ pub struct FifoServer {
 impl FifoServer {
     pub fn start(
         path: String,
-        tx: mpsc::Sender<Command>,
+        tx: mpsc::Sender<ProcessConfig>,
         parser: Arc<Mutex<CommandParser>>,
         shutdown: Arc<AtomicBool>,
         logger: Arc<Mutex<Logger>>,
@@ -58,7 +55,7 @@ impl FifoServer {
 
     fn reader_loop(
         path: &str,
-        tx: &mpsc::Sender<Command>,
+        tx: &mpsc::Sender<ProcessConfig>,
         parser: &Arc<Mutex<CommandParser>>,
         shutdown: &Arc<AtomicBool>,
         logger: &Arc<Mutex<Logger>>,

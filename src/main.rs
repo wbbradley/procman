@@ -1,7 +1,9 @@
+mod config;
 mod fifo;
 mod log;
 mod process;
 mod procfile;
+mod procfile_yaml;
 mod signal;
 
 use std::sync::{Arc, Mutex, mpsc};
@@ -102,14 +104,17 @@ fn run_supervisor(procfile_path: String, fifo_path: Option<String>) -> Result<()
         )
     })?;
 
-    let (procfile, parser) = procfile::parse(&procfile_path)?;
+    let (configs, parser) = match procfile_yaml::parse(&procfile_path) {
+        Ok(configs) => (configs, procfile::CommandParser::new()),
+        Err(_) => procfile::parse(&procfile_path)?,
+    };
 
     let shutdown = signal::setup()?;
 
-    let names: Vec<String> = procfile.commands.iter().map(|c| c.name.clone()).collect();
+    let names: Vec<String> = configs.iter().map(|c| c.name.clone()).collect();
     let logger = Arc::new(Mutex::new(log::Logger::new(&names)?));
 
-    let (tx, rx) = mpsc::channel::<procfile::Command>();
+    let (tx, rx) = mpsc::channel::<config::ProcessConfig>();
 
     let fifo_server = if let Some(ref fifo_path) = fifo_path {
         let parser = Arc::new(Mutex::new(parser));
@@ -125,7 +130,7 @@ fn run_supervisor(procfile_path: String, fifo_path: Option<String>) -> Result<()
         None
     };
 
-    let group = process::ProcessGroup::spawn(&procfile.commands, Arc::clone(&logger))?;
+    let group = process::ProcessGroup::spawn(&configs, Arc::clone(&logger))?;
     let exit_code = group.wait_and_shutdown(shutdown, rx, logger);
 
     if let Some(server) = fifo_server {
