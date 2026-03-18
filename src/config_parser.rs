@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::config::{Dependency, DependencyDef, ProcessConfig};
+use crate::config::{DependencyDef, ProcessConfig};
 
 #[derive(Deserialize)]
 struct YamlProcessDef {
@@ -70,6 +70,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::config::Dependency;
 
     static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
