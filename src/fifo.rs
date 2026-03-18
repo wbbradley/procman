@@ -112,14 +112,18 @@ impl FifoServer {
 
     pub fn stop(mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        // Open FIFO for writing (non-blocking) to unblock the reader if it's in open().
-        // If the reader already exited, the open fails with ENXIO — that's fine.
-        let _ = open(
-            self.path.as_str(),
-            OFlag::O_WRONLY | OFlag::O_NONBLOCK,
-            Mode::empty(),
-        );
+        // Retry the wake-up open until the reader thread exits. The reader may be
+        // between its shutdown check and File::open, so a single O_WRONLY attempt
+        // can race (ENXIO if no reader is blocked yet). Retrying closes the window.
         if let Some(thread) = self.thread.take() {
+            while !thread.is_finished() {
+                let _ = open(
+                    self.path.as_str(),
+                    OFlag::O_WRONLY | OFlag::O_NONBLOCK,
+                    Mode::empty(),
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
             let _ = thread.join();
         }
         let _ = std::fs::remove_file(&self.path);
@@ -153,8 +157,9 @@ mod tests {
         let path = dir.join("Procfile");
         std::fs::write(&path, "echo placeholder\n").unwrap();
         let (_pf, parser) = crate::procfile::parse(path.to_str().unwrap()).unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
-        let logger = Logger::new(&["fifo".to_string()]).unwrap();
+        let log_dir = dir.join("logs");
+        let logger =
+            Logger::new_for_test(&["fifo".to_string(), "procman".to_string()], log_dir).unwrap();
         (Arc::new(Mutex::new(parser)), Arc::new(Mutex::new(logger)))
     }
 

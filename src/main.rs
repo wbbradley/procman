@@ -276,7 +276,11 @@ mod tests {
 
         let (_pf, parser) = procfile::parse(procfile_path.to_str().unwrap()).unwrap();
         let parser = Arc::new(Mutex::new(parser));
-        let logger = Arc::new(Mutex::new(log::Logger::new(&["fifo".to_string()]).unwrap()));
+        let log_dir = dir.join("logs");
+        let logger = Arc::new(Mutex::new(
+            log::Logger::new_for_test(&["fifo".to_string(), "procman".to_string()], log_dir)
+                .unwrap(),
+        ));
 
         let (tx, rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
