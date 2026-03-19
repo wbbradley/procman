@@ -84,6 +84,7 @@ impl FifoMessage {
                     run,
                     depends,
                     once: once.unwrap_or(false),
+                    for_each: None,
                 }))
             }
             FifoMessage::Shutdown { user, message } => {

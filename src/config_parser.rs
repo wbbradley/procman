@@ -4,9 +4,16 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::{
-    config::{DependencyDef, ProcessConfig},
+    config::{DependencyDef, ForEachConfig, ProcessConfig},
     output,
 };
+
+#[derive(Deserialize)]
+struct ForEachDef {
+    glob: String,
+    #[serde(rename = "as")]
+    variable: String,
+}
 
 #[derive(Deserialize)]
 struct YamlProcessDef {
@@ -14,6 +21,7 @@ struct YamlProcessDef {
     run: String,
     depends: Option<Vec<DependencyDef>>,
     once: Option<bool>,
+    for_each: Option<ForEachDef>,
 }
 
 pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
@@ -61,6 +69,10 @@ pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
             run: def.run,
             depends,
             once: def.once.unwrap_or(false),
+            for_each: def.for_each.map(|fe| ForEachConfig {
+                glob: fe.glob,
+                variable: fe.variable,
+            }),
         });
     }
 
@@ -316,5 +328,36 @@ app:
         assert_eq!(configs.len(), 2);
         let app = configs.iter().find(|c| c.name == "app").unwrap();
         assert_eq!(app.run, "echo ${{ setup.DB_URL }}");
+    }
+
+    #[test]
+    fn parse_for_each_glob() {
+        let yaml = "\
+nodes:
+  for_each:
+    glob: \"/tmp/test-*.yaml\"
+    as: CONFIG_PATH
+  run: echo $CONFIG_PATH
+  once: true
+";
+        let path = write_yaml(yaml);
+        let configs = parse(&path).unwrap();
+        assert_eq!(configs.len(), 1);
+        let fe = configs[0].for_each.as_ref().unwrap();
+        assert_eq!(fe.glob, "/tmp/test-*.yaml");
+        assert_eq!(fe.variable, "CONFIG_PATH");
+        assert!(configs[0].once);
+    }
+
+    #[test]
+    fn parse_for_each_without_as_errors() {
+        let yaml = "\
+nodes:
+  for_each:
+    glob: \"/tmp/test-*.yaml\"
+  run: echo hello
+";
+        let path = write_yaml(yaml);
+        assert!(parse(&path).is_err());
     }
 }

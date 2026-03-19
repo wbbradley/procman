@@ -4,12 +4,19 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
+pub struct ForEachConfig {
+    pub glob: String,
+    pub variable: String,
+}
+
+#[derive(Clone)]
 pub struct ProcessConfig {
     pub name: String,
     pub env: HashMap<String, String>,
     pub run: String,
     pub depends: Vec<Dependency>,
     pub once: bool,
+    pub for_each: Option<ForEachConfig>,
 }
 
 #[derive(Clone)]

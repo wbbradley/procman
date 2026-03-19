@@ -285,6 +285,7 @@ mod tests {
             run: "true".to_string(),
             depends,
             once: false,
+            for_each: None,
         }
     }
 

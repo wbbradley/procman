@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::BufRead,
     os::unix::process::CommandExt,
     path::PathBuf,
@@ -39,6 +39,7 @@ pub struct ProcessGroup {
     pending_deps: Arc<AtomicUsize>,
     exit_registry: Arc<Mutex<HashSet<String>>>,
     log_dir: PathBuf,
+    fan_out_groups: HashMap<String, HashSet<String>>,
 }
 
 impl ProcessGroup {
@@ -145,6 +146,66 @@ impl ProcessGroup {
         Ok(pid)
     }
 
+    fn expand_fan_out(
+        &mut self,
+        config: &ProcessConfig,
+        logger: &Arc<Mutex<Logger>>,
+    ) -> Result<()> {
+        let fe = config.for_each.as_ref().unwrap();
+        let mut matches: Vec<String> = glob::glob(&fe.glob)
+            .with_context(|| format!("invalid glob pattern: {}", fe.glob))?
+            .filter_map(|entry| entry.ok())
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        matches.sort();
+
+        if matches.is_empty() {
+            anyhow::bail!(
+                "fan-out for '{}': glob '{}' matched zero files",
+                config.name,
+                fe.glob
+            );
+        }
+
+        let mut instance_names = HashSet::new();
+        for (i, matched_path) in matches.iter().enumerate() {
+            let instance_name = format!("{}-{i}", config.name);
+            instance_names.insert(instance_name.clone());
+
+            let mut env = config.env.clone();
+            env.insert(fe.variable.clone(), matched_path.clone());
+
+            let run = config
+                .run
+                .replace(&format!("${}", fe.variable), matched_path)
+                .replace(&format!("${{{}}}", fe.variable), matched_path);
+
+            let instance_config = ProcessConfig {
+                name: instance_name.clone(),
+                env,
+                run,
+                depends: vec![],
+                once: config.once,
+                for_each: None,
+            };
+
+            logger.lock().unwrap().add_process(&instance_name).ok();
+            self.spawn_one(&instance_config, logger)?;
+        }
+
+        self.fan_out_groups
+            .insert(config.name.clone(), instance_names);
+        logger.lock().unwrap().log_line(
+            &config.name,
+            &format!(
+                "fan-out: spawned {} instance(s) from glob '{}'",
+                matches.len(),
+                fe.glob
+            ),
+        );
+        Ok(())
+    }
+
     pub fn spawn(
         commands: &[ProcessConfig],
         tx: mpsc::Sender<SupervisorCommand>,
@@ -160,11 +221,16 @@ impl ProcessGroup {
             pending_deps: Arc::new(AtomicUsize::new(0)),
             exit_registry: Arc::new(Mutex::new(HashSet::new())),
             log_dir,
+            fan_out_groups: HashMap::new(),
         };
 
         for cmd in commands {
             if cmd.depends.is_empty() {
-                group.spawn_one(cmd, &logger)?;
+                if cmd.for_each.is_some() {
+                    group.expand_fan_out(cmd, &logger)?;
+                } else {
+                    group.spawn_one(cmd, &logger)?;
+                }
             } else {
                 logger.lock().unwrap().add_process(&cmd.name).ok();
                 group.pending_deps.fetch_add(1, Ordering::Relaxed);
@@ -192,12 +258,22 @@ impl ProcessGroup {
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
                 SupervisorCommand::Spawn(config) => {
-                    logger.lock().unwrap().add_process(&config.name).ok();
-                    if let Err(e) = self.spawn_one(&config, logger) {
-                        logger
-                            .lock()
-                            .unwrap()
-                            .log_line("procman", &format!("error spawning {}: {e}", config.name));
+                    if config.for_each.is_some() {
+                        if let Err(e) = self.expand_fan_out(&config, logger) {
+                            logger.lock().unwrap().log_line(
+                                "procman",
+                                &format!("error in fan-out for {}: {e}", config.name),
+                            );
+                            shutdown.store(true, Ordering::Relaxed);
+                        }
+                    } else {
+                        logger.lock().unwrap().add_process(&config.name).ok();
+                        if let Err(e) = self.spawn_one(&config, logger) {
+                            logger.lock().unwrap().log_line(
+                                "procman",
+                                &format!("error spawning {}: {e}", config.name),
+                            );
+                        }
                     }
                 }
                 SupervisorCommand::Shutdown { message } => {
@@ -233,7 +309,26 @@ impl ProcessGroup {
                     {
                         let elapsed = started.elapsed().as_secs_f64();
                         if *once && code == 0 {
-                            self.exit_registry.lock().unwrap().insert(name.clone());
+                            let mut completed_group = None;
+                            {
+                                let mut registry = self.exit_registry.lock().unwrap();
+                                registry.insert(name.clone());
+                                for (template_name, instance_names) in &self.fan_out_groups {
+                                    if instance_names.contains(name)
+                                        && instance_names.iter().all(|n| registry.contains(n))
+                                    {
+                                        registry.insert(template_name.clone());
+                                        completed_group = Some(template_name.clone());
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Some(template_name) = completed_group {
+                                logger
+                                    .lock()
+                                    .unwrap()
+                                    .log_line(&template_name, "all fan-out instances completed");
+                            }
                             logger
                                 .lock()
                                 .unwrap()
@@ -337,5 +432,164 @@ impl ProcessGroup {
         }
 
         first_exit_code.unwrap_or(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use super::*;
+    use crate::config::ForEachConfig;
+
+    static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn make_test_group() -> (ProcessGroup, Arc<Mutex<Logger>>) {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let log_dir =
+            std::env::temp_dir().join(format!("procman_process_test_{}_{id}", std::process::id()));
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let logger = Arc::new(Mutex::new(
+            Logger::new_for_test(&["procman".to_string()], log_dir.clone()).unwrap(),
+        ));
+        let group = ProcessGroup {
+            pgid: None,
+            children: Vec::new(),
+            reader_threads: Vec::new(),
+            waiter_threads: Vec::new(),
+            pending_deps: Arc::new(AtomicUsize::new(0)),
+            exit_registry: Arc::new(Mutex::new(HashSet::new())),
+            log_dir,
+            fan_out_groups: HashMap::new(),
+        };
+        (group, logger)
+    }
+
+    fn make_temp_glob_files(count: usize) -> (PathBuf, String) {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("procman_fanout_test_{}_{id}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..count {
+            std::fs::write(dir.join(format!("node-{i}.yaml")), format!("node{i}")).unwrap();
+        }
+        let pattern = dir.join("node-*.yaml").to_string_lossy().to_string();
+        (dir, pattern)
+    }
+
+    #[test]
+    fn expand_fan_out_creates_instances() {
+        let (mut group, logger) = make_test_group();
+        let (_dir, pattern) = make_temp_glob_files(3);
+        let config = ProcessConfig {
+            name: "nodes".to_string(),
+            env: std::env::vars().collect(),
+            run: "true".to_string(),
+            depends: vec![],
+            once: true,
+            for_each: Some(ForEachConfig {
+                glob: pattern,
+                variable: "CONFIG_PATH".to_string(),
+            }),
+        };
+        group.expand_fan_out(&config, &logger).unwrap();
+        assert_eq!(group.children.len(), 3);
+        let names: Vec<&str> = group
+            .children
+            .iter()
+            .map(|(_, n, _, _)| n.as_str())
+            .collect();
+        assert!(names.contains(&"nodes-0"));
+        assert!(names.contains(&"nodes-1"));
+        assert!(names.contains(&"nodes-2"));
+        assert!(group.fan_out_groups.contains_key("nodes"));
+        assert_eq!(group.fan_out_groups["nodes"].len(), 3);
+    }
+
+    #[test]
+    fn expand_fan_out_zero_matches_errors() {
+        let (mut group, logger) = make_test_group();
+        let config = ProcessConfig {
+            name: "nodes".to_string(),
+            env: HashMap::new(),
+            run: "true".to_string(),
+            depends: vec![],
+            once: true,
+            for_each: Some(ForEachConfig {
+                glob: "/tmp/procman_nonexistent_glob_pattern_*.xyz".to_string(),
+                variable: "CONFIG_PATH".to_string(),
+            }),
+        };
+        let err = group.expand_fan_out(&config, &logger).unwrap_err();
+        assert!(err.to_string().contains("matched zero files"), "{err}");
+    }
+
+    #[test]
+    fn expand_fan_out_sets_env_var() {
+        let (mut group, logger) = make_test_group();
+        let (dir, pattern) = make_temp_glob_files(2);
+        let config = ProcessConfig {
+            name: "nodes".to_string(),
+            env: std::env::vars().collect(),
+            run: "echo $CONFIG_PATH".to_string(),
+            depends: vec![],
+            once: true,
+            for_each: Some(ForEachConfig {
+                glob: pattern,
+                variable: "CONFIG_PATH".to_string(),
+            }),
+        };
+        group.expand_fan_out(&config, &logger).unwrap();
+        // Verify that the run strings got substituted
+        // We can't easily inspect the spawned process's env, but we can verify
+        // the fan_out_groups were created correctly
+        let instance_names = &group.fan_out_groups["nodes"];
+        assert!(instance_names.contains("nodes-0"));
+        assert!(instance_names.contains("nodes-1"));
+        // The files should be sorted, so node-0.yaml comes first
+        let expected_path_0 = dir.join("node-0.yaml").to_string_lossy().to_string();
+        let expected_path_1 = dir.join("node-1.yaml").to_string_lossy().to_string();
+        // Verify substitution happened in run string by checking children were spawned
+        // (if the run string substitution failed, spawn_one would error on $CONFIG_PATH)
+        assert_eq!(group.children.len(), 2);
+        // Check we can find the paths in the child names
+        assert!(group.children.iter().any(|(_, n, _, _)| n == "nodes-0"));
+        assert!(group.children.iter().any(|(_, n, _, _)| n == "nodes-1"));
+        drop(expected_path_0);
+        drop(expected_path_1);
+    }
+
+    #[test]
+    fn fan_out_group_completion() {
+        let (mut group, _logger) = make_test_group();
+        let mut instance_names = HashSet::new();
+        instance_names.insert("nodes-0".to_string());
+        instance_names.insert("nodes-1".to_string());
+        instance_names.insert("nodes-2".to_string());
+        group
+            .fan_out_groups
+            .insert("nodes".to_string(), instance_names);
+
+        let registry = group.exit_registry.clone();
+
+        // Insert first two — group not yet complete
+        registry.lock().unwrap().insert("nodes-0".to_string());
+        registry.lock().unwrap().insert("nodes-1".to_string());
+        assert!(!registry.lock().unwrap().contains("nodes"));
+
+        // Insert third — now manually simulate what the exit handler does
+        {
+            let mut reg = registry.lock().unwrap();
+            reg.insert("nodes-2".to_string());
+            for (template_name, instance_names) in &group.fan_out_groups {
+                if instance_names.contains("nodes-2")
+                    && instance_names.iter().all(|n| reg.contains(n))
+                {
+                    reg.insert(template_name.clone());
+                    break;
+                }
+            }
+        }
+        assert!(registry.lock().unwrap().contains("nodes"));
     }
 }

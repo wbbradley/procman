@@ -169,6 +169,7 @@ mod tests {
             run: run.to_string(),
             depends,
             once,
+            for_each: None,
         }
     }
 
