@@ -18,7 +18,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install mdbook
         run: |
           tag=$(curl -sS https://api.github.com/repos/rust-lang/mdBook/releases/latest | jq -r .tag_name)
@@ -27,7 +27,7 @@ jobs:
       - name: Build book
         run: mdbook build docs
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           path: docs/book
 
