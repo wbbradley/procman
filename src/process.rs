@@ -32,7 +32,6 @@ use crate::{
 };
 
 pub struct ProcessGroup {
-    pgid: Option<Pid>,
     children: Vec<(Pid, String, Instant, bool)>,
     reader_threads: Vec<thread::JoinHandle<()>>,
     waiter_threads: Vec<thread::JoinHandle<()>>,
@@ -78,28 +77,11 @@ impl ProcessGroup {
         child_cmd.stdout(Stdio::piped());
         child_cmd.stderr(Stdio::piped());
 
-        let pgid_val = self.pgid;
         unsafe {
             child_cmd.pre_exec(move || {
-                // Merge stderr into stdout
                 let r = libc::dup2(1, 2);
                 if r == -1 {
                     return Err(std::io::Error::last_os_error());
-                }
-                // Set process group
-                match pgid_val {
-                    Some(pg) => {
-                        let r = libc::setpgid(0, pg.as_raw());
-                        if r == -1 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                    }
-                    None => {
-                        let r = libc::setpgid(0, 0);
-                        if r == -1 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                    }
                 }
                 Ok(())
             });
@@ -110,9 +92,6 @@ impl ProcessGroup {
             .with_context(|| format!("spawning {}", cmd.name))?;
 
         let pid = Pid::from_raw(child.id() as i32);
-        if self.pgid.is_none() {
-            self.pgid = Some(pid);
-        }
 
         let name = cmd.name.clone();
         self.children
@@ -214,7 +193,6 @@ impl ProcessGroup {
     ) -> Result<Self> {
         let log_dir = logger.lock().unwrap().log_dir().to_path_buf();
         let mut group = Self {
-            pgid: None,
             children: Vec::new(),
             reader_threads: Vec::new(),
             waiter_threads: Vec::new(),
@@ -388,37 +366,35 @@ impl ProcessGroup {
             }
         }
 
-        // SIGTERM the group
-        if let Some(pgid) = self.pgid {
-            let _ = signal::killpg(pgid, Signal::SIGTERM);
+        // SIGTERM each remaining child
+        for pid in &remaining {
+            let _ = signal::kill(*pid, Signal::SIGTERM);
+        }
 
-            // Poll for up to 2 seconds
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while !remaining.is_empty() && Instant::now() < deadline {
-                match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
-                    Ok(WaitStatus::Exited(pid, code)) => {
-                        remaining.retain(|p| *p != pid);
-                        if first_exit_code.is_none() {
-                            first_exit_code = Some(code);
-                        }
-                    }
-                    Ok(WaitStatus::Signaled(pid, _, _)) => {
-                        remaining.retain(|p| *p != pid);
-                    }
-                    Err(nix::errno::Errno::ECHILD) => break,
-                    _ => {
-                        thread::sleep(Duration::from_millis(50));
+        // Poll for up to 2 seconds
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !remaining.is_empty() && Instant::now() < deadline {
+            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::Exited(pid, code)) => {
+                    remaining.retain(|p| *p != pid);
+                    if first_exit_code.is_none() {
+                        first_exit_code = Some(code);
                     }
                 }
-            }
-
-            // SIGKILL if any remain
-            if !remaining.is_empty() {
-                let _ = signal::killpg(pgid, Signal::SIGKILL);
-                for pid in &remaining {
-                    let _ = waitpid(*pid, None);
+                Ok(WaitStatus::Signaled(pid, _, _)) => {
+                    remaining.retain(|p| *p != pid);
+                }
+                Err(nix::errno::Errno::ECHILD) => break,
+                _ => {
+                    thread::sleep(Duration::from_millis(50));
                 }
             }
+        }
+
+        // SIGKILL any that remain
+        for pid in &remaining {
+            let _ = signal::kill(*pid, Signal::SIGKILL);
+            let _ = waitpid(*pid, None);
         }
 
         // Join reader threads
@@ -453,7 +429,6 @@ mod tests {
             Logger::new_for_test(&["procman".to_string()], log_dir.clone()).unwrap(),
         ));
         let group = ProcessGroup {
-            pgid: None,
             children: Vec::new(),
             reader_threads: Vec::new(),
             waiter_threads: Vec::new(),
