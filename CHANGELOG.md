@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.7.1] - 2026-03-19
+
+### Added
+- Environment variable expansion in dependency paths: `$VAR` and `${VAR}` references are expanded using the process environment (including per-process `env` overrides). Use `$$` for a literal `$`.
+- Documentation site (mdbook) covering introduction, getting started, configuration, dependencies, and templates.
+
 ## [0.7.0] - 2026-03-19
 
 ### Breaking Changes

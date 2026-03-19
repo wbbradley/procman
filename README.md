@@ -102,7 +102,7 @@ nodes:
 - `env` (optional): per-process environment variables (also supports `${{ }}` templates).
 - `once` (optional): if `true`, the process exits cleanly on success (code 0) without triggering supervisor shutdown. Processes can write key-value pairs to `$PROCMAN_OUTPUT` for downstream template resolution.
 - `for_each` (optional): fan-out a template process across glob matches. Requires `glob` (pattern) and `as` (variable name). Each match spawns an instance with the variable set in env and substituted in the run string.
-- `depends` (optional): list of dependencies that must be satisfied before the process starts. Circular dependencies are detected at config parse time.
+- `depends` (optional): list of dependencies that must be satisfied before the process starts. Circular dependencies are detected at config parse time. Dependency paths support `$VAR` and `${VAR}` environment variable expansion (including per-process `env` overrides); use `$$` for a literal `$`.
   - **HTTP health check**: `url` + `code` (expected status), with optional `poll_interval` and `timeout_seconds`.
   - **TCP connect**: `tcp` (address:port), with optional `poll_interval` and `timeout_seconds`.
   - **File exists**: `path` to a file that must exist.
