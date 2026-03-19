@@ -211,6 +211,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_with_tcp_dependency() {
+        let path = write_yaml(
+            "api:\n  depends:\n    - tcp: \"127.0.0.1:50051\"\n  run: api-server start\n",
+        );
+        let configs = parse(&path).unwrap();
+        assert_eq!(configs[0].depends.len(), 1);
+        match &configs[0].depends[0] {
+            Dependency::TcpConnect {
+                address,
+                poll_interval,
+                timeout,
+            } => {
+                assert_eq!(address, "127.0.0.1:50051");
+                assert!(poll_interval.is_none());
+                assert!(timeout.is_none());
+            }
+            _ => panic!("expected TcpConnect"),
+        }
+    }
+
+    #[test]
+    fn parse_with_tcp_dependency_options() {
+        let path = write_yaml(
+            "api:\n  depends:\n    - tcp: \"127.0.0.1:50051\"\n      poll_interval: 0.5\n      timeout_seconds: 30\n  run: api-server start\n",
+        );
+        let configs = parse(&path).unwrap();
+        match &configs[0].depends[0] {
+            Dependency::TcpConnect {
+                address,
+                poll_interval,
+                timeout,
+            } => {
+                assert_eq!(address, "127.0.0.1:50051");
+                assert_eq!(*poll_interval, Some(Duration::from_millis(500)));
+                assert_eq!(*timeout, Some(Duration::from_secs(30)));
+            }
+            _ => panic!("expected TcpConnect"),
+        }
+    }
+
+    #[test]
     fn parse_with_once_flag() {
         let path = write_yaml("migrate:\n  run: echo done\n  once: true\n");
         let configs = parse(&path).unwrap();

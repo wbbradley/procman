@@ -20,6 +20,11 @@ pub enum Dependency {
         poll_interval: Option<Duration>,
         timeout: Option<Duration>,
     },
+    TcpConnect {
+        address: String,
+        poll_interval: Option<Duration>,
+        timeout: Option<Duration>,
+    },
     FileExists {
         path: String,
     },
@@ -34,6 +39,11 @@ pub enum DependencyDef {
     HttpHealthCheck {
         url: String,
         code: u16,
+        poll_interval: Option<f64>,
+        timeout_seconds: Option<u64>,
+    },
+    TcpConnect {
+        tcp: String,
         poll_interval: Option<f64>,
         timeout_seconds: Option<u64>,
     },
@@ -56,6 +66,15 @@ impl DependencyDef {
             } => Dependency::HttpHealthCheck {
                 url,
                 code,
+                poll_interval: poll_interval.map(Duration::from_secs_f64),
+                timeout: timeout_seconds.map(Duration::from_secs),
+            },
+            DependencyDef::TcpConnect {
+                tcp,
+                poll_interval,
+                timeout_seconds,
+            } => Dependency::TcpConnect {
+                address: tcp,
                 poll_interval: poll_interval.map(Duration::from_secs_f64),
                 timeout: timeout_seconds.map(Duration::from_secs),
             },

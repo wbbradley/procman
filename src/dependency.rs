@@ -26,6 +26,17 @@ fn check(
             Ok(response) => response.status() == *code,
             Err(_) => false,
         },
+        Dependency::TcpConnect { address, .. } => {
+            use std::net::ToSocketAddrs;
+            address
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+                .map(|addr| {
+                    std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok()
+                })
+                .unwrap_or(false)
+        }
         Dependency::FileExists { path } => Path::new(path).exists(),
         Dependency::ProcessExited { name } => exit_registry.lock().unwrap().contains(name),
     }
@@ -36,6 +47,9 @@ fn poll_interval(dep: &Dependency) -> Duration {
         Dependency::HttpHealthCheck { poll_interval, .. } => {
             poll_interval.unwrap_or(Duration::from_secs(1))
         }
+        Dependency::TcpConnect { poll_interval, .. } => {
+            poll_interval.unwrap_or(Duration::from_secs(1))
+        }
         Dependency::FileExists { .. } => Duration::from_secs(1),
         Dependency::ProcessExited { .. } => Duration::from_millis(100),
     }
@@ -44,6 +58,7 @@ fn poll_interval(dep: &Dependency) -> Duration {
 fn timeout(dep: &Dependency) -> Duration {
     match dep {
         Dependency::HttpHealthCheck { timeout, .. } => timeout.unwrap_or(Duration::from_secs(60)),
+        Dependency::TcpConnect { timeout, .. } => timeout.unwrap_or(Duration::from_secs(60)),
         Dependency::FileExists { .. } => Duration::from_secs(60),
         Dependency::ProcessExited { .. } => Duration::from_secs(60),
     }
@@ -53,6 +68,9 @@ fn description(dep: &Dependency) -> String {
     match dep {
         Dependency::HttpHealthCheck { url, code, .. } => {
             format!("HTTP {code} from {url}")
+        }
+        Dependency::TcpConnect { address, .. } => {
+            format!("tcp connect: {address}")
         }
         Dependency::FileExists { path } => {
             format!("file exists: {path}")
@@ -340,6 +358,57 @@ mod tests {
         assert!(!check(&dep, &agent, &exit_registry));
         exit_registry.lock().unwrap().insert("migrate".to_string());
         assert!(check(&dep, &agent, &exit_registry));
+    }
+
+    #[test]
+    fn tcp_connect_check_returns_false_for_closed_port() {
+        let dep = Dependency::TcpConnect {
+            address: "127.0.0.1:1".to_string(),
+            poll_interval: None,
+            timeout: None,
+        };
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build(),
+        );
+        let exit_registry = make_exit_registry();
+        assert!(!check(&dep, &agent, &exit_registry));
+    }
+
+    #[test]
+    fn wait_for_tcp_connect_dependency() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let config = make_config(
+            "tcp-waiter",
+            vec![Dependency::TcpConnect {
+                address: addr,
+                poll_interval: None,
+                timeout: None,
+            }],
+        );
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let logger = make_logger(&["tcp-waiter"]);
+        let pending = Arc::new(AtomicUsize::new(1));
+
+        let _handle = spawn_waiter(
+            config,
+            tx,
+            Arc::clone(&shutdown),
+            logger,
+            Arc::clone(&pending),
+            make_exit_registry(),
+        );
+
+        let received = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        match received {
+            SupervisorCommand::Spawn(config) => assert_eq!(config.name, "tcp-waiter"),
+            _ => panic!("expected Spawn"),
+        }
+        assert_eq!(pending.load(Ordering::Relaxed), 0);
     }
 
     #[test]
