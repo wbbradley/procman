@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::{
-    config::{DependencyDef, ForEachConfig, ProcessConfig},
+    config::{Dependency, DependencyDef, ForEachConfig, ProcessConfig},
     output,
 };
 
@@ -77,7 +77,83 @@ pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
     }
 
     output::validate_config_templates(&configs)?;
+    validate_dependency_graph(&configs)?;
     Ok(configs)
+}
+
+fn validate_dependency_graph(configs: &[ProcessConfig]) -> Result<()> {
+    use std::collections::HashSet;
+
+    let names: HashSet<&str> = configs.iter().map(|c| c.name.as_str()).collect();
+    let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
+
+    for config in configs {
+        let deps: Vec<&str> = config
+            .depends
+            .iter()
+            .filter_map(|d| match d {
+                Dependency::ProcessExited { name } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        for dep in &deps {
+            if !names.contains(dep) {
+                bail!(
+                    "process '{}' depends on unknown process '{dep}'",
+                    config.name
+                );
+            }
+        }
+        edges.insert(config.name.as_str(), deps);
+    }
+
+    // DFS cycle detection: 0=white, 1=gray (in stack), 2=black (done)
+    let mut color: HashMap<&str, u8> = names.iter().map(|&n| (n, 0u8)).collect();
+    let mut path: Vec<&str> = Vec::new();
+
+    for &start in &names {
+        if color[start] == 0
+            && let Some(cycle) = dfs_find_cycle(start, &edges, &mut color, &mut path)
+        {
+            bail!("circular dependency: {}", cycle.join(" -> "));
+        }
+    }
+    Ok(())
+}
+
+fn dfs_find_cycle<'a>(
+    node: &'a str,
+    edges: &HashMap<&'a str, Vec<&'a str>>,
+    color: &mut HashMap<&'a str, u8>,
+    path: &mut Vec<&'a str>,
+) -> Option<Vec<String>> {
+    color.insert(node, 1);
+    path.push(node);
+
+    if let Some(neighbors) = edges.get(node) {
+        for &neighbor in neighbors {
+            match color[neighbor] {
+                1 => {
+                    let start = path.iter().position(|&n| n == neighbor).unwrap();
+                    let mut cycle: Vec<String> =
+                        path[start..].iter().map(|s| s.to_string()).collect();
+                    cycle.push(neighbor.to_string());
+                    return Some(cycle);
+                }
+                0 => {
+                    if let Some(cycle) = dfs_find_cycle(neighbor, edges, color, path) {
+                        return Some(cycle);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    color.insert(node, 2);
+    path.pop();
+    None
 }
 
 #[cfg(test)]
@@ -214,11 +290,12 @@ mod tests {
     #[test]
     fn parse_with_process_exited_dependency() {
         let path = write_yaml(
-            "api:\n  depends:\n    - process_exited: db-migrate\n  run: api-server start\n",
+            "api:\n  depends:\n    - process_exited: db-migrate\n  run: api-server start\ndb-migrate:\n  run: echo migrate\n  once: true\n",
         );
         let configs = parse(&path).unwrap();
-        assert_eq!(configs[0].depends.len(), 1);
-        match &configs[0].depends[0] {
+        let api = configs.iter().find(|c| c.name == "api").unwrap();
+        assert_eq!(api.depends.len(), 1);
+        match &api.depends[0] {
             Dependency::ProcessExited { name } => {
                 assert_eq!(name, "db-migrate");
             }
@@ -359,5 +436,95 @@ nodes:
 ";
         let path = write_yaml(yaml);
         assert!(parse(&path).is_err());
+    }
+
+    #[test]
+    fn parse_circular_dependency_detected() {
+        let yaml = "\
+a:
+  depends:
+    - process_exited: b
+  run: echo a
+b:
+  depends:
+    - process_exited: a
+  run: echo b
+";
+        let path = write_yaml(yaml);
+        let err = parse(&path).unwrap_err();
+        assert!(
+            format!("{err}").contains("circular dependency"),
+            "expected circular dependency error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_self_dependency_detected() {
+        let yaml = "\
+a:
+  depends:
+    - process_exited: a
+  run: echo a
+";
+        let path = write_yaml(yaml);
+        let err = parse(&path).unwrap_err();
+        assert!(
+            format!("{err}").contains("circular dependency"),
+            "expected circular dependency error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_three_way_cycle_detected() {
+        let yaml = "\
+a:
+  depends:
+    - process_exited: b
+  run: echo a
+b:
+  depends:
+    - process_exited: c
+  run: echo b
+c:
+  depends:
+    - process_exited: a
+  run: echo c
+";
+        let path = write_yaml(yaml);
+        let err = parse(&path).unwrap_err();
+        assert!(
+            format!("{err}").contains("circular dependency"),
+            "expected circular dependency error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_unknown_process_dependency_errors() {
+        let yaml = "\
+a:
+  depends:
+    - process_exited: nonexistent
+  run: echo a
+";
+        let path = write_yaml(yaml);
+        let err = parse(&path).unwrap_err();
+        assert!(
+            format!("{err}").contains("unknown process"),
+            "expected unknown process error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_valid_dependency_chain_ok() {
+        let yaml = "\
+a:
+  depends:
+    - process_exited: b
+  run: echo a
+b:
+  run: echo b
+";
+        let path = write_yaml(yaml);
+        parse(&path).unwrap();
     }
 }

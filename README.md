@@ -22,23 +22,26 @@ Bare `procman` with no subcommand is equivalent to `procman run`.
 ### `procman serve` — accept dynamic commands via a FIFO
 
 ```bash
-procman serve /tmp/myapp.fifo &
+procman serve &
+procman serve myapp.yaml &    # custom config path
 ```
 
-Runs all procman.yaml commands and listens on a named FIFO for dynamically added commands. The FIFO is created automatically and removed on exit.
+Runs all procman.yaml commands and listens on a named FIFO for dynamically added commands. The FIFO path is derived automatically from the config file path, so you never need to specify it. The FIFO is created automatically and removed on exit.
 
 ### `procman start` — send a command to a running server
 
 ```bash
-procman start /tmp/myapp.fifo "redis-server --port 6380"
+procman start "redis-server --port 6380"
+procman start --config myapp.yaml "redis-server --port 6380"
 ```
 
-Opens the FIFO for writing and sends a JSON message. Fails immediately if no server is listening.
+Opens the FIFO for writing and sends a JSON message. Fails immediately if no server is listening. The FIFO path is derived from the config path, matching the running server.
 
 ### `procman stop` — gracefully shut down a running server
 
 ```bash
-procman stop /tmp/myapp.fifo
+procman stop
+procman stop myapp.yaml
 ```
 
 Sends a shutdown command to the server via the FIFO. The server logs the request and terminates cleanly.
@@ -48,9 +51,9 @@ Sends a shutdown command to the server via the FIFO. The server logs the request
 The `serve`/`start` pattern enables imperative orchestration — start a supervisor, wait for dependencies to become healthy, then add dependent services:
 
 ```bash
-procman serve /tmp/myapp.fifo &
+procman serve &
 while ! curl -sf http://localhost:8080/health; do sleep 1; done
-procman start /tmp/myapp.fifo "redis-server --port 6380"
+procman start "redis-server --port 6380"
 ```
 
 An advisory `flock` on procman.yaml prevents multiple instances from managing the same file simultaneously.

@@ -2,6 +2,7 @@ mod config;
 mod config_parser;
 mod dependency;
 mod fifo;
+mod fifo_path;
 mod log;
 mod output;
 mod process;
@@ -23,14 +24,14 @@ EXAMPLES:
     procman run
 
     # Run procman.yaml commands and accept dynamic additions via a FIFO
-    procman serve /tmp/myapp.fifo &
+    procman serve &
 
     # Scripted service bringup — wait for health, then add a worker
     while ! curl -sf http://localhost:8080/health; do sleep 1; done
-    procman start /tmp/myapp.fifo \"redis-server --port 6380\"
+    procman start \"redis-server --port 6380\"
 
     # Gracefully shut down a running server
-    procman stop /tmp/myapp.fifo
+    procman stop
 
 SIGNALS:
     On SIGINT or SIGTERM, all children receive SIGTERM. After a 2-second
@@ -52,12 +53,9 @@ enum Commands {
 
     /// Run procman.yaml commands and listen on a FIFO for dynamically added commands
     ///
-    /// Starts all commands from procman.yaml, then listens on the given FIFO
-    /// for additional commands sent via `procman start`. The process name is
-    /// derived from the program basename.
+    /// Starts all commands from procman.yaml, then listens on a FIFO (auto-derived
+    /// from the config path) for additional commands sent via `procman start`.
     Serve {
-        /// Path for the named FIFO (created automatically, removed on exit)
-        fifo: String,
         /// Path to config file
         #[arg(default_value = "procman.yaml")]
         config: String,
@@ -65,20 +63,22 @@ enum Commands {
 
     /// Send a command to a running `procman serve` instance
     ///
-    /// Opens the FIFO for writing and sends the command as a JSON message.
-    /// Fails immediately if no server is listening.
+    /// Opens the FIFO (auto-derived from the config path) for writing and sends
+    /// the command as a JSON message. Fails immediately if no server is listening.
     Start {
-        /// Path to the FIFO of the running server
-        fifo: String,
         /// Command line to send — the process name is derived from the program
         /// basename (e.g. "redis-server --port 6380" runs as "redis-server")
         command: String,
+        /// Path to config file
+        #[arg(long, default_value = "procman.yaml")]
+        config: String,
     },
 
     /// Send a shutdown command to a running `procman serve` instance
     Stop {
-        /// Path to the FIFO of the running server
-        fifo: String,
+        /// Path to config file
+        #[arg(default_value = "procman.yaml")]
+        config: String,
     },
 }
 
@@ -195,16 +195,21 @@ fn main() -> Result<()> {
     });
 
     match command {
-        Commands::Start { fifo, command } => {
+        Commands::Start { config, command } => {
+            let fifo = fifo_path::derive_fifo_path(&config)?;
             let payload = build_run_message(&command)?;
-            write_to_fifo(&fifo, &payload)
+            write_to_fifo(fifo.to_str().unwrap(), &payload)
         }
-        Commands::Stop { fifo } => {
+        Commands::Stop { config } => {
+            let fifo = fifo_path::derive_fifo_path(&config)?;
             let payload = build_shutdown_message();
-            write_to_fifo(&fifo, &payload)
+            write_to_fifo(fifo.to_str().unwrap(), &payload)
         }
         Commands::Run { config } => run_supervisor(config, None),
-        Commands::Serve { config, fifo } => run_supervisor(config, Some(fifo)),
+        Commands::Serve { config } => {
+            let fifo = fifo_path::derive_fifo_path(&config)?;
+            run_supervisor(config, Some(fifo.to_str().unwrap().to_string()))
+        }
     }
 }
 

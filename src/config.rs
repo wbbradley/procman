@@ -3,13 +3,13 @@ use std::{collections::HashMap, time::Duration};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ForEachConfig {
     pub glob: String,
     pub variable: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ProcessConfig {
     pub name: String,
     pub env: HashMap<String, String>,
@@ -19,13 +19,13 @@ pub struct ProcessConfig {
     pub for_each: Option<ForEachConfig>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum FileFormat {
     Json,
     Yaml,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Dependency {
     HttpHealthCheck {
         url: String,
