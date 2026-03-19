@@ -1,0 +1,8 @@
+[book]
+authors = ["Will Bradley"]
+language = "en"
+src = "src"
+title = "procman"
+
+[output.html]
+git-repository-url = "https://github.com/wbbradley/procman"
