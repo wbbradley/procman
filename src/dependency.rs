@@ -213,8 +213,7 @@ mod tests {
         ProcessConfig {
             name: name.to_string(),
             env: HashMap::new(),
-            program: "true".to_string(),
-            args: vec![],
+            run: "true".to_string(),
             depends,
             once: false,
         }

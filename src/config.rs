@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct ProcessConfig {
     pub name: String,
     pub env: HashMap<String, String>,
-    pub program: String,
-    pub args: Vec<String>,
+    pub run: String,
     pub depends: Vec<Dependency>,
     pub once: bool,
 }

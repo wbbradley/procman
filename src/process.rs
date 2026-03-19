@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     io::BufRead,
     os::unix::process::CommandExt,
+    path::PathBuf,
     process::Stdio,
     sync::{
         Arc,
@@ -27,6 +28,7 @@ use crate::{
     config::{ProcessConfig, SupervisorCommand},
     dependency,
     log::Logger,
+    output,
 };
 
 pub struct ProcessGroup {
@@ -36,14 +38,42 @@ pub struct ProcessGroup {
     waiter_threads: Vec<thread::JoinHandle<()>>,
     pending_deps: Arc<AtomicUsize>,
     exit_registry: Arc<Mutex<HashSet<String>>>,
+    log_dir: PathBuf,
 }
 
 impl ProcessGroup {
     fn spawn_one(&mut self, cmd: &ProcessConfig, logger: &Arc<Mutex<Logger>>) -> Result<Pid> {
-        let mut child_cmd = std::process::Command::new(&cmd.program);
-        child_cmd.args(&cmd.args);
+        let log_dir = &self.log_dir;
+        let resolve = |proc_name: &str, key: &str| -> Result<String> {
+            let path = log_dir.join(format!("{proc_name}.output"));
+            let outputs = output::parse_output_file(&path)?;
+            outputs.get(key).cloned().ok_or_else(|| {
+                anyhow::anyhow!("output key '{key}' not found in process '{proc_name}'")
+            })
+        };
+
+        // Resolve templates in env values
+        let mut resolved_env = cmd.env.clone();
+        for value in resolved_env.values_mut() {
+            *value = output::resolve_templates(value, &resolve)?;
+        }
+        // Set PROCMAN_OUTPUT
+        let output_path = log_dir.join(format!("{}.output", cmd.name));
+        resolved_env.insert(
+            "PROCMAN_OUTPUT".to_string(),
+            output_path.to_string_lossy().to_string(),
+        );
+
+        // Resolve templates in run string, then shell-split
+        let resolved_run = output::resolve_templates(&cmd.run, &resolve)?;
+        let tokens = shell_words::split(&resolved_run)
+            .with_context(|| format!("parsing run command for {}", cmd.name))?;
+        anyhow::ensure!(!tokens.is_empty(), "empty run command for {}", cmd.name);
+
+        let mut child_cmd = std::process::Command::new(&tokens[0]);
+        child_cmd.args(&tokens[1..]);
         child_cmd.env_clear();
-        child_cmd.envs(&cmd.env);
+        child_cmd.envs(&resolved_env);
         child_cmd.stdout(Stdio::piped());
         child_cmd.stderr(Stdio::piped());
 
@@ -121,6 +151,7 @@ impl ProcessGroup {
         shutdown: Arc<AtomicBool>,
         logger: Arc<Mutex<Logger>>,
     ) -> Result<Self> {
+        let log_dir = logger.lock().unwrap().log_dir().to_path_buf();
         let mut group = Self {
             pgid: None,
             children: Vec::new(),
@@ -128,6 +159,7 @@ impl ProcessGroup {
             waiter_threads: Vec::new(),
             pending_deps: Arc::new(AtomicUsize::new(0)),
             exit_registry: Arc::new(Mutex::new(HashSet::new())),
+            log_dir,
         };
 
         for cmd in commands {

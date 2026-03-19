@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::config::{DependencyDef, ProcessConfig};
+use crate::{
+    config::{DependencyDef, ProcessConfig},
+    output,
+};
 
 #[derive(Deserialize)]
 struct YamlProcessDef {
@@ -33,14 +36,16 @@ pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
             }
         }
 
-        let tokens = shell_words::split(&def.run)
-            .with_context(|| format!("parsing run command for process {name}"))?;
-        if tokens.is_empty() {
+        // Validate non-template runs can be shell-parsed
+        if !def.run.contains("${{") {
+            let tokens = shell_words::split(&def.run)
+                .with_context(|| format!("parsing run command for process {name}"))?;
+            if tokens.is_empty() {
+                bail!("empty run command for process {name}");
+            }
+        } else if def.run.trim().is_empty() {
             bail!("empty run command for process {name}");
         }
-
-        let program = tokens[0].clone();
-        let args = tokens[1..].to_vec();
 
         let depends = def
             .depends
@@ -52,13 +57,13 @@ pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
         configs.push(ProcessConfig {
             name,
             env,
-            program,
-            args,
+            run: def.run,
             depends,
             once: def.once.unwrap_or(false),
         });
     }
 
+    output::validate_config_templates(&configs)?;
     Ok(configs)
 }
 
@@ -90,8 +95,7 @@ mod tests {
         let configs = parse(&path).unwrap();
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name, "web");
-        assert_eq!(configs[0].program, "echo");
-        assert_eq!(configs[0].args, vec!["hello"]);
+        assert_eq!(configs[0].run, "echo hello");
         assert!(configs[0].depends.is_empty());
         assert!(!configs[0].once);
     }
@@ -106,8 +110,7 @@ mod tests {
         assert_eq!(configs[0].name, "worker");
         assert_eq!(configs[0].env.get("RUST_LOG").unwrap(), "debug");
         assert_eq!(configs[0].env.get("PORT").unwrap(), "3000");
-        assert_eq!(configs[0].program, "my-server");
-        assert_eq!(configs[0].args, vec!["--port", "3000"]);
+        assert_eq!(configs[0].run, "my-server --port 3000");
     }
 
     #[test]
@@ -257,5 +260,43 @@ mod tests {
         let configs = parse(&path).unwrap();
         assert_eq!(configs.len(), 1);
         assert!(configs[0].once);
+    }
+
+    #[test]
+    fn parse_with_template_in_env() {
+        let yaml = "\
+setup:
+  run: echo done
+  once: true
+app:
+  depends:
+    - process_exited: setup
+  env:
+    DB_URL: \"${{ setup.DB_URL }}\"
+  run: echo app
+";
+        let path = write_yaml(yaml);
+        let configs = parse(&path).unwrap();
+        assert_eq!(configs.len(), 2);
+        let app = configs.iter().find(|c| c.name == "app").unwrap();
+        assert_eq!(app.env.get("DB_URL").unwrap(), "${{ setup.DB_URL }}");
+    }
+
+    #[test]
+    fn parse_with_template_in_run() {
+        let yaml = "\
+setup:
+  run: echo done
+  once: true
+app:
+  depends:
+    - process_exited: setup
+  run: echo ${{ setup.DB_URL }}
+";
+        let path = write_yaml(yaml);
+        let configs = parse(&path).unwrap();
+        assert_eq!(configs.len(), 2);
+        let app = configs.iter().find(|c| c.name == "app").unwrap();
+        assert_eq!(app.run, "echo ${{ setup.DB_URL }}");
     }
 }

@@ -59,12 +59,9 @@ impl FifoMessage {
                 depends,
                 once,
             } => {
-                let tokens = shell_words::split(&run)
-                    .with_context(|| format!("parsing run command for {name}"))?;
-                anyhow::ensure!(!tokens.is_empty(), "empty run command for {name}");
-
-                let program = tokens[0].clone();
-                let args = tokens[1..].to_vec();
+                if run.trim().is_empty() {
+                    anyhow::bail!("empty run command for {name}");
+                }
 
                 let mut merged_env: HashMap<String, String> = std::env::vars().collect();
                 if let Some(extra) = env {
@@ -84,8 +81,7 @@ impl FifoMessage {
                 Ok(SupervisorCommand::Spawn(ProcessConfig {
                     name: deduped_name,
                     env: merged_env,
-                    program,
-                    args,
+                    run,
                     depends,
                     once: once.unwrap_or(false),
                 }))
@@ -307,8 +303,7 @@ mod tests {
         let cmd = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         match cmd {
             SupervisorCommand::Spawn(config) => {
-                assert_eq!(config.program, "sleep");
-                assert_eq!(config.args, vec!["42"]);
+                assert_eq!(config.run, "sleep 42");
             }
             _ => panic!("expected Spawn"),
         }
@@ -340,9 +335,9 @@ mod tests {
                 SupervisorCommand::Spawn(c2),
                 SupervisorCommand::Spawn(c3),
             ) => {
-                assert_eq!(c1.args, vec!["1"]);
-                assert_eq!(c2.args, vec!["2"]);
-                assert_eq!(c3.args, vec!["3"]);
+                assert_eq!(c1.run, "sleep 1");
+                assert_eq!(c2.run, "sleep 2");
+                assert_eq!(c3.run, "sleep 3");
             }
             _ => panic!("expected Spawn commands"),
         }
@@ -370,8 +365,7 @@ mod tests {
         let cmd = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         match cmd {
             SupervisorCommand::Spawn(config) => {
-                assert_eq!(config.program, "sleep");
-                assert_eq!(config.args, vec!["99"]);
+                assert_eq!(config.run, "sleep 99");
             }
             _ => panic!("expected Spawn"),
         }
@@ -397,8 +391,7 @@ mod tests {
         let cmd = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         match cmd {
             SupervisorCommand::Spawn(config) => {
-                assert_eq!(config.program, "sleep");
-                assert_eq!(config.args, vec!["77"]);
+                assert_eq!(config.run, "sleep 77");
             }
             _ => panic!("expected Spawn"),
         }

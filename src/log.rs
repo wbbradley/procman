@@ -56,6 +56,10 @@ impl Logger {
         Self::with_options(names, log_dir, false, None)
     }
 
+    pub fn log_dir(&self) -> &std::path::Path {
+        &self.log_dir
+    }
+
     pub fn add_process(&mut self, name: &str) -> Result<()> {
         if self.log_files.contains_key(name) {
             return Ok(());

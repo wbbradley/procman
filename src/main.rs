@@ -3,6 +3,7 @@ mod config_parser;
 mod dependency;
 mod fifo;
 mod log;
+mod output;
 mod process;
 mod signal;
 
@@ -336,8 +337,7 @@ mod tests {
         let cmd = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
         match cmd {
             config::SupervisorCommand::Spawn(config) => {
-                assert_eq!(config.program, "cat");
-                assert_eq!(config.args, vec!["/etc/hostname"]);
+                assert_eq!(config.run, "cat /etc/hostname");
             }
             _ => panic!("expected Spawn"),
         }
