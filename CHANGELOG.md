@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.7.0] - 2026-03-19
+
+### Breaking Changes
+- CLI: removed FIFO path argument from `serve`, `start`, and `stop` subcommands. The FIFO path is now automatically derived from the config file path. `procman serve` and `procman stop` take an optional config path (default `procman.yaml`). `procman start` takes the command as a positional arg with an optional `--config` flag.
+
+### Added
+- `TcpConnect` dependency type: wait for a TCP port to become connectable (`tcp: "host:port"`, with optional `poll_interval` and `timeout_seconds`).
+- `FileContainsKey` dependency type: wait for a file to contain a specific key (`file_contains` with `path`, `format` (json/yaml), `key` (dot-path), optional `env` for value extraction).
+- Process output templates: processes receive `PROCMAN_OUTPUT` env var pointing to an output file. Other processes can reference values via `${{ process.KEY }}` in `run` and `env` fields.
+- `for_each` glob fan-out: spawn one process instance per glob match (`for_each: {glob: "...", as: VAR}`). Fan-out group completion is tracked so `process_exited` dependencies on template names work transparently.
+- Circular and unknown dependency detection at config parse time with descriptive error messages.
+- Auto-derived FIFO paths from the canonical config file path.
+
+### Changed
+- Children are now signaled individually at shutdown (per-PID SIGTERM) instead of via process group.
+
+### Fixed
+- `ESRCH` error when a late-spawned process tried to join a process group whose leader had already exited.
+
 ## [0.6.0] - 2026-03-18
 
 ### Breaking Changes
