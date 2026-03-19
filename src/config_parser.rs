@@ -59,7 +59,7 @@ pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
             .depends
             .unwrap_or_default()
             .into_iter()
-            .map(DependencyDef::into_dependency)
+            .map(|d| d.into_dependency(&env))
             .collect::<Result<Vec<_>>>()
             .with_context(|| format!("parsing dependencies for process {name}"))?;
 

@@ -73,7 +73,7 @@ impl FifoMessage {
                 let depends = depends
                     .unwrap_or_default()
                     .into_iter()
-                    .map(DependencyDef::into_dependency)
+                    .map(|d| d.into_dependency(&merged_env))
                     .collect::<Result<Vec<_>>>()?;
 
                 let deduped_name = dedup_name(name, name_counts);

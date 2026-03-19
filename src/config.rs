@@ -92,8 +92,67 @@ pub enum DependencyDef {
     },
 }
 
+fn expand_env_vars(s: &str, env: &HashMap<String, String>) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            match chars.peek() {
+                Some('$') => {
+                    chars.next();
+                    result.push('$');
+                }
+                Some('{') => {
+                    chars.next();
+                    let mut var = String::new();
+                    while let Some(&c) = chars.peek() {
+                        if c == '}' {
+                            chars.next();
+                            break;
+                        }
+                        var.push(c);
+                        chars.next();
+                    }
+                    if let Some(val) = env.get(&var) {
+                        result.push_str(val);
+                    } else {
+                        result.push_str("${");
+                        result.push_str(&var);
+                        result.push('}');
+                    }
+                }
+                Some(&c) if c == '_' || c.is_ascii_alphabetic() => {
+                    let mut var = String::new();
+                    var.push(c);
+                    chars.next();
+                    while let Some(&c) = chars.peek() {
+                        if c == '_' || c.is_ascii_alphanumeric() {
+                            var.push(c);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Some(val) = env.get(&var) {
+                        result.push_str(val);
+                    } else {
+                        result.push('$');
+                        result.push_str(&var);
+                    }
+                }
+                _ => {
+                    result.push('$');
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 impl DependencyDef {
-    pub fn into_dependency(self) -> Result<Dependency> {
+    pub fn into_dependency(self, env: &HashMap<String, String>) -> Result<Dependency> {
         Ok(match self {
             DependencyDef::HttpHealthCheck {
                 url,
@@ -101,7 +160,7 @@ impl DependencyDef {
                 poll_interval,
                 timeout_seconds,
             } => Dependency::HttpHealthCheck {
-                url,
+                url: expand_env_vars(&url, env),
                 code,
                 poll_interval: poll_interval.map(Duration::from_secs_f64),
                 timeout: timeout_seconds.map(Duration::from_secs),
@@ -111,7 +170,7 @@ impl DependencyDef {
                 poll_interval,
                 timeout_seconds,
             } => Dependency::TcpConnect {
-                address: tcp,
+                address: expand_env_vars(&tcp, env),
                 poll_interval: poll_interval.map(Duration::from_secs_f64),
                 timeout: timeout_seconds.map(Duration::from_secs),
             },
@@ -124,7 +183,7 @@ impl DependencyDef {
                     ),
                 };
                 Dependency::FileContainsKey {
-                    path: file_contains.path,
+                    path: expand_env_vars(&file_contains.path, env),
                     format,
                     key: file_contains.key,
                     env: file_contains.env,
@@ -132,7 +191,9 @@ impl DependencyDef {
                     timeout: file_contains.timeout_seconds.map(Duration::from_secs),
                 }
             }
-            DependencyDef::FileExists { path } => Dependency::FileExists { path },
+            DependencyDef::FileExists { path } => Dependency::FileExists {
+                path: expand_env_vars(&path, env),
+            },
             DependencyDef::ProcessExited { process_exited } => Dependency::ProcessExited {
                 name: process_exited,
             },
@@ -143,4 +204,80 @@ impl DependencyDef {
 pub enum SupervisorCommand {
     Spawn(ProcessConfig),
     Shutdown { message: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn expand_empty_env() {
+        let e = HashMap::new();
+        assert_eq!(expand_env_vars("hello world", &e), "hello world");
+    }
+
+    #[test]
+    fn expand_simple_var() {
+        let e = env(&[("HOME", "/Users/me")]);
+        assert_eq!(expand_env_vars("$HOME", &e), "/Users/me");
+    }
+
+    #[test]
+    fn expand_braced_var() {
+        let e = env(&[("HOME", "/Users/me")]);
+        assert_eq!(expand_env_vars("${HOME}", &e), "/Users/me");
+    }
+
+    #[test]
+    fn expand_unknown_var_unchanged() {
+        let e = HashMap::new();
+        assert_eq!(expand_env_vars("$UNKNOWN", &e), "$UNKNOWN");
+        assert_eq!(expand_env_vars("${UNKNOWN}", &e), "${UNKNOWN}");
+    }
+
+    #[test]
+    fn expand_mixed_text() {
+        let e = env(&[("DIR", "/data")]);
+        assert_eq!(
+            expand_env_vars("prefix/$DIR/suffix", &e),
+            "prefix//data/suffix"
+        );
+    }
+
+    #[test]
+    fn expand_multiple_vars() {
+        let e = env(&[("A", "1"), ("B", "2")]);
+        assert_eq!(expand_env_vars("$A-$B", &e), "1-2");
+    }
+
+    #[test]
+    fn expand_dollar_dollar_escape() {
+        let e = env(&[("X", "val")]);
+        assert_eq!(expand_env_vars("$$X", &e), "$X");
+    }
+
+    #[test]
+    fn expand_var_adjacent_to_dot() {
+        let e = env(&[("VAR", "value")]);
+        assert_eq!(expand_env_vars("$VAR.txt", &e), "value.txt");
+    }
+
+    #[test]
+    fn expand_trailing_dollar() {
+        let e = HashMap::new();
+        assert_eq!(expand_env_vars("cost is $", &e), "cost is $");
+    }
+
+    #[test]
+    fn expand_underscore_var() {
+        let e = env(&[("MY_DIR", "/tmp")]);
+        assert_eq!(expand_env_vars("$MY_DIR/file", &e), "/tmp/file");
+    }
 }
