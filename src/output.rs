@@ -128,9 +128,10 @@ fn has_transitive_process_exited_dep(
             }
             // Walk transitively
             if let Some(intermediate) = config_map.get(name.as_str())
-                && has_transitive_process_exited_dep(&intermediate.depends, target, config_map) {
-                    return true;
-                }
+                && has_transitive_process_exited_dep(&intermediate.depends, target, config_map)
+            {
+                return true;
+            }
         }
     }
     false
@@ -138,7 +139,6 @@ fn has_transitive_process_exited_dep(
 
 #[cfg(test)]
 mod tests {
-    
 
     use super::*;
 

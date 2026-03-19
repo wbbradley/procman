@@ -1,5 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
@@ -9,6 +10,12 @@ pub struct ProcessConfig {
     pub run: String,
     pub depends: Vec<Dependency>,
     pub once: bool,
+}
+
+#[derive(Clone)]
+pub enum FileFormat {
+    Json,
+    Yaml,
 }
 
 #[derive(Clone)]
@@ -24,12 +31,33 @@ pub enum Dependency {
         poll_interval: Option<Duration>,
         timeout: Option<Duration>,
     },
+    FileContainsKey {
+        path: String,
+        format: FileFormat,
+        key: String,
+        env: Option<String>,
+        poll_interval: Option<Duration>,
+        timeout: Option<Duration>,
+    },
     FileExists {
         path: String,
     },
     ProcessExited {
         name: String,
     },
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct FileContainsDef {
+    pub path: String,
+    pub format: String,
+    pub key: String,
+    #[serde(default)]
+    pub env: Option<String>,
+    #[serde(default)]
+    pub poll_interval: Option<f64>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -46,6 +74,9 @@ pub enum DependencyDef {
         poll_interval: Option<f64>,
         timeout_seconds: Option<u64>,
     },
+    FileContainsKey {
+        file_contains: FileContainsDef,
+    },
     FileExists {
         path: String,
     },
@@ -55,8 +86,8 @@ pub enum DependencyDef {
 }
 
 impl DependencyDef {
-    pub fn into_dependency(self) -> Dependency {
-        match self {
+    pub fn into_dependency(self) -> Result<Dependency> {
+        Ok(match self {
             DependencyDef::HttpHealthCheck {
                 url,
                 code,
@@ -77,11 +108,28 @@ impl DependencyDef {
                 poll_interval: poll_interval.map(Duration::from_secs_f64),
                 timeout: timeout_seconds.map(Duration::from_secs),
             },
+            DependencyDef::FileContainsKey { file_contains } => {
+                let format = match file_contains.format.as_str() {
+                    "json" => FileFormat::Json,
+                    "yaml" => FileFormat::Yaml,
+                    other => bail!(
+                        "unsupported file_contains format: {other:?} (expected \"json\" or \"yaml\")"
+                    ),
+                };
+                Dependency::FileContainsKey {
+                    path: file_contains.path,
+                    format,
+                    key: file_contains.key,
+                    env: file_contains.env,
+                    poll_interval: file_contains.poll_interval.map(Duration::from_secs_f64),
+                    timeout: file_contains.timeout_seconds.map(Duration::from_secs),
+                }
+            }
             DependencyDef::FileExists { path } => Dependency::FileExists { path },
             DependencyDef::ProcessExited { process_exited } => Dependency::ProcessExited {
                 name: process_exited,
             },
-        }
+        })
     }
 }
 

@@ -47,12 +47,13 @@ pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
             bail!("empty run command for process {name}");
         }
 
-        let depends = def
+        let depends: Vec<_> = def
             .depends
             .unwrap_or_default()
             .into_iter()
             .map(DependencyDef::into_dependency)
-            .collect();
+            .collect::<Result<Vec<_>>>()
+            .with_context(|| format!("parsing dependencies for process {name}"))?;
 
         configs.push(ProcessConfig {
             name,
@@ -280,6 +281,23 @@ app:
         assert_eq!(configs.len(), 2);
         let app = configs.iter().find(|c| c.name == "app").unwrap();
         assert_eq!(app.env.get("DB_URL").unwrap(), "${{ setup.DB_URL }}");
+    }
+
+    #[test]
+    fn parse_with_file_contains_dependency() {
+        let path = write_yaml(
+            "api:\n  depends:\n    - file_contains:\n        path: /tmp/config.yaml\n        format: yaml\n        key: database.url\n        env: DATABASE_URL\n  run: api-server start\n",
+        );
+        let configs = parse(&path).unwrap();
+        assert_eq!(configs[0].depends.len(), 1);
+        match &configs[0].depends[0] {
+            Dependency::FileContainsKey { path, key, env, .. } => {
+                assert_eq!(path, "/tmp/config.yaml");
+                assert_eq!(key, "database.url");
+                assert_eq!(env.as_deref(), Some("DATABASE_URL"));
+            }
+            _ => panic!("expected FileContainsKey"),
+        }
     }
 
     #[test]

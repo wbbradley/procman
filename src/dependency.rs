@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::Path,
     sync::{
         Arc,
@@ -11,10 +11,55 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::{Result, anyhow};
+
 use crate::{
-    config::{Dependency, ProcessConfig, SupervisorCommand},
+    config::{Dependency, FileFormat, ProcessConfig, SupervisorCommand},
     log::Logger,
 };
+
+fn read_file_value(path: &str, format: &FileFormat, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let root: serde_yaml::Value = match format {
+        FileFormat::Json => {
+            // Validate it's valid JSON first, then parse as serde_yaml::Value
+            serde_json::from_str::<serde_json::Value>(&content).ok()?;
+            serde_yaml::from_str(&content).ok()?
+        }
+        FileFormat::Yaml => serde_yaml::from_str(&content).ok()?,
+    };
+    let mut current = &root;
+    for part in key.split('.') {
+        current = current.get(part)?;
+    }
+    match current {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        serde_yaml::Value::Null => None,
+        // For mappings/sequences, serialize to a string representation
+        _ => serde_json::to_string(current).ok(),
+    }
+}
+
+pub fn collect_dependency_env(deps: &[Dependency]) -> Result<HashMap<String, String>> {
+    let mut env = HashMap::new();
+    for dep in deps {
+        if let Dependency::FileContainsKey {
+            path,
+            format,
+            key,
+            env: Some(env_var),
+            ..
+        } = dep
+        {
+            let value = read_file_value(path, format, key)
+                .ok_or_else(|| anyhow!("failed to extract key '{key}' from {path}"))?;
+            env.insert(env_var.clone(), value);
+        }
+    }
+    Ok(env)
+}
 
 fn check(
     dep: &Dependency,
@@ -37,6 +82,9 @@ fn check(
                 })
                 .unwrap_or(false)
         }
+        Dependency::FileContainsKey {
+            path, format, key, ..
+        } => read_file_value(path, format, key).is_some(),
         Dependency::FileExists { path } => Path::new(path).exists(),
         Dependency::ProcessExited { name } => exit_registry.lock().unwrap().contains(name),
     }
@@ -50,6 +98,9 @@ fn poll_interval(dep: &Dependency) -> Duration {
         Dependency::TcpConnect { poll_interval, .. } => {
             poll_interval.unwrap_or(Duration::from_secs(1))
         }
+        Dependency::FileContainsKey { poll_interval, .. } => {
+            poll_interval.unwrap_or(Duration::from_secs(1))
+        }
         Dependency::FileExists { .. } => Duration::from_secs(1),
         Dependency::ProcessExited { .. } => Duration::from_millis(100),
     }
@@ -59,6 +110,7 @@ fn timeout(dep: &Dependency) -> Duration {
     match dep {
         Dependency::HttpHealthCheck { timeout, .. } => timeout.unwrap_or(Duration::from_secs(60)),
         Dependency::TcpConnect { timeout, .. } => timeout.unwrap_or(Duration::from_secs(60)),
+        Dependency::FileContainsKey { timeout, .. } => timeout.unwrap_or(Duration::from_secs(60)),
         Dependency::FileExists { .. } => Duration::from_secs(60),
         Dependency::ProcessExited { .. } => Duration::from_secs(60),
     }
@@ -71,6 +123,9 @@ fn description(dep: &Dependency) -> String {
         }
         Dependency::TcpConnect { address, .. } => {
             format!("tcp connect: {address}")
+        }
+        Dependency::FileContainsKey { path, key, .. } => {
+            format!("file contains key '{key}' in {path}")
         }
         Dependency::FileExists { path } => {
             format!("file exists: {path}")
@@ -171,11 +226,24 @@ pub fn spawn_waiter(
         );
 
         if wait_for_dependencies(&config, &shutdown, &logger, &exit_registry) {
-            logger
-                .lock()
-                .unwrap()
-                .log_line(&name, "all dependencies satisfied, starting");
-            let _ = tx.send(SupervisorCommand::Spawn(config));
+            match collect_dependency_env(&config.depends) {
+                Ok(dep_env) => {
+                    logger
+                        .lock()
+                        .unwrap()
+                        .log_line(&name, "all dependencies satisfied, starting");
+                    let mut config = config;
+                    config.env.extend(dep_env);
+                    let _ = tx.send(SupervisorCommand::Spawn(config));
+                }
+                Err(e) => {
+                    logger
+                        .lock()
+                        .unwrap()
+                        .log_line(&name, &format!("env extraction failed: {e}"));
+                    shutdown.store(true, Ordering::Relaxed);
+                }
+            }
         } else if !shutdown.load(Ordering::Relaxed) {
             // Dependency timed out — trigger shutdown
             shutdown.store(true, Ordering::Relaxed);
@@ -190,6 +258,7 @@ mod tests {
     use std::{collections::HashMap, sync::atomic::AtomicUsize};
 
     use super::*;
+    use crate::config::FileFormat;
 
     fn make_exit_registry() -> Arc<Mutex<HashSet<String>>> {
         Arc::new(Mutex::new(HashSet::new()))
@@ -443,5 +512,155 @@ mod tests {
             _ => panic!("expected Spawn"),
         }
         assert_eq!(pending.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn file_contains_check_returns_false_for_missing_file() {
+        let dep = Dependency::FileContainsKey {
+            path: "/tmp/procman_nonexistent_file_12345".to_string(),
+            format: FileFormat::Yaml,
+            key: "foo".to_string(),
+            env: None,
+            poll_interval: None,
+            timeout: None,
+        };
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build(),
+        );
+        let exit_registry = make_exit_registry();
+        assert!(!check(&dep, &agent, &exit_registry));
+    }
+
+    #[test]
+    fn file_contains_check_returns_false_for_missing_key() {
+        let path = temp_path("contains_missing_key");
+        std::fs::write(&path, "other_key: value\n").unwrap();
+        let dep = Dependency::FileContainsKey {
+            path: path.clone(),
+            format: FileFormat::Yaml,
+            key: "foo".to_string(),
+            env: None,
+            poll_interval: None,
+            timeout: None,
+        };
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build(),
+        );
+        let exit_registry = make_exit_registry();
+        assert!(!check(&dep, &agent, &exit_registry));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn file_contains_check_returns_true_for_yaml() {
+        let path = temp_path("contains_yaml");
+        std::fs::write(&path, "database:\n  url: postgres://localhost\n").unwrap();
+        let dep = Dependency::FileContainsKey {
+            path: path.clone(),
+            format: FileFormat::Yaml,
+            key: "database".to_string(),
+            env: None,
+            poll_interval: None,
+            timeout: None,
+        };
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build(),
+        );
+        let exit_registry = make_exit_registry();
+        assert!(check(&dep, &agent, &exit_registry));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn file_contains_check_returns_true_for_json() {
+        let path = temp_path("contains_json");
+        std::fs::write(&path, r#"{"api_key": "secret123"}"#).unwrap();
+        let dep = Dependency::FileContainsKey {
+            path: path.clone(),
+            format: FileFormat::Json,
+            key: "api_key".to_string(),
+            env: None,
+            poll_interval: None,
+            timeout: None,
+        };
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build(),
+        );
+        let exit_registry = make_exit_registry();
+        assert!(check(&dep, &agent, &exit_registry));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn file_contains_check_dot_path_navigation() {
+        let path = temp_path("contains_dotpath");
+        std::fs::write(&path, "a:\n  b:\n    c: deep_value\n").unwrap();
+        let dep = Dependency::FileContainsKey {
+            path: path.clone(),
+            format: FileFormat::Yaml,
+            key: "a.b.c".to_string(),
+            env: None,
+            poll_interval: None,
+            timeout: None,
+        };
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build(),
+        );
+        let exit_registry = make_exit_registry();
+        assert!(check(&dep, &agent, &exit_registry));
+
+        // Also verify the value
+        assert_eq!(
+            read_file_value(&path, &FileFormat::Yaml, "a.b.c"),
+            Some("deep_value".to_string())
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn collect_dependency_env_extracts_values() {
+        let path = temp_path("collect_env");
+        std::fs::write(&path, "database:\n  url: postgres://localhost:5432/test\n").unwrap();
+        let deps = vec![Dependency::FileContainsKey {
+            path: path.clone(),
+            format: FileFormat::Yaml,
+            key: "database.url".to_string(),
+            env: Some("DATABASE_URL".to_string()),
+            poll_interval: None,
+            timeout: None,
+        }];
+        let env = collect_dependency_env(&deps).unwrap();
+        assert_eq!(
+            env.get("DATABASE_URL").unwrap(),
+            "postgres://localhost:5432/test"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn collect_dependency_env_skips_no_env_deps() {
+        let path = temp_path("collect_env_skip");
+        std::fs::write(&path, "key: value\n").unwrap();
+        let deps = vec![Dependency::FileContainsKey {
+            path: path.clone(),
+            format: FileFormat::Yaml,
+            key: "key".to_string(),
+            env: None,
+            poll_interval: None,
+            timeout: None,
+        }];
+        let env = collect_dependency_env(&deps).unwrap();
+        assert!(env.is_empty());
+        std::fs::remove_file(&path).unwrap();
     }
 }

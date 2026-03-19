@@ -74,7 +74,7 @@ impl FifoMessage {
                     .unwrap_or_default()
                     .into_iter()
                     .map(DependencyDef::into_dependency)
-                    .collect();
+                    .collect::<Result<Vec<_>>>()?;
 
                 let deduped_name = dedup_name(name, name_counts);
 
