@@ -45,18 +45,7 @@ pub fn parse(path: &str, extra_env: &HashMap<String, String>) -> Result<Vec<Proc
             }
         }
 
-        // Validate non-template runs can be shell-parsed
-        if def.run.trim().contains('\n') {
-            if def.run.trim().is_empty() {
-                bail!("empty run command for process {name}");
-            }
-        } else if !def.run.contains("${{") {
-            let tokens = shell_words::split(&def.run)
-                .with_context(|| format!("parsing run command for process {name}"))?;
-            if tokens.is_empty() {
-                bail!("empty run command for process {name}");
-            }
-        } else if def.run.trim().is_empty() {
+        if def.run.trim().is_empty() {
             bail!("empty run command for process {name}");
         }
 

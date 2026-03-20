@@ -44,18 +44,13 @@ pub struct ProcessGroup {
 }
 
 fn build_command(resolved_run: &str, name: &str) -> Result<std::process::Command> {
-    if resolved_run.trim().contains('\n') {
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", resolved_run]);
-        Ok(cmd)
-    } else {
-        let tokens = shell_words::split(resolved_run)
-            .with_context(|| format!("parsing run command for {name}"))?;
-        anyhow::ensure!(!tokens.is_empty(), "empty run command for {name}");
-        let mut cmd = std::process::Command::new(&tokens[0]);
-        cmd.args(&tokens[1..]);
-        Ok(cmd)
-    }
+    anyhow::ensure!(
+        !resolved_run.trim().is_empty(),
+        "empty run command for {name}"
+    );
+    let mut cmd = std::process::Command::new("sh");
+    cmd.args(["-c", resolved_run]);
+    Ok(cmd)
 }
 
 impl ProcessGroup {
@@ -501,6 +496,9 @@ mod tests {
     use crate::config::ForEachConfig;
 
     static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    // Serialize tests that spawn child processes to prevent waitpid(-1) from
+    // reaping another test's children.
+    static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn make_test_group() -> (ProcessGroup, Arc<Mutex<Logger>>) {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -539,9 +537,9 @@ mod tests {
     #[test]
     fn build_command_single_line() {
         let cmd = build_command("echo hello world", "test").unwrap();
-        assert_eq!(cmd.get_program(), "echo");
+        assert_eq!(cmd.get_program(), "sh");
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, &["hello", "world"]);
+        assert_eq!(args, &["-c", "echo hello world"]);
     }
 
     #[test]
@@ -554,15 +552,15 @@ mod tests {
 
     #[test]
     fn build_command_trailing_newline_only() {
-        // A single command with just a trailing newline should use direct exec
         let cmd = build_command("echo hello\n", "test").unwrap();
-        assert_eq!(cmd.get_program(), "echo");
+        assert_eq!(cmd.get_program(), "sh");
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, &["hello"]);
+        assert_eq!(args, &["-c", "echo hello\n"]);
     }
 
     #[test]
     fn expand_fan_out_creates_instances() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
         let (mut group, logger) = make_test_group();
         let (_dir, pattern) = make_temp_glob_files(3);
         let config = ProcessConfig {
@@ -588,6 +586,12 @@ mod tests {
         assert!(names.contains(&"nodes-2"));
         assert!(group.fan_out_groups.contains_key("nodes"));
         assert_eq!(group.fan_out_groups["nodes"].len(), 3);
+        for (pid, _, _, _) in &group.children {
+            let _ = waitpid(*pid, None);
+        }
+        for handle in std::mem::take(&mut group.reader_threads) {
+            let _ = handle.join();
+        }
     }
 
     #[test]
@@ -610,6 +614,7 @@ mod tests {
 
     #[test]
     fn expand_fan_out_sets_env_var() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
         let (mut group, logger) = make_test_group();
         let (dir, pattern) = make_temp_glob_files(2);
         let config = ProcessConfig {
@@ -641,6 +646,12 @@ mod tests {
         assert!(group.children.iter().any(|(_, n, _, _)| n == "nodes-1"));
         drop(expected_path_0);
         drop(expected_path_1);
+        for (pid, _, _, _) in &group.children {
+            let _ = waitpid(*pid, None);
+        }
+        for handle in std::mem::take(&mut group.reader_threads) {
+            let _ = handle.join();
+        }
     }
 
     #[test]
@@ -679,6 +690,7 @@ mod tests {
 
     #[test]
     fn once_process_exits_cleanly() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
         let (tx, rx) = mpsc::channel::<crate::config::SupervisorCommand>();
         let shutdown = Arc::new(AtomicBool::new(false));
         let signal_triggered = Arc::new(AtomicBool::new(false));
@@ -726,6 +738,7 @@ mod tests {
 
     #[test]
     fn all_once_processes_exit_cleanly() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
         let (tx, rx) = mpsc::channel::<crate::config::SupervisorCommand>();
         let shutdown = Arc::new(AtomicBool::new(false));
         let signal_triggered = Arc::new(AtomicBool::new(false));
@@ -787,6 +800,7 @@ mod tests {
 
     #[test]
     fn once_with_long_running_does_not_auto_exit() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
         let (tx, rx) = mpsc::channel::<crate::config::SupervisorCommand>();
         let shutdown = Arc::new(AtomicBool::new(false));
         let signal_triggered = Arc::new(AtomicBool::new(false));

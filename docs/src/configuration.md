@@ -27,34 +27,23 @@ expressions.
 
 ### `run` (required)
 
-The command to execute. How the command is executed depends on whether it is single-line or
-multi-line:
-
-**Single-line commands** are tokenized with POSIX shell quoting rules (via `shell_words`) and
-exec'd directly — no shell is involved:
+The command to execute. All commands are passed to `sh -c`, so shell features like pipes,
+redirects, `&&`, variable expansion, and multi-line scripts all work naturally:
 
 ```yaml
 api:
   run: cargo run --release --bin api-server
-```
 
-**Multi-line commands** (using YAML's `|` literal block scalar, which preserves newlines) are
-passed to `sh -c` as a script. Shell features like pipes, redirects, `&&`, and variable
-expansion work naturally:
-
-```yaml
 migrate:
   run: |
     ./run-migrations
     echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
+
+healthcheck:
+  run: curl -s http://localhost:8080/health && echo "OK"
 ```
 
-> **Tip:** YAML's `>` (folded block scalar) joins lines with spaces, producing a single-line
-> command that is tokenized and exec'd directly — it does **not** invoke `sh`.
-
-The `run` field also supports [template references](templates.md) (`${{ process.key }}`). When
-templates are present, shell quoting validation is deferred until after template resolution at
-spawn time.
+The `run` field also supports [template references](templates.md) (`${{ process.key }}`).
 
 An empty or whitespace-only `run` value is rejected at parse time.
 
@@ -165,10 +154,8 @@ api:
 Procman validates the configuration at parse time and exits with an error if any of these
 checks fail:
 
-- **Non-empty `run`**: every process must have a non-empty run command.
-- **Shell quoting**: single-line run commands without template references are parsed with
-  `shell_words` to catch unterminated quotes. Multi-line commands skip this check (they are
-  only validated for non-empty content).
+- **Non-empty `run`**: every process must have a non-empty run command. Shell syntax errors
+  are reported at runtime by `sh`.
 - **Dependency graph cycles**: `process_exited` dependencies are checked for circular
   references using a DFS traversal. The error message shows the full cycle path
   (e.g. `circular dependency: a -> b -> c -> a`).
