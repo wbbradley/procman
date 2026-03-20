@@ -561,6 +561,57 @@ b:
     }
 
     #[test]
+    fn parse_with_not_listening_dependency() {
+        let path = write_yaml(
+            "api:\n  depends:\n    - not_listening: \"127.0.0.1:8080\"\n  run: api-server start\n",
+        );
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        assert_eq!(configs[0].depends.len(), 1);
+        match &configs[0].depends[0] {
+            Dependency::TcpNotListening {
+                address,
+                poll_interval,
+                timeout,
+            } => {
+                assert_eq!(address, "127.0.0.1:8080");
+                assert!(poll_interval.is_none());
+                assert!(timeout.is_none());
+            }
+            _ => panic!("expected TcpNotListening"),
+        }
+    }
+
+    #[test]
+    fn parse_with_not_exists_dependency() {
+        let path = write_yaml(
+            "api:\n  depends:\n    - not_exists: /tmp/api.lock\n  run: api-server start\n",
+        );
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        assert_eq!(configs[0].depends.len(), 1);
+        match &configs[0].depends[0] {
+            Dependency::FileNotExists { path } => {
+                assert_eq!(path, "/tmp/api.lock");
+            }
+            _ => panic!("expected FileNotExists"),
+        }
+    }
+
+    #[test]
+    fn parse_with_not_running_dependency() {
+        let path = write_yaml(
+            "api:\n  depends:\n    - not_running: \"old-api.*\"\n  run: api-server start\n",
+        );
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        assert_eq!(configs[0].depends.len(), 1);
+        match &configs[0].depends[0] {
+            Dependency::ProcessNotRunning { pattern } => {
+                assert_eq!(pattern, "old-api.*");
+            }
+            _ => panic!("expected ProcessNotRunning"),
+        }
+    }
+
+    #[test]
     fn parse_extra_env_overrides_system() {
         let path = write_yaml("web:\n  run: echo hello\n");
         let mut extra = HashMap::new();

@@ -52,6 +52,17 @@ pub enum Dependency {
     ProcessExited {
         name: String,
     },
+    TcpNotListening {
+        address: String,
+        poll_interval: Option<Duration>,
+        timeout: Option<Duration>,
+    },
+    FileNotExists {
+        path: String,
+    },
+    ProcessNotRunning {
+        pattern: String,
+    },
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -89,6 +100,17 @@ pub enum DependencyDef {
     },
     ProcessExited {
         process_exited: String,
+    },
+    TcpNotListening {
+        not_listening: String,
+        poll_interval: Option<f64>,
+        timeout_seconds: Option<u64>,
+    },
+    FileNotExists {
+        not_exists: String,
+    },
+    ProcessNotRunning {
+        not_running: String,
     },
 }
 
@@ -199,6 +221,21 @@ impl DependencyDef {
             },
             DependencyDef::ProcessExited { process_exited } => Dependency::ProcessExited {
                 name: process_exited,
+            },
+            DependencyDef::TcpNotListening {
+                not_listening,
+                poll_interval,
+                timeout_seconds,
+            } => Dependency::TcpNotListening {
+                address: expand_env_vars(&not_listening, env)?,
+                poll_interval: poll_interval.map(Duration::from_secs_f64),
+                timeout: timeout_seconds.map(Duration::from_secs),
+            },
+            DependencyDef::FileNotExists { not_exists } => Dependency::FileNotExists {
+                path: expand_env_vars(&not_exists, env)?,
+            },
+            DependencyDef::ProcessNotRunning { not_running } => Dependency::ProcessNotRunning {
+                pattern: expand_env_vars(&not_running, env)?,
             },
         })
     }

@@ -84,6 +84,25 @@ fn check(
         } => read_file_value(path, format, key).is_some(),
         Dependency::FileExists { path } => Path::new(path).exists(),
         Dependency::ProcessExited { name } => exit_registry.lock().unwrap().contains(name),
+        Dependency::TcpNotListening { address, .. } => {
+            use std::net::ToSocketAddrs;
+            !address
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+                .map(|addr| {
+                    std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok()
+                })
+                .unwrap_or(false)
+        }
+        Dependency::FileNotExists { path } => !Path::new(path).exists(),
+        Dependency::ProcessNotRunning { pattern } => std::process::Command::new("pgrep")
+            .args(["-f", pattern])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(true),
     }
 }
 
@@ -100,6 +119,11 @@ fn poll_interval(dep: &Dependency) -> Duration {
         }
         Dependency::FileExists { .. } => Duration::from_secs(1),
         Dependency::ProcessExited { .. } => Duration::from_millis(100),
+        Dependency::TcpNotListening { poll_interval, .. } => {
+            poll_interval.unwrap_or(Duration::from_secs(1))
+        }
+        Dependency::FileNotExists { .. } => Duration::from_secs(1),
+        Dependency::ProcessNotRunning { .. } => Duration::from_secs(1),
     }
 }
 
@@ -110,6 +134,9 @@ fn timeout(dep: &Dependency) -> Duration {
         Dependency::FileContainsKey { timeout, .. } => timeout.unwrap_or(Duration::from_secs(60)),
         Dependency::FileExists { .. } => Duration::from_secs(60),
         Dependency::ProcessExited { .. } => Duration::from_secs(60),
+        Dependency::TcpNotListening { timeout, .. } => timeout.unwrap_or(Duration::from_secs(60)),
+        Dependency::FileNotExists { .. } => Duration::from_secs(60),
+        Dependency::ProcessNotRunning { .. } => Duration::from_secs(60),
     }
 }
 
@@ -129,6 +156,15 @@ fn description(dep: &Dependency) -> String {
         }
         Dependency::ProcessExited { name } => {
             format!("process exited: {name}")
+        }
+        Dependency::TcpNotListening { address, .. } => {
+            format!("tcp not listening: {address}")
+        }
+        Dependency::FileNotExists { path } => {
+            format!("file not exists: {path}")
+        }
+        Dependency::ProcessNotRunning { pattern } => {
+            format!("process not running: {pattern}")
         }
     }
 }
@@ -786,6 +822,98 @@ mod tests {
         assert!(!shutdown.load(Ordering::Relaxed));
 
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn tcp_not_listening_check_returns_true_for_free_port() {
+        let dep = Dependency::TcpNotListening {
+            address: "127.0.0.1:19291".to_string(),
+            poll_interval: None,
+            timeout: None,
+        };
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build(),
+        );
+        let exit_registry = make_exit_registry();
+        assert!(check(&dep, &agent, &exit_registry));
+    }
+
+    #[test]
+    fn tcp_not_listening_check_returns_false_for_bound_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let dep = Dependency::TcpNotListening {
+            address: addr,
+            poll_interval: None,
+            timeout: None,
+        };
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build(),
+        );
+        let exit_registry = make_exit_registry();
+        assert!(!check(&dep, &agent, &exit_registry));
+    }
+
+    #[test]
+    fn file_not_exists_check_returns_true_for_missing_file() {
+        let dep = Dependency::FileNotExists {
+            path: "/tmp/procman_nonexistent_file_99999".to_string(),
+        };
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build(),
+        );
+        let exit_registry = make_exit_registry();
+        assert!(check(&dep, &agent, &exit_registry));
+    }
+
+    #[test]
+    fn file_not_exists_check_returns_false_for_existing_file() {
+        let path = temp_path("not_exists_existing");
+        std::fs::write(&path, "").unwrap();
+        let dep = Dependency::FileNotExists { path: path.clone() };
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build(),
+        );
+        let exit_registry = make_exit_registry();
+        assert!(!check(&dep, &agent, &exit_registry));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn process_not_running_check_returns_true_for_no_match() {
+        let dep = Dependency::ProcessNotRunning {
+            pattern: "zzz_procman_nonexistent_process_zzz".to_string(),
+        };
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build(),
+        );
+        let exit_registry = make_exit_registry();
+        assert!(check(&dep, &agent, &exit_registry));
+    }
+
+    #[test]
+    fn process_not_running_check_returns_false_for_running_process() {
+        // pgrep -f "procman" should match the test binary itself
+        let dep = Dependency::ProcessNotRunning {
+            pattern: "procman".to_string(),
+        };
+        let agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .timeout_global(Some(Duration::from_secs(5)))
+                .build(),
+        );
+        let exit_registry = make_exit_registry();
+        assert!(!check(&dep, &agent, &exit_registry));
     }
 
     #[test]
