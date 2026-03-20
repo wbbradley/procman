@@ -125,6 +125,58 @@ typically used with `once: true` processes like migrations or setup scripts.
 For `for_each` processes, a `process_exited` dependency on the template name is satisfied
 only when **all** fan-out instances have exited.
 
+### TCP not listening
+
+Wait until a TCP port is **not** accepting connections.
+
+```yaml
+depends:
+  - not_listening: "127.0.0.1:8080"
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `not_listening` | string | yes | — | Address in `host:port` form |
+| `poll_interval` | float | no | 1.0 | Seconds between polls |
+| `timeout_seconds` | integer | no | 60 | Seconds before giving up |
+
+Each poll attempts a TCP connect with a 1-second timeout. The dependency is satisfied when the
+connection is **refused** (nobody is listening). Useful to ensure a stale process has released a
+port before starting a replacement.
+
+### File not exists
+
+Wait until a file does **not** exist on disk.
+
+```yaml
+depends:
+  - not_exists: /tmp/api.lock
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `not_exists` | string | yes | — | Path to check |
+
+Poll interval is 1 second, timeout is 60 seconds (not configurable). Useful to wait for a
+lockfile or PID file to be cleaned up.
+
+### Process not running
+
+Wait until no process matching a pattern is running.
+
+```yaml
+depends:
+  - not_running: "old-api.*"
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `not_running` | string | yes | — | Pattern passed to `pgrep -f` |
+
+Uses `pgrep -f` which matches against the full command line. Available on both macOS and Linux.
+Poll interval is 1 second, timeout is 60 seconds (not configurable). The dependency is satisfied
+when `pgrep` finds no matching processes.
+
 ## How polling works
 
 When a process has dependencies, procman spawns a dedicated waiter thread that evaluates
@@ -179,8 +231,8 @@ Error: process 'a' depends on unknown process 'nonexistent'
 
 ## Environment variable expansion in paths
 
-The `url`, `tcp`, `path`, and `file_contains.path` fields support environment variable
-expansion at parse time. See the [Configuration](configuration.md#environment-variable-expansion)
+The `url`, `tcp`, `path`, `file_contains.path`, `not_listening`, `not_exists`, and `not_running`
+fields support environment variable expansion at parse time. See the [Configuration](configuration.md#environment-variable-expansion)
 chapter for the full syntax.
 
 ```yaml

@@ -109,6 +109,13 @@ db:
     - tcp: "127.0.0.1:5432"
   run: db-client start
 
+healthcheck:
+  depends:
+    - not_listening: "127.0.0.1:8080"
+    - not_exists: /tmp/api.lock
+    - not_running: "old-api.*"
+  run: api-server --port 8080
+
 nodes:
   for_each:
     glob: "/etc/nodes/*.yaml"
@@ -122,12 +129,15 @@ nodes:
 - `env` (optional): per-process environment variables (also supports `${{ }}` templates).
 - `once` (optional): if `true`, the process exits cleanly on success (code 0) without triggering supervisor shutdown. Processes can write key-value pairs to `$PROCMAN_OUTPUT` for downstream template resolution.
 - `for_each` (optional): fan-out a template process across glob matches. Requires `glob` (pattern) and `as` (variable name). Each match spawns an instance with the variable set in env and substituted in the run string.
-- `depends` (optional): list of dependencies that must be satisfied before the process starts. Circular dependencies are detected at config parse time. Dependency paths support `$VAR` and `${VAR}` environment variable expansion (including per-process `env` overrides); use `$$` for a literal `$`.
+- `depends` (optional): list of dependencies that must be satisfied before the process starts. Circular dependencies are detected at config parse time. Dependency fields (`url`, `tcp`, `path`, `file_contains.path`, `not_listening`, `not_exists`, `not_running`) support `$VAR` and `${VAR}` environment variable expansion (including per-process `env` overrides); use `$$` for a literal `$`.
   - **HTTP health check**: `url` + `code` (expected status), with optional `poll_interval` and `timeout_seconds`.
   - **TCP connect**: `tcp` (address:port), with optional `poll_interval` and `timeout_seconds`.
   - **File exists**: `path` to a file that must exist.
   - **File contains key**: `file_contains` with `path`, `format` (json/yaml), `key` (JSONPath expression per RFC 9535, e.g. `$.database.url`), and optional `env` (variable name to extract the value into). With optional `poll_interval` and `timeout_seconds`.
   - **Process exited**: `process_exited` names a `once: true` process that must complete successfully before this process starts.
+  - **TCP not listening**: `not_listening` (address:port), with optional `poll_interval` and `timeout_seconds`. Waits until no service is accepting connections.
+  - **File not exists**: `not_exists` path that must not exist.
+  - **Process not running**: `not_running` pattern (matched via `pgrep -f`). Waits until no matching process is found.
 
 ## Behavior
 
