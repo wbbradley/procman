@@ -69,7 +69,7 @@ depends:
   - file_contains:
       path: /tmp/config.yaml
       format: yaml
-      key: database.url
+      key: "$.database.url"
       env: DATABASE_URL
 ```
 
@@ -77,14 +77,26 @@ depends:
 |-------|------|----------|---------|-------------|
 | `path` | string | yes | — | Path to the file |
 | `format` | string | yes | — | `"json"` or `"yaml"` |
-| `key` | string | yes | — | Dot-separated path to look up (e.g. `database.url`) |
+| `key` | string | yes | — | JSONPath expression ([RFC 9535](https://www.rfc-editor.org/rfc/rfc9535)) |
 | `env` | string | no | — | If set, the resolved value is injected as this env var |
 | `poll_interval` | float | no | 1.0 | Seconds between polls |
 | `timeout_seconds` | integer | no | 60 | Seconds before giving up |
 
-Key lookup traverses nested maps using `.` as a separator. Scalar values (strings, numbers,
-booleans) are converted to strings. Null values are treated as missing. Mappings and sequences
-are serialized as JSON strings.
+The `key` field accepts a JSONPath expression (RFC 9535). Use `$` to refer to the document root,
+`.` to traverse nested maps, and bracket notation for array filtering. The first matching value
+is used. Scalar values (strings, numbers, booleans) are converted to strings. Null values are
+treated as missing. Mappings and sequences are serialized as JSON strings.
+
+**Array filtering example** — extract `rpc` from the entry where `alias == "local"`:
+
+```yaml
+depends:
+  - file_contains:
+      path: /tmp/sui_client.yaml
+      format: yaml
+      key: "$.envs[?(@.alias == 'local')].rpc"
+      env: SUI_RPC_URL
+```
 
 When `env` is specified, the value at `key` is extracted and injected into the dependent
 process's environment under that variable name. This happens after all dependencies are

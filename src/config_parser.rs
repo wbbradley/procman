@@ -379,14 +379,14 @@ app:
     #[test]
     fn parse_with_file_contains_dependency() {
         let path = write_yaml(
-            "api:\n  depends:\n    - file_contains:\n        path: /tmp/config.yaml\n        format: yaml\n        key: database.url\n        env: DATABASE_URL\n  run: api-server start\n",
+            "api:\n  depends:\n    - file_contains:\n        path: /tmp/config.yaml\n        format: yaml\n        key: \"$.database.url\"\n        env: DATABASE_URL\n  run: api-server start\n",
         );
         let configs = parse(&path).unwrap();
         assert_eq!(configs[0].depends.len(), 1);
         match &configs[0].depends[0] {
             Dependency::FileContainsKey { path, key, env, .. } => {
                 assert_eq!(path, "/tmp/config.yaml");
-                assert_eq!(key, "database.url");
+                assert_eq!(key, "$.database.url");
                 assert_eq!(env.as_deref(), Some("DATABASE_URL"));
             }
             _ => panic!("expected FileContainsKey"),

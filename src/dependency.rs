@@ -20,25 +20,19 @@ use crate::{
 
 fn read_file_value(path: &str, format: &FileFormat, key: &str) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
-    let root: serde_yaml::Value = match format {
-        FileFormat::Json => {
-            // Validate it's valid JSON first, then parse as serde_yaml::Value
-            serde_json::from_str::<serde_json::Value>(&content).ok()?;
-            serde_yaml::from_str(&content).ok()?
-        }
+    let root: serde_json::Value = match format {
+        FileFormat::Json => serde_json::from_str(&content).ok()?,
         FileFormat::Yaml => serde_yaml::from_str(&content).ok()?,
     };
-    let mut current = &root;
-    for part in key.split('.') {
-        current = current.get(part)?;
-    }
-    match current {
-        serde_yaml::Value::String(s) => Some(s.clone()),
-        serde_yaml::Value::Number(n) => Some(n.to_string()),
-        serde_yaml::Value::Bool(b) => Some(b.to_string()),
-        serde_yaml::Value::Null => None,
-        // For mappings/sequences, serialize to a string representation
-        _ => serde_json::to_string(current).ok(),
+    let json_path = serde_json_path::JsonPath::parse(key).ok()?;
+    let node_list = json_path.query(&root);
+    let value = node_list.first()?;
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Null => None,
+        _ => serde_json::to_string(value).ok(),
     }
 }
 
@@ -537,7 +531,7 @@ mod tests {
         let dep = Dependency::FileContainsKey {
             path: "/tmp/procman_nonexistent_file_12345".to_string(),
             format: FileFormat::Yaml,
-            key: "foo".to_string(),
+            key: "$.foo".to_string(),
             env: None,
             poll_interval: None,
             timeout: None,
@@ -558,7 +552,7 @@ mod tests {
         let dep = Dependency::FileContainsKey {
             path: path.clone(),
             format: FileFormat::Yaml,
-            key: "foo".to_string(),
+            key: "$.foo".to_string(),
             env: None,
             poll_interval: None,
             timeout: None,
@@ -580,7 +574,7 @@ mod tests {
         let dep = Dependency::FileContainsKey {
             path: path.clone(),
             format: FileFormat::Yaml,
-            key: "database".to_string(),
+            key: "$.database".to_string(),
             env: None,
             poll_interval: None,
             timeout: None,
@@ -602,7 +596,7 @@ mod tests {
         let dep = Dependency::FileContainsKey {
             path: path.clone(),
             format: FileFormat::Json,
-            key: "api_key".to_string(),
+            key: "$.api_key".to_string(),
             env: None,
             poll_interval: None,
             timeout: None,
@@ -624,7 +618,7 @@ mod tests {
         let dep = Dependency::FileContainsKey {
             path: path.clone(),
             format: FileFormat::Yaml,
-            key: "a.b.c".to_string(),
+            key: "$.a.b.c".to_string(),
             env: None,
             poll_interval: None,
             timeout: None,
@@ -639,7 +633,7 @@ mod tests {
 
         // Also verify the value
         assert_eq!(
-            read_file_value(&path, &FileFormat::Yaml, "a.b.c"),
+            read_file_value(&path, &FileFormat::Yaml, "$.a.b.c"),
             Some("deep_value".to_string())
         );
         std::fs::remove_file(&path).unwrap();
@@ -652,7 +646,7 @@ mod tests {
         let deps = vec![Dependency::FileContainsKey {
             path: path.clone(),
             format: FileFormat::Yaml,
-            key: "database.url".to_string(),
+            key: "$.database.url".to_string(),
             env: Some("DATABASE_URL".to_string()),
             poll_interval: None,
             timeout: None,
@@ -666,13 +660,32 @@ mod tests {
     }
 
     #[test]
+    fn file_contains_array_filter() {
+        let path = temp_path("contains_array_filter");
+        std::fs::write(
+            &path,
+            "envs:\n  - alias: local\n    rpc: \"http://127.0.0.1:9000\"\n  - alias: remote\n    rpc: \"http://example.com:9000\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_file_value(
+                &path,
+                &FileFormat::Yaml,
+                "$.envs[?(@.alias == 'local')].rpc"
+            ),
+            Some("http://127.0.0.1:9000".to_string())
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
     fn collect_dependency_env_skips_no_env_deps() {
         let path = temp_path("collect_env_skip");
         std::fs::write(&path, "key: value\n").unwrap();
         let deps = vec![Dependency::FileContainsKey {
             path: path.clone(),
             format: FileFormat::Yaml,
-            key: "key".to_string(),
+            key: "$.key".to_string(),
             env: None,
             poll_interval: None,
             timeout: None,
