@@ -81,6 +81,25 @@ inherited system environment variables.
 For `start`, the `-e` flags are sent to the server as part of the JSON message and merged on top
 of the server's system environment.
 
+## `--debug` — Pause before shutdown
+
+The `run` and `serve` subcommands accept a `--debug` flag that pauses the shutdown sequence
+when a child process fails or a dependency times out, giving you time to inspect remaining
+processes before they are terminated.
+
+```sh
+procman run --debug
+procman serve --debug
+```
+
+When triggered, procman prints:
+- Which process caused the shutdown (name, PID, exit code or signal)
+- A list of processes still running (name and PID)
+- A prompt to press ENTER (or Ctrl+C) to continue with the normal shutdown sequence
+
+The `--debug` flag requires an interactive terminal (stdin must be a TTY). If stdin is not
+a TTY, procman exits immediately with an error.
+
 ## File locking
 
 Both `run` and `serve` acquire an **exclusive advisory lock** (`flock`) on the config file

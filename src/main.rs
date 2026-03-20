@@ -55,6 +55,9 @@ enum Commands {
         /// Extra environment variables (repeatable, KEY=VALUE format)
         #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,
+        /// Pause shutdown on child failure for interactive debugging
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Run procman.yaml commands and listen on a FIFO for dynamically added commands
@@ -68,6 +71,9 @@ enum Commands {
         /// Extra environment variables (repeatable, KEY=VALUE format)
         #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,
+        /// Pause shutdown on child failure for interactive debugging
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Send a command to a running `procman serve` instance
@@ -162,7 +168,15 @@ fn run_supervisor(
     config_path: String,
     fifo_path: Option<String>,
     extra_env: HashMap<String, String>,
+    debug: bool,
 ) -> Result<()> {
+    if debug {
+        anyhow::ensure!(
+            std::io::IsTerminal::is_terminal(&std::io::stdin()),
+            "--debug requires an interactive terminal"
+        );
+    }
+
     let lock_file =
         std::fs::File::open(&config_path).with_context(|| format!("opening {}", config_path))?;
     let _lock = Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(|(_, errno)| {
@@ -175,7 +189,7 @@ fn run_supervisor(
 
     let configs = config_parser::parse(&config_path, &extra_env)?;
 
-    let shutdown = signal::setup()?;
+    let (shutdown, signal_triggered) = signal::setup()?;
 
     let mut names: Vec<String> = configs.iter().map(|c| c.name.clone()).collect();
     names.insert(0, "procman".to_string());
@@ -205,9 +219,14 @@ fn run_supervisor(
         None
     };
 
-    let group =
-        process::ProcessGroup::spawn(&configs, tx, Arc::clone(&shutdown), Arc::clone(&logger))?;
-    let exit_code = group.wait_and_shutdown(shutdown, rx, Arc::clone(&logger));
+    let group = process::ProcessGroup::spawn(
+        &configs,
+        tx,
+        Arc::clone(&shutdown),
+        Arc::clone(&logger),
+        debug,
+    )?;
+    let exit_code = group.wait_and_shutdown(shutdown, signal_triggered, rx, Arc::clone(&logger));
 
     logger.lock().unwrap().log_line(
         "procman",
@@ -227,6 +246,7 @@ fn main() -> Result<()> {
     let command = cli.command.unwrap_or(Commands::Run {
         config: "procman.yaml".to_string(),
         env: Vec::new(),
+        debug: false,
     });
 
     match command {
@@ -245,14 +265,19 @@ fn main() -> Result<()> {
             let payload = build_shutdown_message();
             write_to_fifo(fifo.to_str().unwrap(), &payload)
         }
-        Commands::Run { config, env } => {
+        Commands::Run { config, env, debug } => {
             let extra_env = parse_env_args(&env)?;
-            run_supervisor(config, None, extra_env)
+            run_supervisor(config, None, extra_env, debug)
         }
-        Commands::Serve { config, env } => {
+        Commands::Serve { config, env, debug } => {
             let fifo = fifo_path::derive_fifo_path(&config)?;
             let extra_env = parse_env_args(&env)?;
-            run_supervisor(config, Some(fifo.to_str().unwrap().to_string()), extra_env)
+            run_supervisor(
+                config,
+                Some(fifo.to_str().unwrap().to_string()),
+                extra_env,
+                debug,
+            )
         }
     }
 }

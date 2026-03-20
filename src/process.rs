@@ -39,6 +39,7 @@ pub struct ProcessGroup {
     exit_registry: Arc<Mutex<HashSet<String>>>,
     log_dir: PathBuf,
     fan_out_groups: HashMap<String, HashSet<String>>,
+    debug_mode: bool,
 }
 
 fn build_command(resolved_run: &str, name: &str) -> Result<std::process::Command> {
@@ -203,6 +204,7 @@ impl ProcessGroup {
         tx: mpsc::Sender<SupervisorCommand>,
         shutdown: Arc<AtomicBool>,
         logger: Arc<Mutex<Logger>>,
+        debug: bool,
     ) -> Result<Self> {
         let log_dir = logger.lock().unwrap().log_dir().to_path_buf();
         let mut group = Self {
@@ -213,6 +215,7 @@ impl ProcessGroup {
             exit_registry: Arc::new(Mutex::new(HashSet::new())),
             log_dir,
             fan_out_groups: HashMap::new(),
+            debug_mode: debug,
         };
 
         for cmd in commands {
@@ -281,10 +284,12 @@ impl ProcessGroup {
     pub fn wait_and_shutdown(
         mut self,
         shutdown: Arc<AtomicBool>,
+        signal_triggered: Arc<AtomicBool>,
         rx: mpsc::Receiver<SupervisorCommand>,
         logger: Arc<Mutex<Logger>>,
     ) -> i32 {
         let mut first_exit_code: Option<i32> = None;
+        let mut shutdown_trigger: Option<String> = None;
         let mut remaining: Vec<Pid> = self.children.iter().map(|(pid, _, _, _)| *pid).collect();
 
         loop {
@@ -333,6 +338,12 @@ impl ProcessGroup {
                     }
                     if first_exit_code.is_none() {
                         first_exit_code = Some(code);
+                        if let Some((_, name, _, _)) =
+                            self.children.iter().find(|(p, _, _, _)| *p == pid)
+                        {
+                            shutdown_trigger =
+                                Some(format!("{name} [pid {pid}] exited with code {code}"));
+                        }
                     }
                 }
                 Ok(WaitStatus::Signaled(pid, sig, _)) => {
@@ -348,6 +359,11 @@ impl ProcessGroup {
                     }
                     if first_exit_code.is_none() {
                         first_exit_code = Some(1);
+                        if let Some((_, name, _, _)) =
+                            self.children.iter().find(|(p, _, _, _)| *p == pid)
+                        {
+                            shutdown_trigger = Some(format!("{name} [pid {pid}] killed by {sig}"));
+                        }
                     }
                 }
                 Ok(WaitStatus::StillAlive) => {
@@ -375,6 +391,49 @@ impl ProcessGroup {
                 _ => {
                     thread::sleep(Duration::from_millis(50));
                     continue;
+                }
+            }
+        }
+
+        if self.debug_mode && !remaining.is_empty() && !signal_triggered.load(Ordering::Relaxed) {
+            let trigger = shutdown_trigger
+                .as_deref()
+                .unwrap_or("dependency timed out");
+            logger
+                .lock()
+                .unwrap()
+                .log_line("procman", "debug mode \u{2014} shutdown paused");
+            logger
+                .lock()
+                .unwrap()
+                .log_line("procman", &format!("trigger: {trigger}"));
+            logger.lock().unwrap().log_line("procman", "still running:");
+            for pid in &remaining {
+                if let Some((_, name, _, _)) = self.children.iter().find(|(p, _, _, _)| *p == *pid)
+                {
+                    logger
+                        .lock()
+                        .unwrap()
+                        .log_line("procman", &format!("  - {name} [pid {pid}]"));
+                }
+            }
+            logger
+                .lock()
+                .unwrap()
+                .log_line("procman", "press ENTER to continue shutdown (or Ctrl+C)...");
+
+            let (done_tx, done_rx) = mpsc::channel();
+            thread::spawn(move || {
+                let mut buf = String::new();
+                let _ = std::io::stdin().read_line(&mut buf);
+                let _ = done_tx.send(());
+            });
+            loop {
+                if signal_triggered.load(Ordering::Relaxed) {
+                    break;
+                }
+                if done_rx.recv_timeout(Duration::from_millis(100)).is_ok() {
+                    break;
                 }
             }
         }
@@ -449,6 +508,7 @@ mod tests {
             exit_registry: Arc::new(Mutex::new(HashSet::new())),
             log_dir,
             fan_out_groups: HashMap::new(),
+            debug_mode: false,
         };
         (group, logger)
     }
