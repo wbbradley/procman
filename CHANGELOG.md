@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.0] - 2026-03-19
+
+### Breaking Changes
+- `file_contains.key` now uses JSONPath (RFC 9535) instead of dot-separated paths. Existing keys like `database.url` must be rewritten as `"$.database.url"`. This also enables powerful new queries such as array filtering (e.g., `$.envs[?(@.alias == 'local')].rpc`).
+- Undefined environment variables in dependency fields now produce an error. Previously, `$UNDEFINED` was silently kept as a literal string; procman now exits with an error message identifying the undefined variable.
+
+### Added
+- `-e` / `--env` repeatable CLI flag on `run`, `serve`, and `start` subcommands for injecting ad-hoc environment variables without modifying `procman.yaml`. Precedence: system env < `-e` flags < YAML `env:` block.
+- Remaining-dependency logging: when a dependency is satisfied and others remain, the log line now lists the still-unsatisfied dependencies.
+- JSONPath validation at parse time: invalid JSONPath expressions in `file_contains.key` are caught when the config is loaded rather than failing at runtime.
+
 ## [0.7.2] - 2026-03-19
 
 ### Added

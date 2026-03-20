@@ -16,6 +16,7 @@ cargo install --path .
 ```bash
 procman run                  # uses ./procman.yaml
 procman run myapp.yaml       # custom config path
+procman run -e PORT=3000 -e RUST_LOG=debug  # inject env vars
 ```
 
 Bare `procman` with no subcommand is equivalent to `procman run`.
@@ -58,6 +59,15 @@ procman start "redis-server --port 6380"
 ```
 
 An advisory `flock` on procman.yaml prevents multiple instances from managing the same file simultaneously.
+
+### `-e` / `--env` — inject environment variables
+
+The `run`, `serve`, and `start` subcommands accept a repeatable `-e KEY=VALUE` flag for ad-hoc environment variable injection without modifying `procman.yaml`. Precedence (lowest → highest): system env → CLI `-e` → YAML `env:` block.
+
+```bash
+procman run -e PORT=3000 -e RUST_LOG=debug
+procman start "my-worker" -e DB_URL=postgres://localhost/mydb
+```
 
 ## procman.yaml Format
 
@@ -107,7 +117,7 @@ nodes:
   - **HTTP health check**: `url` + `code` (expected status), with optional `poll_interval` and `timeout_seconds`.
   - **TCP connect**: `tcp` (address:port), with optional `poll_interval` and `timeout_seconds`.
   - **File exists**: `path` to a file that must exist.
-  - **File contains key**: `file_contains` with `path`, `format` (json/yaml), `key` (dot-separated path), and optional `env` (variable name to extract the value into). With optional `poll_interval` and `timeout_seconds`.
+  - **File contains key**: `file_contains` with `path`, `format` (json/yaml), `key` (JSONPath expression per RFC 9535, e.g. `$.database.url`), and optional `env` (variable name to extract the value into). With optional `poll_interval` and `timeout_seconds`.
   - **Process exited**: `process_exited` names a `once: true` process that must complete successfully before this process starts.
 
 ## Behavior
