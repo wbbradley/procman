@@ -69,6 +69,15 @@ procman run -e PORT=3000 -e RUST_LOG=debug
 procman start "my-worker" -e DB_URL=postgres://localhost/mydb
 ```
 
+### `--debug` — pause before shutdown
+
+The `run` and `serve` subcommands accept a `--debug` flag. When a child process fails, procman pauses before sending SIGTERM, prints which process triggered the shutdown and which processes are still running, and waits for ENTER or Ctrl+C to proceed. Requires an interactive terminal.
+
+```bash
+procman run --debug
+procman serve --debug
+```
+
 ## procman.yaml Format
 
 ```yaml

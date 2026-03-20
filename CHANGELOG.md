@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.0] - 2026-03-19
+
+### Added
+- `--debug` flag for `run` and `serve` subcommands: pauses shutdown when a child process fails, printing which process triggered the shutdown and which are still running, then waiting for ENTER or Ctrl+C before proceeding. Requires an interactive terminal (TTY).
+
+### Changed
+- Dependencies are now evaluated sequentially in declaration order. Each dependency must be fully satisfied before the next is checked. Each dependency's timeout starts when it becomes the active dependency.
+
+### Fixed
+- Stale-data race in dependency checking: a `file_contains` dependency listed after a `process_exited` dependency could be falsely satisfied by leftover data from a prior run, because both were previously checked concurrently.
+
 ## [0.8.1] - 2026-03-19
 
 ### Fixed
