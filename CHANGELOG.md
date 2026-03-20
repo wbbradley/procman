@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.2] - 2026-03-19
+
+### Added
+- Multi-line `run` commands via YAML `|` block scalars, executed automatically via `sh -c`. Enables pipes, redirects, `&&`, and other shell features in multi-line scripts. Single-line commands continue to be tokenized and exec'd directly.
+- Process group isolation: each child runs in its own process group (`setpgid`), ensuring shutdown signals reach all descendants — particularly important for `sh -c` subprocesses.
+- Documentation: new mdbook chapters for CLI reference, dynamic process management, fan-out, logging, and shutdown. Existing chapters updated for multi-line `run` support.
+
+### Changed
+- Shutdown now signals process groups (`killpg`) instead of individual PIDs, ensuring shell subprocesses and other descendants are properly cleaned up.
+
+### Fixed
+- CI: dynamically fetch latest mdbook release version instead of hardcoding.
+- CI: upgrade GitHub Actions to Node.js 24 compatible versions.
+
 ## [0.7.1] - 2026-03-19
 
 ### Added
