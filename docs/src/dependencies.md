@@ -127,17 +127,30 @@ only when **all** fan-out instances have exited.
 
 ## How polling works
 
-When a process has dependencies, procman spawns a dedicated waiter thread that loops over all
-unsatisfied dependencies:
+When a process has dependencies, procman spawns a dedicated waiter thread that evaluates
+dependencies **in declaration order**. Each dependency is fully satisfied before the next one
+is evaluated:
 
-1. For each unsatisfied dependency, call the check function.
-2. If a check succeeds, mark it satisfied and log `dependency satisfied: <description>`.
-3. If a check fails for the first time, log `dependency not ready: <description>` (logged
+1. Start with the first dependency.
+2. Poll the current dependency using its check function.
+3. If the check succeeds, log `dependency satisfied: <description>` and advance to the next
+   dependency.
+4. If the check fails for the first time, log `dependency not ready: <description>` (logged
    only once per dependency to avoid noise).
-4. If all dependencies are satisfied, proceed to spawn the process.
-5. Otherwise, sleep for the shortest `poll_interval` among unsatisfied dependencies and loop.
+5. If the check fails, sleep for the dependency's `poll_interval` and retry.
+6. Once all dependencies are satisfied, proceed to spawn the process.
+
+This sequential evaluation prevents stale-data races — for example, a `file_contains`
+dependency listed after a `process_exited` dependency will not be checked until the process
+has actually exited, ensuring it reads freshly generated data rather than leftovers from a
+prior run.
 
 ## Timeout behavior
+
+Each dependency's timeout clock starts when that dependency begins being evaluated (i.e., when
+the previous dependency is satisfied), not when the waiter thread starts. This means total
+wall-clock time for a process with multiple dependencies is the sum of individual wait times
+rather than the maximum.
 
 If any single dependency exceeds its timeout:
 

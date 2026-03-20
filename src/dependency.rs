@@ -144,24 +144,18 @@ fn wait_for_dependencies(
             .timeout_global(Some(Duration::from_secs(5)))
             .build(),
     );
-    let mut satisfied = vec![false; config.depends.len()];
-    let mut first_failure_logged = vec![false; config.depends.len()];
-    let starts: Vec<Instant> = config.depends.iter().map(|_| Instant::now()).collect();
 
-    loop {
-        if shutdown.load(Ordering::Relaxed) {
-            return false;
-        }
+    let total = config.depends.len();
+    for (i, dep) in config.depends.iter().enumerate() {
+        let start = Instant::now();
+        let mut first_failure_logged = false;
 
-        let mut min_interval = Duration::from_secs(1);
-        let mut all_satisfied = true;
-
-        for (i, dep) in config.depends.iter().enumerate() {
-            if satisfied[i] {
-                continue;
+        loop {
+            if shutdown.load(Ordering::Relaxed) {
+                return false;
             }
 
-            if starts[i].elapsed() > timeout(dep) {
+            if start.elapsed() > timeout(dep) {
                 let desc = description(dep);
                 logger
                     .lock()
@@ -171,21 +165,16 @@ fn wait_for_dependencies(
             }
 
             if check(dep, &agent, exit_registry) {
-                satisfied[i] = true;
                 let desc = description(dep);
-                let remaining: Vec<String> = config
-                    .depends
-                    .iter()
-                    .enumerate()
-                    .filter(|(j, _)| !satisfied[*j])
-                    .map(|(_, dep)| description(dep))
-                    .collect();
-                if remaining.is_empty() {
+                let remaining_count = total - i - 1;
+                if remaining_count == 0 {
                     logger
                         .lock()
                         .unwrap()
                         .log_line(&config.name, &format!("dependency satisfied: {desc}"));
                 } else {
+                    let remaining: Vec<String> =
+                        config.depends[i + 1..].iter().map(description).collect();
                     logger.lock().unwrap().log_line(
                         &config.name,
                         &format!(
@@ -194,26 +183,23 @@ fn wait_for_dependencies(
                         ),
                     );
                 }
-            } else {
-                all_satisfied = false;
-                min_interval = min_interval.min(poll_interval(dep));
-                if !first_failure_logged[i] {
-                    first_failure_logged[i] = true;
-                    let desc = description(dep);
-                    logger
-                        .lock()
-                        .unwrap()
-                        .log_line(&config.name, &format!("dependency not ready: {desc}"));
-                }
+                break;
             }
-        }
 
-        if all_satisfied {
-            return true;
-        }
+            if !first_failure_logged {
+                first_failure_logged = true;
+                let desc = description(dep);
+                logger
+                    .lock()
+                    .unwrap()
+                    .log_line(&config.name, &format!("dependency not ready: {desc}"));
+            }
 
-        thread::sleep(min_interval);
+            thread::sleep(poll_interval(dep));
+        }
     }
+
+    true
 }
 
 pub fn spawn_waiter(
@@ -712,5 +698,132 @@ mod tests {
         let env = std::collections::HashMap::new();
         let err = def.into_dependency(&env).unwrap_err();
         assert!(err.to_string().contains("invalid JSONPath"), "{err}");
+    }
+
+    #[test]
+    fn sequential_deps_block_on_first() {
+        let path = temp_path("seq_block");
+        std::fs::write(&path, "").unwrap();
+
+        let config = make_config(
+            "seq-block",
+            vec![
+                Dependency::ProcessExited {
+                    name: "setup".to_string(),
+                },
+                Dependency::FileExists { path: path.clone() },
+            ],
+        );
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let logger = make_logger(&["seq-block"]);
+        let pending = Arc::new(AtomicUsize::new(1));
+        let exit_registry = make_exit_registry();
+
+        let _handle = spawn_waiter(
+            config,
+            tx,
+            Arc::clone(&shutdown),
+            logger,
+            Arc::clone(&pending),
+            Arc::clone(&exit_registry),
+        );
+
+        // File already exists, but Spawn should NOT arrive until "setup" exits
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+
+        // Now satisfy the first dep
+        exit_registry.lock().unwrap().insert("setup".to_string());
+
+        let received = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        match received {
+            SupervisorCommand::Spawn(config) => assert_eq!(config.name, "seq-block"),
+            _ => panic!("expected Spawn"),
+        }
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn sequential_timeout_starts_per_dep() {
+        let path = temp_path("seq_timeout_per");
+        std::fs::write(&path, "").unwrap();
+
+        let config = make_config(
+            "seq-per-dep",
+            vec![
+                Dependency::ProcessExited {
+                    name: "setup".to_string(),
+                },
+                Dependency::FileExists { path: path.clone() },
+            ],
+        );
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let logger = make_logger(&["seq-per-dep"]);
+        let pending = Arc::new(AtomicUsize::new(1));
+        let exit_registry = make_exit_registry();
+
+        let _handle = spawn_waiter(
+            config,
+            tx,
+            Arc::clone(&shutdown),
+            logger,
+            Arc::clone(&pending),
+            Arc::clone(&exit_registry),
+        );
+
+        // Satisfy dep 0 after 100ms — dep 1's timeout starts fresh from that point
+        thread::sleep(Duration::from_millis(100));
+        exit_registry.lock().unwrap().insert("setup".to_string());
+
+        // Should succeed because the file already exists (dep 1 timeout is 60s from now)
+        let received = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        match received {
+            SupervisorCommand::Spawn(config) => assert_eq!(config.name, "seq-per-dep"),
+            _ => panic!("expected Spawn"),
+        }
+        assert!(!shutdown.load(Ordering::Relaxed));
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn sequential_timeout_on_blocked_dep() {
+        let path = temp_path("seq_timeout_blocked");
+        std::fs::write(&path, "").unwrap();
+
+        let config = make_config(
+            "seq-timeout",
+            vec![
+                Dependency::HttpHealthCheck {
+                    url: "http://127.0.0.1:1".to_string(),
+                    code: 200,
+                    poll_interval: Some(Duration::from_millis(50)),
+                    timeout: Some(Duration::from_millis(200)),
+                },
+                Dependency::FileExists { path: path.clone() },
+            ],
+        );
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let logger = make_logger(&["seq-timeout"]);
+        let pending = Arc::new(AtomicUsize::new(1));
+
+        let handle = spawn_waiter(
+            config,
+            tx,
+            Arc::clone(&shutdown),
+            logger,
+            Arc::clone(&pending),
+            make_exit_registry(),
+        );
+        handle.join().unwrap();
+
+        // Dep 0 timed out — shutdown set, no Spawn sent
+        assert!(shutdown.load(Ordering::Relaxed));
+        assert!(rx.try_recv().is_err());
+
+        std::fs::remove_file(&path).unwrap();
     }
 }
