@@ -1,8 +1,9 @@
 # procman
 
 [![crates.io](https://img.shields.io/crates/v/procman.svg)](https://crates.io/crates/procman)
+[![docs](https://img.shields.io/badge/docs-mdbook-blue)](https://wbbradley.github.io/procman/)
 
-A foreman-like process supervisor written in Rust. Reads a `procman.yaml`, spawns all listed commands, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives.
+A foreman-like process supervisor written in Rust. Reads a `procman.yaml`, spawns all listed commands, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives. See the [full documentation](https://wbbradley.github.io/procman/) for detailed guides on configuration, dependencies, templates, and more.
 
 ## Usage
 
