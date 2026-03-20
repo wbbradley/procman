@@ -225,6 +225,7 @@ fn run_supervisor(
         Arc::clone(&shutdown),
         Arc::clone(&logger),
         debug,
+        fifo_path.is_some(),
     )?;
     let exit_code = group.wait_and_shutdown(shutdown, signal_triggered, rx, Arc::clone(&logger));
 

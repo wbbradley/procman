@@ -40,6 +40,7 @@ pub struct ProcessGroup {
     log_dir: PathBuf,
     fan_out_groups: HashMap<String, HashSet<String>>,
     debug_mode: bool,
+    serve_mode: bool,
 }
 
 fn build_command(resolved_run: &str, name: &str) -> Result<std::process::Command> {
@@ -205,6 +206,7 @@ impl ProcessGroup {
         shutdown: Arc<AtomicBool>,
         logger: Arc<Mutex<Logger>>,
         debug: bool,
+        serve_mode: bool,
     ) -> Result<Self> {
         let log_dir = logger.lock().unwrap().log_dir().to_path_buf();
         let mut group = Self {
@@ -216,6 +218,7 @@ impl ProcessGroup {
             log_dir,
             fan_out_groups: HashMap::new(),
             debug_mode: debug,
+            serve_mode,
         };
 
         for cmd in commands {
@@ -300,17 +303,20 @@ impl ProcessGroup {
             match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
                 Ok(WaitStatus::Exited(pid, code)) => {
                     remaining.retain(|p| *p != pid);
-                    if let Some((_, name, started, once)) =
-                        self.children.iter().find(|(p, _, _, _)| *p == pid)
-                    {
-                        let elapsed = started.elapsed().as_secs_f64();
-                        if *once && code == 0 {
+                    let child_info = self.children.iter().find(|(p, _, _, _)| *p == pid).map(
+                        |(_, name, started, once)| {
+                            (name.clone(), started.elapsed().as_secs_f64(), *once)
+                        },
+                    );
+                    self.children.retain(|(p, _, _, _)| *p != pid);
+                    if let Some((name, elapsed, once)) = child_info {
+                        if once && code == 0 {
                             let mut completed_group = None;
                             {
                                 let mut registry = self.exit_registry.lock().unwrap();
                                 registry.insert(name.clone());
                                 for (template_name, instance_names) in &self.fan_out_groups {
-                                    if instance_names.contains(name)
+                                    if instance_names.contains(&name)
                                         && instance_names.iter().all(|n| registry.contains(n))
                                     {
                                         registry.insert(template_name.clone());
@@ -328,42 +334,46 @@ impl ProcessGroup {
                             logger
                                 .lock()
                                 .unwrap()
-                                .log_line(name, &format!("[{pid}] completed after {elapsed:.1}s"));
+                                .log_line(&name, &format!("[{pid}] completed after {elapsed:.1}s"));
+                            if !self.serve_mode
+                                && remaining.is_empty()
+                                && self.pending_deps.load(Ordering::Relaxed) == 0
+                            {
+                                first_exit_code = Some(0);
+                                break;
+                            }
                             continue;
                         }
                         logger.lock().unwrap().log_line(
-                            name,
+                            &name,
                             &format!("[{pid}] exited with code {code} after {elapsed:.1}s"),
                         );
-                    }
-                    if first_exit_code.is_none() {
-                        first_exit_code = Some(code);
-                        if let Some((_, name, _, _)) =
-                            self.children.iter().find(|(p, _, _, _)| *p == pid)
-                        {
+                        if first_exit_code.is_none() {
+                            first_exit_code = Some(code);
                             shutdown_trigger =
                                 Some(format!("{name} [pid {pid}] exited with code {code}"));
                         }
+                    } else if first_exit_code.is_none() {
+                        first_exit_code = Some(code);
                     }
                 }
                 Ok(WaitStatus::Signaled(pid, sig, _)) => {
                     remaining.retain(|p| *p != pid);
-                    if let Some((_, name, started, _)) =
-                        self.children.iter().find(|(p, _, _, _)| *p == pid)
-                    {
-                        let elapsed = started.elapsed().as_secs_f64();
+                    let child_name = self.children.iter().find(|(p, _, _, _)| *p == pid).map(
+                        |(_, name, started, _)| (name.clone(), started.elapsed().as_secs_f64()),
+                    );
+                    self.children.retain(|(p, _, _, _)| *p != pid);
+                    if let Some((name, elapsed)) = child_name {
                         logger.lock().unwrap().log_line(
-                            name,
+                            &name,
                             &format!("[{pid}] killed by {sig} after {elapsed:.1}s"),
                         );
-                    }
-                    if first_exit_code.is_none() {
-                        first_exit_code = Some(1);
-                        if let Some((_, name, _, _)) =
-                            self.children.iter().find(|(p, _, _, _)| *p == pid)
-                        {
+                        if first_exit_code.is_none() {
+                            first_exit_code = Some(1);
                             shutdown_trigger = Some(format!("{name} [pid {pid}] killed by {sig}"));
                         }
+                    } else if first_exit_code.is_none() {
+                        first_exit_code = Some(1);
                     }
                 }
                 Ok(WaitStatus::StillAlive) => {
@@ -479,7 +489,7 @@ impl ProcessGroup {
             let _ = handle.join();
         }
 
-        first_exit_code.unwrap_or(1)
+        first_exit_code.unwrap_or(0)
     }
 }
 
@@ -509,6 +519,7 @@ mod tests {
             log_dir,
             fan_out_groups: HashMap::new(),
             debug_mode: false,
+            serve_mode: false,
         };
         (group, logger)
     }
@@ -664,5 +675,186 @@ mod tests {
             }
         }
         assert!(registry.lock().unwrap().contains("nodes"));
+    }
+
+    #[test]
+    fn once_process_exits_cleanly() {
+        let (tx, rx) = mpsc::channel::<crate::config::SupervisorCommand>();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let signal_triggered = Arc::new(AtomicBool::new(false));
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let log_dir = std::env::temp_dir().join(format!(
+            "procman_once_exit_test_{}_{id}",
+            std::process::id()
+        ));
+        let logger = Arc::new(Mutex::new(
+            Logger::new_for_test(&["procman".to_string(), "hello".to_string()], log_dir).unwrap(),
+        ));
+        let configs = vec![ProcessConfig {
+            name: "hello".to_string(),
+            env: std::env::vars().collect(),
+            run: "echo Hello".to_string(),
+            depends: vec![],
+            once: true,
+            for_each: None,
+        }];
+        let group = ProcessGroup::spawn(
+            &configs,
+            tx,
+            Arc::clone(&shutdown),
+            Arc::clone(&logger),
+            false,
+            false,
+        )
+        .unwrap();
+        drop(rx);
+        let (done_tx, done_rx) = mpsc::channel();
+        let shutdown2 = Arc::clone(&shutdown);
+        let signal2 = Arc::clone(&signal_triggered);
+        let logger2 = Arc::clone(&logger);
+        let handle = thread::spawn(move || {
+            let (_, inner_rx) = mpsc::channel();
+            let code = group.wait_and_shutdown(shutdown2, signal2, inner_rx, logger2);
+            let _ = done_tx.send(code);
+        });
+        let code = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("wait_and_shutdown should not hang");
+        assert_eq!(code, 0);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn all_once_processes_exit_cleanly() {
+        let (tx, rx) = mpsc::channel::<crate::config::SupervisorCommand>();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let signal_triggered = Arc::new(AtomicBool::new(false));
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let log_dir = std::env::temp_dir().join(format!(
+            "procman_all_once_exit_test_{}_{id}",
+            std::process::id()
+        ));
+        let logger = Arc::new(Mutex::new(
+            Logger::new_for_test(
+                &["procman".to_string(), "a".to_string(), "b".to_string()],
+                log_dir,
+            )
+            .unwrap(),
+        ));
+        let configs = vec![
+            ProcessConfig {
+                name: "a".to_string(),
+                env: std::env::vars().collect(),
+                run: "echo A".to_string(),
+                depends: vec![],
+                once: true,
+                for_each: None,
+            },
+            ProcessConfig {
+                name: "b".to_string(),
+                env: std::env::vars().collect(),
+                run: "echo B".to_string(),
+                depends: vec![],
+                once: true,
+                for_each: None,
+            },
+        ];
+        let group = ProcessGroup::spawn(
+            &configs,
+            tx,
+            Arc::clone(&shutdown),
+            Arc::clone(&logger),
+            false,
+            false,
+        )
+        .unwrap();
+        drop(rx);
+        let (done_tx, done_rx) = mpsc::channel();
+        let shutdown2 = Arc::clone(&shutdown);
+        let signal2 = Arc::clone(&signal_triggered);
+        let logger2 = Arc::clone(&logger);
+        let handle = thread::spawn(move || {
+            let (_, inner_rx) = mpsc::channel();
+            let code = group.wait_and_shutdown(shutdown2, signal2, inner_rx, logger2);
+            let _ = done_tx.send(code);
+        });
+        let code = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("wait_and_shutdown should not hang");
+        assert_eq!(code, 0);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn once_with_long_running_does_not_auto_exit() {
+        let (tx, rx) = mpsc::channel::<crate::config::SupervisorCommand>();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let signal_triggered = Arc::new(AtomicBool::new(false));
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let log_dir = std::env::temp_dir().join(format!(
+            "procman_once_long_test_{}_{id}",
+            std::process::id()
+        ));
+        let logger = Arc::new(Mutex::new(
+            Logger::new_for_test(
+                &[
+                    "procman".to_string(),
+                    "quick".to_string(),
+                    "slow".to_string(),
+                ],
+                log_dir,
+            )
+            .unwrap(),
+        ));
+        let configs = vec![
+            ProcessConfig {
+                name: "quick".to_string(),
+                env: std::env::vars().collect(),
+                run: "echo done".to_string(),
+                depends: vec![],
+                once: true,
+                for_each: None,
+            },
+            ProcessConfig {
+                name: "slow".to_string(),
+                env: std::env::vars().collect(),
+                run: "sleep 60".to_string(),
+                depends: vec![],
+                once: false,
+                for_each: None,
+            },
+        ];
+        let group = ProcessGroup::spawn(
+            &configs,
+            tx,
+            Arc::clone(&shutdown),
+            Arc::clone(&logger),
+            false,
+            false,
+        )
+        .unwrap();
+        drop(rx);
+        let (done_tx, done_rx) = mpsc::channel();
+        let shutdown2 = Arc::clone(&shutdown);
+        let signal2 = Arc::clone(&signal_triggered);
+        let logger2 = Arc::clone(&logger);
+        let handle = thread::spawn(move || {
+            let (_, inner_rx) = mpsc::channel();
+            let code = group.wait_and_shutdown(shutdown2, signal2, inner_rx, logger2);
+            let _ = done_tx.send(code);
+        });
+        // Should NOT auto-exit within 500ms because "slow" is still running
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            "should not auto-exit while long-running process is active"
+        );
+        // Trigger shutdown so the test can clean up
+        shutdown.store(true, Ordering::Relaxed);
+        let code = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("should exit after shutdown");
+        // Exit code 0 since no process failed
+        assert_eq!(code, 0);
+        handle.join().unwrap();
     }
 }
