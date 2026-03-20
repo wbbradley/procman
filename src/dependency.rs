@@ -176,10 +176,27 @@ fn wait_for_dependencies(
             if check(dep, &agent, exit_registry) {
                 satisfied[i] = true;
                 let desc = description(dep);
-                logger
-                    .lock()
-                    .unwrap()
-                    .log_line(&config.name, &format!("dependency satisfied: {desc}"));
+                let remaining: Vec<String> = config
+                    .depends
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| !satisfied[*j])
+                    .map(|(_, dep)| description(dep))
+                    .collect();
+                if remaining.is_empty() {
+                    logger
+                        .lock()
+                        .unwrap()
+                        .log_line(&config.name, &format!("dependency satisfied: {desc}"));
+                } else {
+                    logger.lock().unwrap().log_line(
+                        &config.name,
+                        &format!(
+                            "dependency satisfied: {desc} (remaining: {})",
+                            remaining.join(", ")
+                        ),
+                    );
+                }
             } else {
                 all_satisfied = false;
                 min_interval = min_interval.min(poll_interval(dep));
