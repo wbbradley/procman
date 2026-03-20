@@ -8,7 +8,10 @@ mod output;
 mod process;
 mod signal;
 
-use std::sync::{Arc, Mutex, mpsc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, mpsc},
+};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -49,6 +52,9 @@ enum Commands {
         /// Path to config file
         #[arg(default_value = "procman.yaml")]
         config: String,
+        /// Extra environment variables (repeatable, KEY=VALUE format)
+        #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
     },
 
     /// Run procman.yaml commands and listen on a FIFO for dynamically added commands
@@ -59,6 +65,9 @@ enum Commands {
         /// Path to config file
         #[arg(default_value = "procman.yaml")]
         config: String,
+        /// Extra environment variables (repeatable, KEY=VALUE format)
+        #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
     },
 
     /// Send a command to a running `procman serve` instance
@@ -72,6 +81,9 @@ enum Commands {
         /// Path to config file
         #[arg(long, default_value = "procman.yaml")]
         config: String,
+        /// Extra environment variables (repeatable, KEY=VALUE format)
+        #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
     },
 
     /// Send a shutdown command to a running `procman serve` instance
@@ -82,7 +94,21 @@ enum Commands {
     },
 }
 
-fn build_run_message(command: &str) -> Result<String> {
+fn parse_env_args(args: &[String]) -> Result<HashMap<String, String>> {
+    let mut map = HashMap::new();
+    for arg in args {
+        let (key, value) = arg
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("invalid env argument (expected KEY=VALUE): {arg}"))?;
+        if key.is_empty() {
+            anyhow::bail!("invalid env argument (empty key): {arg}");
+        }
+        map.insert(key.to_string(), value.to_string());
+    }
+    Ok(map)
+}
+
+fn build_run_message(command: &str, extra_env: &HashMap<String, String>) -> Result<String> {
     let tokens =
         shell_words::split(command).with_context(|| format!("parsing command: {command}"))?;
     anyhow::ensure!(!tokens.is_empty(), "empty command");
@@ -93,7 +119,11 @@ fn build_run_message(command: &str) -> Result<String> {
     let msg = fifo::FifoMessage::Run {
         name,
         run: command.to_string(),
-        env: None,
+        env: if extra_env.is_empty() {
+            None
+        } else {
+            Some(extra_env.clone())
+        },
         depends: None,
         once: None,
     };
@@ -128,7 +158,11 @@ fn write_to_fifo(fifo_path: &str, payload: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_supervisor(config_path: String, fifo_path: Option<String>) -> Result<()> {
+fn run_supervisor(
+    config_path: String,
+    fifo_path: Option<String>,
+    extra_env: HashMap<String, String>,
+) -> Result<()> {
     let lock_file =
         std::fs::File::open(&config_path).with_context(|| format!("opening {}", config_path))?;
     let _lock = Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(|(_, errno)| {
@@ -139,7 +173,7 @@ fn run_supervisor(config_path: String, fifo_path: Option<String>) -> Result<()> 
         )
     })?;
 
-    let configs = config_parser::parse(&config_path)?;
+    let configs = config_parser::parse(&config_path, &extra_env)?;
 
     let shutdown = signal::setup()?;
 
@@ -192,12 +226,18 @@ fn main() -> Result<()> {
 
     let command = cli.command.unwrap_or(Commands::Run {
         config: "procman.yaml".to_string(),
+        env: Vec::new(),
     });
 
     match command {
-        Commands::Start { config, command } => {
+        Commands::Start {
+            config,
+            command,
+            env,
+        } => {
             let fifo = fifo_path::derive_fifo_path(&config)?;
-            let payload = build_run_message(&command)?;
+            let extra_env = parse_env_args(&env)?;
+            let payload = build_run_message(&command, &extra_env)?;
             write_to_fifo(fifo.to_str().unwrap(), &payload)
         }
         Commands::Stop { config } => {
@@ -205,10 +245,14 @@ fn main() -> Result<()> {
             let payload = build_shutdown_message();
             write_to_fifo(fifo.to_str().unwrap(), &payload)
         }
-        Commands::Run { config } => run_supervisor(config, None),
-        Commands::Serve { config } => {
+        Commands::Run { config, env } => {
+            let extra_env = parse_env_args(&env)?;
+            run_supervisor(config, None, extra_env)
+        }
+        Commands::Serve { config, env } => {
             let fifo = fifo_path::derive_fifo_path(&config)?;
-            run_supervisor(config, Some(fifo.to_str().unwrap().to_string()))
+            let extra_env = parse_env_args(&env)?;
+            run_supervisor(config, Some(fifo.to_str().unwrap().to_string()), extra_env)
         }
     }
 }
@@ -265,7 +309,7 @@ mod tests {
             buf
         });
 
-        let payload = build_run_message("sleep 123").unwrap();
+        let payload = build_run_message("sleep 123", &HashMap::new()).unwrap();
         write_to_fifo_until_ready(&path, &payload);
 
         let received = reader.join().unwrap();
@@ -336,7 +380,7 @@ mod tests {
         )
         .unwrap();
 
-        let payload = build_run_message("cat /etc/hostname").unwrap();
+        let payload = build_run_message("cat /etc/hostname", &HashMap::new()).unwrap();
         write_to_fifo_until_ready(&fifo_path, &payload);
 
         let cmd = rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
@@ -349,5 +393,57 @@ mod tests {
 
         server.stop();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parse_env_args_valid() {
+        let args = vec!["FOO=bar".to_string(), "BAZ=qux".to_string()];
+        let map = parse_env_args(&args).unwrap();
+        assert_eq!(map.get("FOO").unwrap(), "bar");
+        assert_eq!(map.get("BAZ").unwrap(), "qux");
+    }
+
+    #[test]
+    fn parse_env_args_empty_value() {
+        let args = vec!["KEY=".to_string()];
+        let map = parse_env_args(&args).unwrap();
+        assert_eq!(map.get("KEY").unwrap(), "");
+    }
+
+    #[test]
+    fn parse_env_args_missing_equals() {
+        let args = vec!["NOEQUALS".to_string()];
+        let err = parse_env_args(&args).unwrap_err().to_string();
+        assert!(err.contains("KEY=VALUE"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_env_args_empty_key() {
+        let args = vec!["=value".to_string()];
+        let err = parse_env_args(&args).unwrap_err().to_string();
+        assert!(err.contains("empty key"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_env_args_equals_in_value() {
+        let args = vec!["URL=http://host:8080/path?a=1".to_string()];
+        let map = parse_env_args(&args).unwrap();
+        assert_eq!(map.get("URL").unwrap(), "http://host:8080/path?a=1");
+    }
+
+    #[test]
+    fn build_run_message_includes_env() {
+        let mut env = HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+        let json = build_run_message("echo hello", &env).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["env"]["FOO"], "bar");
+    }
+
+    #[test]
+    fn build_run_message_omits_empty_env() {
+        let json = build_run_message("echo hello", &HashMap::new()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed["env"].is_null());
     }
 }

@@ -13,6 +13,7 @@ Spawn all processes defined in the config file and wait for exit or signal.
 ```sh
 procman run                 # uses procman.yaml
 procman run services.yaml   # uses a custom config
+procman run -e PORT=3000 -e RUST_LOG=debug
 ```
 
 ## `procman serve [CONFIG]`
@@ -27,6 +28,7 @@ Like `run`, but also listens on a FIFO for dynamically added processes. See the
 
 ```sh
 procman serve &
+procman serve -e PORT=3000
 ```
 
 ## `procman start COMMAND [--config CONFIG]`
@@ -41,6 +43,7 @@ Send a run command to a running `procman serve` instance.
 ```sh
 procman start "redis-server --port 6380"
 procman start "worker --threads 4" --config services.yaml
+procman start "my-worker" -e DB_URL=postgres://localhost/mydb
 ```
 
 ## `procman stop [CONFIG]`
@@ -53,6 +56,30 @@ Send a shutdown command to a running `procman serve` instance.
 ```sh
 procman stop
 ```
+
+## `-e` / `--env` — Extra environment variables
+
+The `run`, `serve`, and `start` subcommands accept a repeatable `-e KEY=VALUE` flag to inject
+environment variables without modifying `procman.yaml`.
+
+```sh
+procman run -e PORT=3000 -e RUST_LOG=debug
+procman start "my-worker" -e DB_URL=postgres://localhost/mydb
+```
+
+**Precedence (lowest → highest):**
+
+| Source | `run` / `serve` | `start` |
+|--------|-----------------|---------|
+| System environment | lowest | lowest (server-side) |
+| CLI `-e` flags | middle | sent as JSON `env` field |
+| YAML `env:` block | highest | N/A (no YAML for dynamic processes) |
+
+For `run` and `serve`, YAML `env:` values always win over `-e` flags, which in turn override
+inherited system environment variables.
+
+For `start`, the `-e` flags are sent to the server as part of the JSON message and merged on top
+of the server's system environment.
 
 ## File locking
 
