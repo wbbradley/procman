@@ -179,8 +179,12 @@ impl DependencyDef {
                         "unsupported file_contains format: {other:?} (expected \"json\" or \"yaml\")"
                     ),
                 };
-                let key = serde_json_path::JsonPath::parse(&file_contains.key)
-                    .map_err(|e| anyhow!("invalid JSONPath in file_contains.key: {e}"))?;
+                let key = serde_json_path::JsonPath::parse(&file_contains.key).map_err(|e| {
+                    anyhow!(
+                        "invalid JSONPath in file_contains.key {:?}: {e}",
+                        file_contains.key
+                    )
+                })?;
                 Dependency::FileContainsKey {
                     path: expand_env_vars(&file_contains.path, env)?,
                     format,

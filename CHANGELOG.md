@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.8.1] - 2026-03-19
+
+### Fixed
+- JSONPath parse errors now include the expression that failed, making it easier to identify the problem in configs with multiple `file_contains` dependencies.
+
 ## [0.8.0] - 2026-03-19
 
 ### Breaking Changes
