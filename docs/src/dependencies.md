@@ -22,6 +22,7 @@ depends:
 | `code` | integer | yes | — | Expected HTTP status code |
 | `poll_interval` | float | no | 1.0 | Seconds between polls |
 | `timeout_seconds` | integer | no | 60 | Seconds before giving up |
+| `retry` | bool | no | true | If false, fail immediately on first check instead of polling |
 
 The HTTP client uses a 5-second per-request timeout. Only the status code is checked — the
 response body is ignored.
@@ -40,6 +41,7 @@ depends:
 | `tcp` | string | yes | — | Address in `host:port` form |
 | `poll_interval` | float | no | 1.0 | Seconds between polls |
 | `timeout_seconds` | integer | no | 60 | Seconds before giving up |
+| `retry` | bool | no | true | If false, fail immediately on first check instead of polling |
 
 Each poll attempt uses a 1-second connect timeout.
 
@@ -55,6 +57,7 @@ depends:
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `path` | string | yes | — | Path to check |
+| `retry` | bool | no | true | If false, fail immediately on first check instead of polling |
 
 Poll interval is 1 second. Timeout is 60 seconds. These are not configurable for this
 dependency type.
@@ -81,6 +84,7 @@ depends:
 | `env` | string | no | — | If set, the resolved value is injected as this env var |
 | `poll_interval` | float | no | 1.0 | Seconds between polls |
 | `timeout_seconds` | integer | no | 60 | Seconds before giving up |
+| `retry` | bool | no | true | If false, fail immediately on first check instead of polling |
 
 The `key` field accepts a JSONPath expression (RFC 9535). Use `$` to refer to the document root,
 `.` to traverse nested maps, and bracket notation for array filtering. The first matching value
@@ -115,6 +119,7 @@ depends:
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `process_exited` | string | yes | — | Name of the process to wait for |
+| `retry` | bool | no | true | If false, fail immediately on first check instead of polling |
 
 Poll interval is 100ms. Timeout is 60 seconds. These are not configurable for this
 dependency type.
@@ -139,6 +144,7 @@ depends:
 | `not_listening` | string | yes | — | Address in `host:port` form |
 | `poll_interval` | float | no | 1.0 | Seconds between polls |
 | `timeout_seconds` | integer | no | 60 | Seconds before giving up |
+| `retry` | bool | no | true | If false, fail immediately on first check instead of polling |
 
 Each poll attempts a TCP connect with a 1-second timeout. The dependency is satisfied when the
 connection is **refused** (nobody is listening). Useful to ensure a stale process has released a
@@ -156,6 +162,7 @@ depends:
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `not_exists` | string | yes | — | Path to check |
+| `retry` | bool | no | true | If false, fail immediately on first check instead of polling |
 
 Poll interval is 1 second, timeout is 60 seconds (not configurable). Useful to wait for a
 lockfile or PID file to be cleaned up.
@@ -172,10 +179,28 @@ depends:
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `not_running` | string | yes | — | Pattern passed to `pgrep -f` |
+| `retry` | bool | no | true | If false, fail immediately on first check instead of polling |
 
 Uses `pgrep -f` which matches against the full command line. Available on both macOS and Linux.
 Poll interval is 1 second, timeout is 60 seconds (not configurable). The dependency is satisfied
 when `pgrep` finds no matching processes.
+
+## No-retry mode
+
+All dependency types accept an optional `retry` field (default `true`). When set to `false`,
+the dependency is checked exactly once — if it is not satisfied on the first check, procman
+logs `dependency failed (retry disabled): <description>` and triggers a shutdown immediately,
+without polling or waiting for a timeout.
+
+This is useful to catch stale state that should have been cleaned up before procman started:
+leftover lock files, ports still bound by a previous run, or zombie processes. Rather than
+silently waiting (and eventually timing out), `retry: false` makes the failure explicit and fast.
+
+```yaml
+depends:
+  - not_exists: /tmp/api.lock
+    retry: false
+```
 
 ## How polling works
 
@@ -187,10 +212,12 @@ is evaluated:
 2. Poll the current dependency using its check function.
 3. If the check succeeds, log `dependency satisfied: <description>` and advance to the next
    dependency.
-4. If the check fails for the first time, log `dependency not ready: <description>` (logged
-   only once per dependency to avoid noise).
-5. If the check fails, sleep for the dependency's `poll_interval` and retry.
-6. Once all dependencies are satisfied, proceed to spawn the process.
+4. If the check fails for the first time and `retry` is `false`, log
+   `dependency failed (retry disabled): <description>` and trigger shutdown immediately.
+5. Otherwise, if the check fails for the first time, log `dependency not ready: <description>`
+   (logged only once per dependency to avoid noise).
+6. If the check fails, sleep for the dependency's `poll_interval` and retry.
+7. Once all dependencies are satisfied, proceed to spawn the process.
 
 This sequential evaluation prevents stale-data races — for example, a `file_contains`
 dependency listed after a `process_exited` dependency will not be checked until the process

@@ -122,7 +122,7 @@ fn has_transitive_process_exited_dep(
     config_map: &HashMap<&str, &ProcessConfig>,
 ) -> bool {
     for dep in depends {
-        if let Dependency::ProcessExited { name } = dep {
+        if let Dependency::ProcessExited { name, .. } = dep {
             if name == target {
                 return true;
             }
@@ -266,6 +266,7 @@ mod tests {
                 false,
                 vec![Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    retry: true,
                 }],
                 HashMap::new(),
             ),
@@ -296,6 +297,7 @@ mod tests {
                 false,
                 vec![Dependency::ProcessExited {
                     name: "server".to_string(),
+                    retry: true,
                 }],
                 HashMap::new(),
             ),
@@ -334,6 +336,7 @@ mod tests {
                 true,
                 vec![Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    retry: true,
                 }],
                 HashMap::new(),
             ),
@@ -343,6 +346,7 @@ mod tests {
                 false,
                 vec![Dependency::ProcessExited {
                     name: "middle".to_string(),
+                    retry: true,
                 }],
                 HashMap::new(),
             ),
@@ -362,6 +366,7 @@ mod tests {
                 false,
                 vec![Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    retry: true,
                 }],
                 env,
             ),

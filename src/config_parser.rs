@@ -97,7 +97,7 @@ fn validate_dependency_graph(configs: &[ProcessConfig]) -> Result<()> {
             .depends
             .iter()
             .filter_map(|d| match d {
-                Dependency::ProcessExited { name } => Some(name.as_str()),
+                Dependency::ProcessExited { name, .. } => Some(name.as_str()),
                 _ => None,
             })
             .collect();
@@ -221,6 +221,7 @@ mod tests {
                 code,
                 poll_interval,
                 timeout,
+                ..
             } => {
                 assert_eq!(url, "http://localhost:8080/health");
                 assert_eq!(*code, 200);
@@ -238,7 +239,7 @@ mod tests {
         let configs = parse(&path, &HashMap::new()).unwrap();
         assert_eq!(configs[0].depends.len(), 1);
         match &configs[0].depends[0] {
-            Dependency::FileExists { path } => {
+            Dependency::FileExists { path, .. } => {
                 assert_eq!(path, "/tmp/ready.flag");
             }
             _ => panic!("expected FileExists"),
@@ -301,7 +302,7 @@ mod tests {
         let api = configs.iter().find(|c| c.name == "api").unwrap();
         assert_eq!(api.depends.len(), 1);
         match &api.depends[0] {
-            Dependency::ProcessExited { name } => {
+            Dependency::ProcessExited { name, .. } => {
                 assert_eq!(name, "db-migrate");
             }
             _ => panic!("expected ProcessExited"),
@@ -320,6 +321,7 @@ mod tests {
                 address,
                 poll_interval,
                 timeout,
+                ..
             } => {
                 assert_eq!(address, "127.0.0.1:50051");
                 assert!(poll_interval.is_none());
@@ -340,6 +342,7 @@ mod tests {
                 address,
                 poll_interval,
                 timeout,
+                ..
             } => {
                 assert_eq!(address, "127.0.0.1:50051");
                 assert_eq!(*poll_interval, Some(Duration::from_millis(500)));
@@ -572,6 +575,7 @@ b:
                 address,
                 poll_interval,
                 timeout,
+                ..
             } => {
                 assert_eq!(address, "127.0.0.1:8080");
                 assert!(poll_interval.is_none());
@@ -589,7 +593,7 @@ b:
         let configs = parse(&path, &HashMap::new()).unwrap();
         assert_eq!(configs[0].depends.len(), 1);
         match &configs[0].depends[0] {
-            Dependency::FileNotExists { path } => {
+            Dependency::FileNotExists { path, .. } => {
                 assert_eq!(path, "/tmp/api.lock");
             }
             _ => panic!("expected FileNotExists"),
@@ -604,7 +608,7 @@ b:
         let configs = parse(&path, &HashMap::new()).unwrap();
         assert_eq!(configs[0].depends.len(), 1);
         match &configs[0].depends[0] {
-            Dependency::ProcessNotRunning { pattern } => {
+            Dependency::ProcessNotRunning { pattern, .. } => {
                 assert_eq!(pattern, "old-api.*");
             }
             _ => panic!("expected ProcessNotRunning"),
@@ -630,5 +634,27 @@ b:
         extra.insert("MY_VAR".to_string(), "from_cli".to_string());
         let configs = parse(&path, &extra).unwrap();
         assert_eq!(configs[0].env.get("MY_VAR").unwrap(), "from_yaml");
+    }
+
+    #[test]
+    fn parse_with_retry_false() {
+        let path = write_yaml(
+            "api:\n  depends:\n    - path: /tmp/ready.flag\n      retry: false\n  run: echo hi\n",
+        );
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        match &configs[0].depends[0] {
+            Dependency::FileExists { retry, .. } => assert!(!retry),
+            _ => panic!("expected FileExists"),
+        }
+    }
+
+    #[test]
+    fn parse_with_retry_default() {
+        let path = write_yaml("api:\n  depends:\n    - path: /tmp/ready.flag\n  run: echo hi\n");
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        match &configs[0].depends[0] {
+            Dependency::FileExists { retry, .. } => assert!(retry),
+            _ => panic!("expected FileExists"),
+        }
     }
 }

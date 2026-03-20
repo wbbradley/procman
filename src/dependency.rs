@@ -82,8 +82,8 @@ fn check(
         Dependency::FileContainsKey {
             path, format, key, ..
         } => read_file_value(path, format, key).is_some(),
-        Dependency::FileExists { path } => Path::new(path).exists(),
-        Dependency::ProcessExited { name } => exit_registry.lock().unwrap().contains(name),
+        Dependency::FileExists { path, .. } => Path::new(path).exists(),
+        Dependency::ProcessExited { name, .. } => exit_registry.lock().unwrap().contains(name),
         Dependency::TcpNotListening { address, .. } => {
             use std::net::ToSocketAddrs;
             !address
@@ -95,8 +95,8 @@ fn check(
                 })
                 .unwrap_or(false)
         }
-        Dependency::FileNotExists { path } => !Path::new(path).exists(),
-        Dependency::ProcessNotRunning { pattern } => std::process::Command::new("pgrep")
+        Dependency::FileNotExists { path, .. } => !Path::new(path).exists(),
+        Dependency::ProcessNotRunning { pattern, .. } => std::process::Command::new("pgrep")
             .args(["-f", pattern])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -140,6 +140,19 @@ fn timeout(dep: &Dependency) -> Duration {
     }
 }
 
+fn retry(dep: &Dependency) -> bool {
+    match dep {
+        Dependency::HttpHealthCheck { retry, .. } => *retry,
+        Dependency::TcpConnect { retry, .. } => *retry,
+        Dependency::FileContainsKey { retry, .. } => *retry,
+        Dependency::FileExists { retry, .. } => *retry,
+        Dependency::ProcessExited { retry, .. } => *retry,
+        Dependency::TcpNotListening { retry, .. } => *retry,
+        Dependency::FileNotExists { retry, .. } => *retry,
+        Dependency::ProcessNotRunning { retry, .. } => *retry,
+    }
+}
+
 fn description(dep: &Dependency) -> String {
     match dep {
         Dependency::HttpHealthCheck { url, code, .. } => {
@@ -151,19 +164,19 @@ fn description(dep: &Dependency) -> String {
         Dependency::FileContainsKey { path, key, .. } => {
             format!("file contains key '{key}' in {path}")
         }
-        Dependency::FileExists { path } => {
+        Dependency::FileExists { path, .. } => {
             format!("file exists: {path}")
         }
-        Dependency::ProcessExited { name } => {
+        Dependency::ProcessExited { name, .. } => {
             format!("process exited: {name}")
         }
         Dependency::TcpNotListening { address, .. } => {
             format!("tcp not listening: {address}")
         }
-        Dependency::FileNotExists { path } => {
+        Dependency::FileNotExists { path, .. } => {
             format!("file not exists: {path}")
         }
-        Dependency::ProcessNotRunning { pattern } => {
+        Dependency::ProcessNotRunning { pattern, .. } => {
             format!("process not running: {pattern}")
         }
     }
@@ -224,6 +237,14 @@ fn wait_for_dependencies(
 
             if !first_failure_logged {
                 first_failure_logged = true;
+                if !retry(dep) {
+                    let desc = description(dep);
+                    logger.lock().unwrap().log_line(
+                        &config.name,
+                        &format!("dependency failed (retry disabled): {desc}"),
+                    );
+                    return false;
+                }
                 let desc = description(dep);
                 logger
                     .lock()
@@ -337,7 +358,10 @@ mod tests {
     fn file_exists_check_returns_false_then_true() {
         let path = temp_path("check_file");
         let _ = std::fs::remove_file(&path);
-        let dep = Dependency::FileExists { path: path.clone() };
+        let dep = Dependency::FileExists {
+            path: path.clone(),
+            retry: true,
+        };
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
                 .timeout_global(Some(Duration::from_secs(5)))
@@ -358,7 +382,10 @@ mod tests {
 
         let config = make_config(
             "waiter",
-            vec![Dependency::FileExists { path: path.clone() }],
+            vec![Dependency::FileExists {
+                path: path.clone(),
+                retry: true,
+            }],
         );
         let (tx, rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -397,6 +424,7 @@ mod tests {
                 code: 200,
                 poll_interval: Some(Duration::from_millis(50)),
                 timeout: Some(Duration::from_millis(200)),
+                retry: true,
             }],
         );
         let (tx, _rx) = mpsc::channel();
@@ -425,7 +453,10 @@ mod tests {
 
         let config = make_config(
             "shutdown-test",
-            vec![Dependency::FileExists { path: path.clone() }],
+            vec![Dependency::FileExists {
+                path: path.clone(),
+                retry: true,
+            }],
         );
         let (tx, _rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -452,6 +483,7 @@ mod tests {
     fn process_exited_check_returns_false_then_true() {
         let dep = Dependency::ProcessExited {
             name: "migrate".to_string(),
+            retry: true,
         };
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
@@ -471,6 +503,7 @@ mod tests {
             address: "127.0.0.1:1".to_string(),
             poll_interval: None,
             timeout: None,
+            retry: true,
         };
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
@@ -492,6 +525,7 @@ mod tests {
                 address: addr,
                 poll_interval: None,
                 timeout: None,
+                retry: true,
             }],
         );
         let (tx, rx) = mpsc::channel();
@@ -522,6 +556,7 @@ mod tests {
             "api",
             vec![Dependency::ProcessExited {
                 name: "migrate".to_string(),
+                retry: true,
             }],
         );
         let (tx, rx) = mpsc::channel();
@@ -560,6 +595,7 @@ mod tests {
             env: None,
             poll_interval: None,
             timeout: None,
+            retry: true,
         };
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
@@ -581,6 +617,7 @@ mod tests {
             env: None,
             poll_interval: None,
             timeout: None,
+            retry: true,
         };
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
@@ -603,6 +640,7 @@ mod tests {
             env: None,
             poll_interval: None,
             timeout: None,
+            retry: true,
         };
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
@@ -625,6 +663,7 @@ mod tests {
             env: None,
             poll_interval: None,
             timeout: None,
+            retry: true,
         };
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
@@ -647,6 +686,7 @@ mod tests {
             env: None,
             poll_interval: None,
             timeout: None,
+            retry: true,
         };
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
@@ -676,6 +716,7 @@ mod tests {
             env: Some("DATABASE_URL".to_string()),
             poll_interval: None,
             timeout: None,
+            retry: true,
         }];
         let env = collect_dependency_env(&deps).unwrap();
         assert_eq!(
@@ -712,6 +753,7 @@ mod tests {
             env: None,
             poll_interval: None,
             timeout: None,
+            retry: true,
         }];
         let env = collect_dependency_env(&deps).unwrap();
         assert!(env.is_empty());
@@ -729,6 +771,7 @@ mod tests {
                 env: None,
                 poll_interval: None,
                 timeout_seconds: None,
+                retry: None,
             },
         };
         let env = std::collections::HashMap::new();
@@ -746,8 +789,12 @@ mod tests {
             vec![
                 Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    retry: true,
                 },
-                Dependency::FileExists { path: path.clone() },
+                Dependency::FileExists {
+                    path: path.clone(),
+                    retry: true,
+                },
             ],
         );
         let (tx, rx) = mpsc::channel();
@@ -790,8 +837,12 @@ mod tests {
             vec![
                 Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    retry: true,
                 },
-                Dependency::FileExists { path: path.clone() },
+                Dependency::FileExists {
+                    path: path.clone(),
+                    retry: true,
+                },
             ],
         );
         let (tx, rx) = mpsc::channel();
@@ -830,6 +881,7 @@ mod tests {
             address: "127.0.0.1:19291".to_string(),
             poll_interval: None,
             timeout: None,
+            retry: true,
         };
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
@@ -848,6 +900,7 @@ mod tests {
             address: addr,
             poll_interval: None,
             timeout: None,
+            retry: true,
         };
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
@@ -862,6 +915,7 @@ mod tests {
     fn file_not_exists_check_returns_true_for_missing_file() {
         let dep = Dependency::FileNotExists {
             path: "/tmp/procman_nonexistent_file_99999".to_string(),
+            retry: true,
         };
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
@@ -876,7 +930,10 @@ mod tests {
     fn file_not_exists_check_returns_false_for_existing_file() {
         let path = temp_path("not_exists_existing");
         std::fs::write(&path, "").unwrap();
-        let dep = Dependency::FileNotExists { path: path.clone() };
+        let dep = Dependency::FileNotExists {
+            path: path.clone(),
+            retry: true,
+        };
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
                 .timeout_global(Some(Duration::from_secs(5)))
@@ -891,6 +948,7 @@ mod tests {
     fn process_not_running_check_returns_true_for_no_match() {
         let dep = Dependency::ProcessNotRunning {
             pattern: "zzz_procman_nonexistent_process_zzz".to_string(),
+            retry: true,
         };
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
@@ -906,6 +964,7 @@ mod tests {
         // pgrep -f "procman" should match the test binary itself
         let dep = Dependency::ProcessNotRunning {
             pattern: "procman".to_string(),
+            retry: true,
         };
         let agent = ureq::Agent::new_with_config(
             ureq::config::Config::builder()
@@ -929,8 +988,12 @@ mod tests {
                     code: 200,
                     poll_interval: Some(Duration::from_millis(50)),
                     timeout: Some(Duration::from_millis(200)),
+                    retry: true,
                 },
-                Dependency::FileExists { path: path.clone() },
+                Dependency::FileExists {
+                    path: path.clone(),
+                    retry: true,
+                },
             ],
         );
         let (tx, rx) = mpsc::channel();
@@ -953,5 +1016,95 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn retry_false_fails_immediately() {
+        let path = temp_path("retry_false");
+        let _ = std::fs::remove_file(&path);
+
+        let config = make_config(
+            "retry-false",
+            vec![Dependency::FileExists {
+                path: path.clone(),
+                retry: false,
+            }],
+        );
+        let (tx, _rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let logger = make_logger(&["retry-false"]);
+        let pending = Arc::new(AtomicUsize::new(1));
+
+        let start = Instant::now();
+        let handle = spawn_waiter(
+            config,
+            tx,
+            Arc::clone(&shutdown),
+            logger,
+            Arc::clone(&pending),
+            make_exit_registry(),
+        );
+        handle.join().unwrap();
+
+        // Should have failed almost immediately — well under 1 second
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(shutdown.load(Ordering::Relaxed));
+        assert_eq!(pending.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn retry_true_retries_as_before() {
+        let path = temp_path("retry_true");
+        let _ = std::fs::remove_file(&path);
+
+        let config = make_config(
+            "retry-true",
+            vec![Dependency::FileExists {
+                path: path.clone(),
+                retry: true,
+            }],
+        );
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let logger = make_logger(&["retry-true"]);
+        let pending = Arc::new(AtomicUsize::new(1));
+
+        let _handle = spawn_waiter(
+            config,
+            tx,
+            Arc::clone(&shutdown),
+            logger,
+            Arc::clone(&pending),
+            make_exit_registry(),
+        );
+
+        // Create the file after a short delay — should retry and succeed
+        thread::sleep(Duration::from_millis(200));
+        std::fs::write(&path, "").unwrap();
+
+        let received = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        match received {
+            SupervisorCommand::Spawn(config) => assert_eq!(config.name, "retry-true"),
+            _ => panic!("expected Spawn"),
+        }
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn retry_default_is_true() {
+        let yaml = "api:\n  depends:\n    - path: /tmp/retry_default_test\n  run: echo hi\n";
+        let def: std::collections::HashMap<String, serde_yaml::Value> =
+            serde_yaml::from_str(yaml).unwrap();
+        let api_val = def.get("api").unwrap();
+        let depends = api_val.get("depends").unwrap().as_sequence().unwrap();
+        let dep_def: crate::config::DependencyDef =
+            serde_yaml::from_value(depends[0].clone()).unwrap();
+        let env = std::collections::HashMap::new();
+        let dep = dep_def.into_dependency(&env).unwrap();
+        match dep {
+            Dependency::FileExists { retry, .. } => assert!(retry),
+            _ => panic!("expected FileExists"),
+        }
     }
 }

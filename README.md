@@ -139,6 +139,8 @@ nodes:
   - **File not exists**: `not_exists` path that must not exist.
   - **Process not running**: `not_running` pattern (matched via `pgrep -f`). Waits until no matching process is found.
 
+  All dependency types accept an optional `retry` (default `true`). Set `retry: false` to fail immediately if the dependency is not satisfied on the first check — useful to catch stale state (leftover lock files, ports still bound, zombie processes).
+
 ## Behavior
 
 - Each child runs in its own process group; shutdown signals reach all descendants.

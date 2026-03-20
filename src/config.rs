@@ -32,11 +32,13 @@ pub enum Dependency {
         code: u16,
         poll_interval: Option<Duration>,
         timeout: Option<Duration>,
+        retry: bool,
     },
     TcpConnect {
         address: String,
         poll_interval: Option<Duration>,
         timeout: Option<Duration>,
+        retry: bool,
     },
     FileContainsKey {
         path: String,
@@ -45,23 +47,29 @@ pub enum Dependency {
         env: Option<String>,
         poll_interval: Option<Duration>,
         timeout: Option<Duration>,
+        retry: bool,
     },
     FileExists {
         path: String,
+        retry: bool,
     },
     ProcessExited {
         name: String,
+        retry: bool,
     },
     TcpNotListening {
         address: String,
         poll_interval: Option<Duration>,
         timeout: Option<Duration>,
+        retry: bool,
     },
     FileNotExists {
         path: String,
+        retry: bool,
     },
     ProcessNotRunning {
         pattern: String,
+        retry: bool,
     },
 }
 
@@ -76,6 +84,8 @@ pub struct FileContainsDef {
     pub poll_interval: Option<f64>,
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub retry: Option<bool>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -86,31 +96,45 @@ pub enum DependencyDef {
         code: u16,
         poll_interval: Option<f64>,
         timeout_seconds: Option<u64>,
+        #[serde(default)]
+        retry: Option<bool>,
     },
     TcpConnect {
         tcp: String,
         poll_interval: Option<f64>,
         timeout_seconds: Option<u64>,
+        #[serde(default)]
+        retry: Option<bool>,
     },
     FileContainsKey {
         file_contains: FileContainsDef,
     },
     FileExists {
         path: String,
+        #[serde(default)]
+        retry: Option<bool>,
     },
     ProcessExited {
         process_exited: String,
+        #[serde(default)]
+        retry: Option<bool>,
     },
     TcpNotListening {
         not_listening: String,
         poll_interval: Option<f64>,
         timeout_seconds: Option<u64>,
+        #[serde(default)]
+        retry: Option<bool>,
     },
     FileNotExists {
         not_exists: String,
+        #[serde(default)]
+        retry: Option<bool>,
     },
     ProcessNotRunning {
         not_running: String,
+        #[serde(default)]
+        retry: Option<bool>,
     },
 }
 
@@ -178,20 +202,24 @@ impl DependencyDef {
                 code,
                 poll_interval,
                 timeout_seconds,
+                retry,
             } => Dependency::HttpHealthCheck {
                 url: expand_env_vars(&url, env)?,
                 code,
                 poll_interval: poll_interval.map(Duration::from_secs_f64),
                 timeout: timeout_seconds.map(Duration::from_secs),
+                retry: retry.unwrap_or(true),
             },
             DependencyDef::TcpConnect {
                 tcp,
                 poll_interval,
                 timeout_seconds,
+                retry,
             } => Dependency::TcpConnect {
                 address: expand_env_vars(&tcp, env)?,
                 poll_interval: poll_interval.map(Duration::from_secs_f64),
                 timeout: timeout_seconds.map(Duration::from_secs),
+                retry: retry.unwrap_or(true),
             },
             DependencyDef::FileContainsKey { file_contains } => {
                 let format = match file_contains.format.as_str() {
@@ -214,29 +242,41 @@ impl DependencyDef {
                     env: file_contains.env,
                     poll_interval: file_contains.poll_interval.map(Duration::from_secs_f64),
                     timeout: file_contains.timeout_seconds.map(Duration::from_secs),
+                    retry: file_contains.retry.unwrap_or(true),
                 }
             }
-            DependencyDef::FileExists { path } => Dependency::FileExists {
+            DependencyDef::FileExists { path, retry } => Dependency::FileExists {
                 path: expand_env_vars(&path, env)?,
+                retry: retry.unwrap_or(true),
             },
-            DependencyDef::ProcessExited { process_exited } => Dependency::ProcessExited {
+            DependencyDef::ProcessExited {
+                process_exited,
+                retry,
+            } => Dependency::ProcessExited {
                 name: process_exited,
+                retry: retry.unwrap_or(true),
             },
             DependencyDef::TcpNotListening {
                 not_listening,
                 poll_interval,
                 timeout_seconds,
+                retry,
             } => Dependency::TcpNotListening {
                 address: expand_env_vars(&not_listening, env)?,
                 poll_interval: poll_interval.map(Duration::from_secs_f64),
                 timeout: timeout_seconds.map(Duration::from_secs),
+                retry: retry.unwrap_or(true),
             },
-            DependencyDef::FileNotExists { not_exists } => Dependency::FileNotExists {
+            DependencyDef::FileNotExists { not_exists, retry } => Dependency::FileNotExists {
                 path: expand_env_vars(&not_exists, env)?,
+                retry: retry.unwrap_or(true),
             },
-            DependencyDef::ProcessNotRunning { not_running } => Dependency::ProcessNotRunning {
-                pattern: expand_env_vars(&not_running, env)?,
-            },
+            DependencyDef::ProcessNotRunning { not_running, retry } => {
+                Dependency::ProcessNotRunning {
+                    pattern: expand_env_vars(&not_running, env)?,
+                    retry: retry.unwrap_or(true),
+                }
+            }
         })
     }
 }
