@@ -53,6 +53,15 @@ api:
 Templates can appear in both `run` and `env` values. Multiple template references can appear
 in a single string and can be mixed with literal text.
 
+> **Tip:** In multi-line `run` scripts (executed via `sh -c`), quote template references to
+> protect against whitespace or special characters in resolved values:
+>
+> ```yaml
+> run: |
+>   echo "Connecting to ${{ migrate.DATABASE_URL }}"
+>   exec ./start-api --db "${{ migrate.DATABASE_URL }}"
+> ```
+
 ## Resolution
 
 Template resolution happens **at spawn time**, after all dependencies for the process are
