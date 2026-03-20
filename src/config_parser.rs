@@ -45,7 +45,11 @@ pub fn parse(path: &str) -> Result<Vec<ProcessConfig>> {
         }
 
         // Validate non-template runs can be shell-parsed
-        if !def.run.contains("${{") {
+        if def.run.trim().contains('\n') {
+            if def.run.trim().is_empty() {
+                bail!("empty run command for process {name}");
+            }
+        } else if !def.run.contains("${{") {
             let tokens = shell_words::split(&def.run)
                 .with_context(|| format!("parsing run command for process {name}"))?;
             if tokens.is_empty() {
@@ -512,6 +516,21 @@ a:
             format!("{err}").contains("unknown process"),
             "expected unknown process error, got: {err}"
         );
+    }
+
+    #[test]
+    fn parse_multiline_run() {
+        let yaml = "\
+web:
+  run: |
+    echo starting
+    exec my-server --port 3000
+";
+        let path = write_yaml(yaml);
+        let configs = parse(&path).unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "web");
+        assert!(configs[0].run.contains('\n'));
     }
 
     #[test]

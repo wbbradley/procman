@@ -41,6 +41,21 @@ pub struct ProcessGroup {
     fan_out_groups: HashMap<String, HashSet<String>>,
 }
 
+fn build_command(resolved_run: &str, name: &str) -> Result<std::process::Command> {
+    if resolved_run.trim().contains('\n') {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", resolved_run]);
+        Ok(cmd)
+    } else {
+        let tokens = shell_words::split(resolved_run)
+            .with_context(|| format!("parsing run command for {name}"))?;
+        anyhow::ensure!(!tokens.is_empty(), "empty run command for {name}");
+        let mut cmd = std::process::Command::new(&tokens[0]);
+        cmd.args(&tokens[1..]);
+        Ok(cmd)
+    }
+}
+
 impl ProcessGroup {
     fn spawn_one(&mut self, cmd: &ProcessConfig, logger: &Arc<Mutex<Logger>>) -> Result<Pid> {
         let log_dir = &self.log_dir;
@@ -64,14 +79,9 @@ impl ProcessGroup {
             output_path.to_string_lossy().to_string(),
         );
 
-        // Resolve templates in run string, then shell-split
+        // Resolve templates in run string, then build command
         let resolved_run = output::resolve_templates(&cmd.run, &resolve)?;
-        let tokens = shell_words::split(&resolved_run)
-            .with_context(|| format!("parsing run command for {}", cmd.name))?;
-        anyhow::ensure!(!tokens.is_empty(), "empty run command for {}", cmd.name);
-
-        let mut child_cmd = std::process::Command::new(&tokens[0]);
-        child_cmd.args(&tokens[1..]);
+        let mut child_cmd = build_command(&resolved_run, &cmd.name)?;
         child_cmd.env_clear();
         child_cmd.envs(&resolved_env);
         child_cmd.stdout(Stdio::piped());
@@ -79,6 +89,9 @@ impl ProcessGroup {
 
         unsafe {
             child_cmd.pre_exec(move || {
+                if libc::setpgid(0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 let r = libc::dup2(1, 2);
                 if r == -1 {
                     return Err(std::io::Error::last_os_error());
@@ -366,9 +379,9 @@ impl ProcessGroup {
             }
         }
 
-        // SIGTERM each remaining child
+        // SIGTERM each remaining child's process group
         for pid in &remaining {
-            let _ = signal::kill(*pid, Signal::SIGTERM);
+            let _ = signal::killpg(*pid, Signal::SIGTERM);
         }
 
         // Poll for up to 2 seconds
@@ -393,7 +406,7 @@ impl ProcessGroup {
 
         // SIGKILL any that remain
         for pid in &remaining {
-            let _ = signal::kill(*pid, Signal::SIGKILL);
+            let _ = signal::killpg(*pid, Signal::SIGKILL);
             let _ = waitpid(*pid, None);
         }
 
@@ -450,6 +463,31 @@ mod tests {
         }
         let pattern = dir.join("node-*.yaml").to_string_lossy().to_string();
         (dir, pattern)
+    }
+
+    #[test]
+    fn build_command_single_line() {
+        let cmd = build_command("echo hello world", "test").unwrap();
+        assert_eq!(cmd.get_program(), "echo");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, &["hello", "world"]);
+    }
+
+    #[test]
+    fn build_command_multiline_uses_sh() {
+        let cmd = build_command("echo hello\necho world", "test").unwrap();
+        assert_eq!(cmd.get_program(), "sh");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, &["-c", "echo hello\necho world"]);
+    }
+
+    #[test]
+    fn build_command_trailing_newline_only() {
+        // A single command with just a trailing newline should use direct exec
+        let cmd = build_command("echo hello\n", "test").unwrap();
+        assert_eq!(cmd.get_program(), "echo");
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args, &["hello"]);
     }
 
     #[test]
