@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
@@ -41,7 +41,7 @@ pub enum Dependency {
     FileContainsKey {
         path: String,
         format: FileFormat,
-        key: String,
+        key: serde_json_path::JsonPath,
         env: Option<String>,
         poll_interval: Option<Duration>,
         timeout: Option<Duration>,
@@ -179,10 +179,12 @@ impl DependencyDef {
                         "unsupported file_contains format: {other:?} (expected \"json\" or \"yaml\")"
                     ),
                 };
+                let key = serde_json_path::JsonPath::parse(&file_contains.key)
+                    .map_err(|e| anyhow!("invalid JSONPath in file_contains.key: {e}"))?;
                 Dependency::FileContainsKey {
                     path: expand_env_vars(&file_contains.path, env)?,
                     format,
-                    key: file_contains.key,
+                    key,
                     env: file_contains.env,
                     poll_interval: file_contains.poll_interval.map(Duration::from_secs_f64),
                     timeout: file_contains.timeout_seconds.map(Duration::from_secs),

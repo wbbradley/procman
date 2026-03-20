@@ -386,7 +386,7 @@ app:
         match &configs[0].depends[0] {
             Dependency::FileContainsKey { path, key, env, .. } => {
                 assert_eq!(path, "/tmp/config.yaml");
-                assert_eq!(key, "$.database.url");
+                assert_eq!(key.to_string(), "$.database.url");
                 assert_eq!(env.as_deref(), Some("DATABASE_URL"));
             }
             _ => panic!("expected FileContainsKey"),
@@ -545,5 +545,17 @@ b:
 ";
         let path = write_yaml(yaml);
         parse(&path).unwrap();
+    }
+
+    #[test]
+    fn parse_rejects_invalid_jsonpath_key() {
+        let path = write_yaml(
+            "api:\n  depends:\n    - file_contains:\n        path: /tmp/config.yaml\n        format: yaml\n        key: \"$[invalid\"\n  run: echo hi\n",
+        );
+        let err = parse(&path).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("invalid JSONPath"),
+            "expected JSONPath error, got: {err:?}"
+        );
     }
 }

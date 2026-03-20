@@ -18,14 +18,17 @@ use crate::{
     log::Logger,
 };
 
-fn read_file_value(path: &str, format: &FileFormat, key: &str) -> Option<String> {
+fn read_file_value(
+    path: &str,
+    format: &FileFormat,
+    key: &serde_json_path::JsonPath,
+) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     let root: serde_json::Value = match format {
         FileFormat::Json => serde_json::from_str(&content).ok()?,
         FileFormat::Yaml => serde_yaml::from_str(&content).ok()?,
     };
-    let json_path = serde_json_path::JsonPath::parse(key).ok()?;
-    let node_list = json_path.query(&root);
+    let node_list = key.query(&root);
     let value = node_list.first()?;
     match value {
         serde_json::Value::String(s) => Some(s.clone()),
@@ -531,7 +534,7 @@ mod tests {
         let dep = Dependency::FileContainsKey {
             path: "/tmp/procman_nonexistent_file_12345".to_string(),
             format: FileFormat::Yaml,
-            key: "$.foo".to_string(),
+            key: serde_json_path::JsonPath::parse("$.foo").unwrap(),
             env: None,
             poll_interval: None,
             timeout: None,
@@ -552,7 +555,7 @@ mod tests {
         let dep = Dependency::FileContainsKey {
             path: path.clone(),
             format: FileFormat::Yaml,
-            key: "$.foo".to_string(),
+            key: serde_json_path::JsonPath::parse("$.foo").unwrap(),
             env: None,
             poll_interval: None,
             timeout: None,
@@ -574,7 +577,7 @@ mod tests {
         let dep = Dependency::FileContainsKey {
             path: path.clone(),
             format: FileFormat::Yaml,
-            key: "$.database".to_string(),
+            key: serde_json_path::JsonPath::parse("$.database").unwrap(),
             env: None,
             poll_interval: None,
             timeout: None,
@@ -596,7 +599,7 @@ mod tests {
         let dep = Dependency::FileContainsKey {
             path: path.clone(),
             format: FileFormat::Json,
-            key: "$.api_key".to_string(),
+            key: serde_json_path::JsonPath::parse("$.api_key").unwrap(),
             env: None,
             poll_interval: None,
             timeout: None,
@@ -618,7 +621,7 @@ mod tests {
         let dep = Dependency::FileContainsKey {
             path: path.clone(),
             format: FileFormat::Yaml,
-            key: "$.a.b.c".to_string(),
+            key: serde_json_path::JsonPath::parse("$.a.b.c").unwrap(),
             env: None,
             poll_interval: None,
             timeout: None,
@@ -632,8 +635,9 @@ mod tests {
         assert!(check(&dep, &agent, &exit_registry));
 
         // Also verify the value
+        let key = serde_json_path::JsonPath::parse("$.a.b.c").unwrap();
         assert_eq!(
-            read_file_value(&path, &FileFormat::Yaml, "$.a.b.c"),
+            read_file_value(&path, &FileFormat::Yaml, &key),
             Some("deep_value".to_string())
         );
         std::fs::remove_file(&path).unwrap();
@@ -646,7 +650,7 @@ mod tests {
         let deps = vec![Dependency::FileContainsKey {
             path: path.clone(),
             format: FileFormat::Yaml,
-            key: "$.database.url".to_string(),
+            key: serde_json_path::JsonPath::parse("$.database.url").unwrap(),
             env: Some("DATABASE_URL".to_string()),
             poll_interval: None,
             timeout: None,
@@ -667,12 +671,9 @@ mod tests {
             "envs:\n  - alias: local\n    rpc: \"http://127.0.0.1:9000\"\n  - alias: remote\n    rpc: \"http://example.com:9000\"\n",
         )
         .unwrap();
+        let key = serde_json_path::JsonPath::parse("$.envs[?(@.alias == 'local')].rpc").unwrap();
         assert_eq!(
-            read_file_value(
-                &path,
-                &FileFormat::Yaml,
-                "$.envs[?(@.alias == 'local')].rpc"
-            ),
+            read_file_value(&path, &FileFormat::Yaml, &key),
             Some("http://127.0.0.1:9000".to_string())
         );
         std::fs::remove_file(&path).unwrap();
@@ -685,7 +686,7 @@ mod tests {
         let deps = vec![Dependency::FileContainsKey {
             path: path.clone(),
             format: FileFormat::Yaml,
-            key: "$.key".to_string(),
+            key: serde_json_path::JsonPath::parse("$.key").unwrap(),
             env: None,
             poll_interval: None,
             timeout: None,
@@ -693,5 +694,23 @@ mod tests {
         let env = collect_dependency_env(&deps).unwrap();
         assert!(env.is_empty());
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn file_contains_rejects_invalid_jsonpath() {
+        use crate::config::DependencyDef;
+        let def = DependencyDef::FileContainsKey {
+            file_contains: crate::config::FileContainsDef {
+                path: "/tmp/test.yaml".to_string(),
+                format: "yaml".to_string(),
+                key: "$[invalid".to_string(),
+                env: None,
+                poll_interval: None,
+                timeout_seconds: None,
+            },
+        };
+        let env = std::collections::HashMap::new();
+        let err = def.into_dependency(&env).unwrap_err();
+        assert!(err.to_string().contains("invalid JSONPath"), "{err}");
     }
 }
