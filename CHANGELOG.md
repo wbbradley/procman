@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.10.0] - 2026-03-20
+
+### Breaking Changes
+- All `run` commands are now executed via `sh -c`, including single-line commands. Previously, single-line commands were tokenized with `shell_words` and exec'd directly. Parse-time shell quoting validation is removed; shell syntax errors are reported at runtime by `sh`.
+- In `run` mode, procman now exits with code 0 when all `once` processes complete and no long-running processes remain. Previously it would hang indefinitely. `serve` mode is unaffected.
+
+### Added
+- Inverse dependency types: `not_listening` (TCP port not accepting connections), `not_exists` (file does not exist), `not_running` (no process matching pattern via `pgrep -f`). All support `poll_interval`, `timeout_seconds`, and `retry`.
+- `retry` field on all dependency types (default `true`). Set `retry: false` to fail immediately on the first unsuccessful check instead of polling.
+
+### Changed
+- Default exit code when no child has exited is now `0` instead of `1`.
+
+### Fixed
+- Shell operators (`&&`, `|`, `;`, `>`) in single-line `run` commands now work correctly instead of being passed as literal arguments.
+
 ## [0.9.0] - 2026-03-19
 
 ### Added
