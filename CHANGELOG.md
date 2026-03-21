@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.10.1] - 2026-03-20
+
+### Fixed
+- Debug mode no longer lists already-exited once-processes as "still running." Previously, a fast `once: true` process could appear in the debug pause output even after completing successfully.
+- Documentation corrections: `process_exited` dependency requires exit code 0 (not any code); undefined env vars produce an error (not pass-through); env var expansion field list now complete; `file_contains` key example uses JSONPath syntax.
+
 ## [0.10.0] - 2026-03-20
 
 ### Breaking Changes
