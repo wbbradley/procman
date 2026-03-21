@@ -128,8 +128,8 @@ have exited.
 
 ## Environment variable expansion
 
-Dependency paths (for `url`, `tcp`, `path`, and `file_contains.path` fields) support
-environment variable expansion at parse time:
+Dependency fields (`url`, `tcp`, `path`, `file_contains.path`, `not_listening`,
+`not_exists`, `not_running`) support environment variable expansion at parse time:
 
 | Syntax | Behavior |
 |--------|----------|
@@ -137,8 +137,8 @@ environment variable expansion at parse time:
 | `${VAR}` | Replaced with the value of `VAR` (braced form) |
 | `$$` | Escaped literal `$` |
 
-If a referenced variable is not set, the expression is left unchanged (e.g. `$UNKNOWN`
-remains `$UNKNOWN`).
+If a referenced variable is not set, procman exits with an error identifying the
+undefined variable.
 
 ```yaml
 api:

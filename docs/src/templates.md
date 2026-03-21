@@ -132,7 +132,7 @@ api:
     - file_contains:
         path: procman-logs/setup.output
         format: yaml
-        key: database.url
+        key: "$.database.url"
         env: DATABASE_URL
   run: ./start-api
 ```
