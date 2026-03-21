@@ -400,6 +400,24 @@ impl ProcessGroup {
             }
         }
 
+        // Drain any already-exited children so "remaining" is accurate
+        loop {
+            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::Exited(pid, code)) => {
+                    remaining.retain(|p| *p != pid);
+                    self.children.retain(|(p, _, _, _)| *p != pid);
+                    if first_exit_code.is_none() {
+                        first_exit_code = Some(code);
+                    }
+                }
+                Ok(WaitStatus::Signaled(pid, _, _)) => {
+                    remaining.retain(|p| *p != pid);
+                    self.children.retain(|(p, _, _, _)| *p != pid);
+                }
+                _ => break,
+            }
+        }
+
         if self.debug_mode && !remaining.is_empty() && !signal_triggered.load(Ordering::Relaxed) {
             let trigger = shutdown_trigger
                 .as_deref()
@@ -869,6 +887,74 @@ mod tests {
             .expect("should exit after shutdown");
         // Exit code 0 since no process failed
         assert_eq!(code, 0);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn debug_mode_excludes_completed_once_processes() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let (tx, rx) = mpsc::channel::<crate::config::SupervisorCommand>();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let signal_triggered = Arc::new(AtomicBool::new(false));
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let log_dir = std::env::temp_dir().join(format!(
+            "procman_debug_once_test_{}_{id}",
+            std::process::id()
+        ));
+        let logger = Arc::new(Mutex::new(
+            Logger::new_for_test(
+                &[
+                    "procman".to_string(),
+                    "fast".to_string(),
+                    "crasher".to_string(),
+                ],
+                log_dir,
+            )
+            .unwrap(),
+        ));
+        let configs = vec![
+            ProcessConfig {
+                name: "fast".to_string(),
+                env: std::env::vars().collect(),
+                run: "echo done".to_string(),
+                depends: vec![],
+                once: true,
+                for_each: None,
+            },
+            ProcessConfig {
+                name: "crasher".to_string(),
+                env: std::env::vars().collect(),
+                run: "exit 1".to_string(),
+                depends: vec![],
+                once: false,
+                for_each: None,
+            },
+        ];
+        let group = ProcessGroup::spawn(
+            &configs,
+            tx,
+            Arc::clone(&shutdown),
+            Arc::clone(&logger),
+            true,
+            false,
+        )
+        .unwrap();
+        drop(rx);
+        let (done_tx, done_rx) = mpsc::channel();
+        let shutdown2 = Arc::clone(&shutdown);
+        let signal2 = Arc::clone(&signal_triggered);
+        let logger2 = Arc::clone(&logger);
+        // Pre-trigger signal so debug mode doesn't block waiting for stdin
+        signal_triggered.store(true, Ordering::Relaxed);
+        let handle = thread::spawn(move || {
+            let (_, inner_rx) = mpsc::channel();
+            let code = group.wait_and_shutdown(shutdown2, signal2, inner_rx, logger2);
+            let _ = done_tx.send(code);
+        });
+        let code = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("wait_and_shutdown should not hang");
+        assert_eq!(code, 1);
         handle.join().unwrap();
     }
 }
