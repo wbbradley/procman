@@ -49,7 +49,7 @@ fn build_command(resolved_run: &str, name: &str) -> Result<std::process::Command
         "empty run command for {name}"
     );
     let mut cmd = std::process::Command::new("sh");
-    cmd.args(["-c", resolved_run]);
+    cmd.args(["-e", "-u", "-o", "pipefail", "-c", resolved_run]);
     Ok(cmd)
 }
 
@@ -557,7 +557,10 @@ mod tests {
         let cmd = build_command("echo hello world", "test").unwrap();
         assert_eq!(cmd.get_program(), "sh");
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, &["-c", "echo hello world"]);
+        assert_eq!(
+            args,
+            &["-e", "-u", "-o", "pipefail", "-c", "echo hello world"]
+        );
     }
 
     #[test]
@@ -565,7 +568,10 @@ mod tests {
         let cmd = build_command("echo hello\necho world", "test").unwrap();
         assert_eq!(cmd.get_program(), "sh");
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, &["-c", "echo hello\necho world"]);
+        assert_eq!(
+            args,
+            &["-e", "-u", "-o", "pipefail", "-c", "echo hello\necho world"]
+        );
     }
 
     #[test]
@@ -573,7 +579,7 @@ mod tests {
         let cmd = build_command("echo hello\n", "test").unwrap();
         assert_eq!(cmd.get_program(), "sh");
         let args: Vec<_> = cmd.get_args().collect();
-        assert_eq!(args, &["-c", "echo hello\n"]);
+        assert_eq!(args, &["-e", "-u", "-o", "pipefail", "-c", "echo hello\n"]);
     }
 
     #[test]
