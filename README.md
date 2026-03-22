@@ -48,9 +48,32 @@ procman stop myapp.yaml
 
 Sends a shutdown command to the server via the FIFO. The server logs the request and terminates cleanly.
 
-### Scripted service bringup
+### Dependency graph
 
-The `serve`/`start` pattern enables imperative orchestration — start a supervisor, wait for dependencies to become healthy, then add dependent services:
+Most service ordering is handled declaratively in `procman.yaml`. Processes with no `depends` list start immediately; processes with dependencies are held until every condition is met. This forms a DAG — circular dependencies are detected at parse time.
+
+```yaml
+migrate:
+  run: db-migrate up
+  once: true
+
+web:
+  run: serve --port 3000
+
+api:
+  depends:
+    - process_exited: migrate
+    - url: http://localhost:3000/health
+      code: 200
+      timeout_seconds: 30
+  run: api-server start
+```
+
+Here `migrate` and `web` start immediately. `api` waits for `migrate` to exit successfully and for `web` to pass its health check — no scripting required. Available dependency types include HTTP health checks, TCP connect, file exists, file contains, process exited, and their negations. See the [procman.yaml Format](#procmanyaml-format) section below and the [Dependencies chapter](https://wbbradley.github.io/procman/dependencies.html) for the complete reference.
+
+### Scripted service bringup (escape hatch)
+
+When the declarative dependency graph isn't sufficient — for example, when you need to interact with an external system that procman can't poll — the `serve`/`start` pattern provides an imperative fallback:
 
 ```bash
 procman serve &
@@ -58,7 +81,7 @@ while ! curl -sf http://localhost:8080/health; do sleep 1; done
 procman start "redis-server --port 6380"
 ```
 
-An advisory `flock` on procman.yaml prevents multiple instances from managing the same file simultaneously.
+Prefer `depends` in `procman.yaml` over this pattern when possible. An advisory `flock` on procman.yaml prevents multiple instances from managing the same file simultaneously.
 
 ### `-e` / `--env` — inject environment variables
 
