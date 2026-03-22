@@ -148,7 +148,7 @@ nodes:
 ```
 
 - Each top-level key is a process name.
-- `run` (required): the command to execute. All commands are passed to `sh -c`, so shell features (pipes, redirects, `&&`, variable expansion) work in both single-line and multi-line commands. Supports `${{ process.KEY }}` templates to reference output values from `once` dependencies.
+- `run` (required): the command to execute. All commands are passed to `sh -euo pipefail -c`, so shell features (pipes, redirects, `&&`, variable expansion) work in both single-line and multi-line commands. The strict flags mean unset variable references and pipeline failures are treated as errors. Supports `${{ process.KEY }}` templates to reference output values from `once` dependencies.
 - `env` (optional): per-process environment variables (also supports `${{ }}` templates).
 - `once` (optional): if `true`, the process exits cleanly on success (code 0) without triggering supervisor shutdown. Processes can write key-value pairs to `$PROCMAN_OUTPUT` for downstream template resolution.
 - `for_each` (optional): fan-out a template process across glob matches. Requires `glob` (pattern) and `as` (variable name). Each match spawns an instance with the variable set in env and substituted in the run string.

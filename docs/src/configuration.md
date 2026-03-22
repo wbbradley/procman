@@ -27,8 +27,9 @@ expressions.
 
 ### `run` (required)
 
-The command to execute. All commands are passed to `sh -c`, so shell features like pipes,
-redirects, `&&`, variable expansion, and multi-line scripts all work naturally:
+The command to execute. All commands are passed to `sh -euo pipefail -c`, so shell features like
+pipes, redirects, `&&`, variable expansion, and multi-line scripts all work naturally. The strict
+flags mean unset variable references and mid-pipeline failures are treated as errors:
 
 ```yaml
 api:

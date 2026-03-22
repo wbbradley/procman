@@ -18,7 +18,7 @@ This means:
 - Signals sent to the group reach every descendant of the child, not just the top-level PID.
 - Unrelated processes managed by procman do not receive each other's signals.
 
-This is especially important for **multi-line `run` commands**, which are executed via `sh -c`.
+This is especially important for **multi-line `run` commands**, which are executed via `sh -euo pipefail -c`.
 The shell spawns child processes (pipes, subshells, backgrounded commands) that would otherwise
 be orphaned on shutdown. Because the entire process group is signaled, those descendants are
 cleaned up together with the shell.

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.0] - 2026-03-22
+
+### Breaking Changes
+- All `run` commands now execute under `sh -e -u -o pipefail -c`, enabling strict shell error handling. Commands that silently swallowed mid-script errors, referenced unset variables, or ignored pipeline failures will now fail. To opt out per-command, prefix with `set +e`, `set +u`, or `set +o pipefail` as needed.
+
+### Changed
+- README: added "Dependency graph" section foregrounding the declarative DAG model with a concrete YAML example; reframed "Scripted service bringup" as an escape hatch.
+
 ## [0.10.1] - 2026-03-20
 
 ### Fixed

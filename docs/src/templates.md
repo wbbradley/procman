@@ -53,7 +53,7 @@ api:
 Templates can appear in both `run` and `env` values. Multiple template references can appear
 in a single string and can be mixed with literal text.
 
-> **Tip:** In multi-line `run` scripts (executed via `sh -c`), quote template references to
+> **Tip:** In multi-line `run` scripts (executed via `sh -euo pipefail -c`), quote template references to
 > protect against whitespace or special characters in resolved values:
 >
 > ```yaml
