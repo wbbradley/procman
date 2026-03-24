@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.13.0] - 2026-03-23
+
+### Breaking Changes
+- Removed `serve`, `start`, and `stop` subcommands and the entire FIFO system. The CLI is now `procman <file> [-e KEY=VALUE]... [--debug]`.
+- New YAML config format: process definitions must be placed under a `jobs:` key. An optional `config:` section supports global settings. Old flat-format files produce a clear migration error.
+- Config file path is now a required positional argument (no default).
+
+### Added
+- `config.logs` option to customize the log directory path (default: `procman-logs`).
+
+### Removed
+- `fifo.rs`, `fifo_path.rs`, FIFO-based IPC, advisory flock, `shell-words` dependency.
+- `serve_mode` flag from `ProcessGroup`.
+
 ## [0.12.0] - 2026-03-23
 
 ### Added

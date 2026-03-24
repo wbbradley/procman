@@ -16,8 +16,8 @@ pub struct Logger {
 }
 
 impl Logger {
-    pub fn new(names: &[String]) -> Result<Self> {
-        let log_dir = PathBuf::from("procman-logs");
+    pub fn new(names: &[String], custom_log_dir: Option<&str>) -> Result<Self> {
+        let log_dir = PathBuf::from(custom_log_dir.unwrap_or("procman-logs"));
         let _ = fs::remove_dir_all(&log_dir);
         fs::create_dir_all(&log_dir).context("creating logs directory")?;
         let combined_log =

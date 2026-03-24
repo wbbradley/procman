@@ -167,16 +167,17 @@ fn watcher_loop(
 
     // Wait for the maximum initial delay, checking shutdown periodically
     if let Some(max_delay) = watches.iter().map(|w| w.initial_delay).max()
-        && !max_delay.is_zero() {
-            logger.lock().unwrap().log_line(
-                process_name,
-                &format!(
-                    "watches: waiting {:.1}s initial delay",
-                    max_delay.as_secs_f64()
-                ),
-            );
-            sleep_interruptible(max_delay, shutdown);
-        }
+        && !max_delay.is_zero()
+    {
+        logger.lock().unwrap().log_line(
+            process_name,
+            &format!(
+                "watches: waiting {:.1}s initial delay",
+                max_delay.as_secs_f64()
+            ),
+        );
+        sleep_interruptible(max_delay, shutdown);
+    }
 
     loop {
         if should_stop(process_name, shutdown, exit_registry) {

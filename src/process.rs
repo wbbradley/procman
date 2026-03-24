@@ -42,7 +42,6 @@ pub struct ProcessGroup {
     log_dir: PathBuf,
     fan_out_groups: HashMap<String, HashSet<String>>,
     debug_mode: bool,
-    serve_mode: bool,
     dormant: HashMap<String, ProcessConfig>,
     tx: Option<mpsc::Sender<SupervisorCommand>>,
     shutdown: Arc<AtomicBool>,
@@ -234,7 +233,6 @@ impl ProcessGroup {
         shutdown: Arc<AtomicBool>,
         logger: Arc<Mutex<Logger>>,
         debug: bool,
-        serve_mode: bool,
     ) -> Result<Self> {
         let log_dir = logger.lock().unwrap().log_dir().to_path_buf();
         let mut group = Self {
@@ -247,7 +245,6 @@ impl ProcessGroup {
             log_dir,
             fan_out_groups: HashMap::new(),
             debug_mode: debug,
-            serve_mode,
             dormant: HashMap::new(),
             tx: Some(tx),
             shutdown: Arc::clone(&shutdown),
@@ -406,8 +403,7 @@ impl ProcessGroup {
                                 .lock()
                                 .unwrap()
                                 .log_line(&name, &format!("[{pid}] completed after {elapsed:.1}s"));
-                            if !self.serve_mode
-                                && remaining.is_empty()
+                            if remaining.is_empty()
                                 && self.pending_deps.load(Ordering::Relaxed) == 0
                             {
                                 first_exit_code = Some(0);
@@ -617,7 +613,6 @@ mod tests {
             log_dir,
             fan_out_groups: HashMap::new(),
             debug_mode: false,
-            serve_mode: false,
             dormant: HashMap::new(),
             tx: None,
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -833,7 +828,6 @@ mod tests {
             Arc::clone(&shutdown),
             Arc::clone(&logger),
             false,
-            false,
         )
         .unwrap();
         drop(rx);
@@ -898,7 +892,6 @@ mod tests {
             tx,
             Arc::clone(&shutdown),
             Arc::clone(&logger),
-            false,
             false,
         )
         .unwrap();
@@ -968,7 +961,6 @@ mod tests {
             tx,
             Arc::clone(&shutdown),
             Arc::clone(&logger),
-            false,
             false,
         )
         .unwrap();
@@ -1047,7 +1039,6 @@ mod tests {
             Arc::clone(&shutdown),
             Arc::clone(&logger),
             true,
-            false,
         )
         .unwrap();
         drop(rx);
