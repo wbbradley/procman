@@ -118,16 +118,22 @@ pub fn poll_interval(dep: &Dependency) -> Duration {
     }
 }
 
-pub fn timeout(dep: &Dependency) -> Duration {
+pub fn timeout(dep: &Dependency) -> Option<Duration> {
     match dep {
-        Dependency::HttpHealthCheck { timeout, .. } => timeout.unwrap_or(Duration::from_secs(60)),
-        Dependency::TcpConnect { timeout, .. } => timeout.unwrap_or(Duration::from_secs(60)),
-        Dependency::FileContainsKey { timeout, .. } => timeout.unwrap_or(Duration::from_secs(60)),
-        Dependency::FileExists { .. } => Duration::from_secs(60),
-        Dependency::ProcessExited { .. } => Duration::from_secs(60),
-        Dependency::TcpNotListening { timeout, .. } => timeout.unwrap_or(Duration::from_secs(60)),
-        Dependency::FileNotExists { .. } => Duration::from_secs(60),
-        Dependency::ProcessNotRunning { .. } => Duration::from_secs(60),
+        Dependency::HttpHealthCheck { timeout, .. } => {
+            Some(timeout.unwrap_or(Duration::from_secs(60)))
+        }
+        Dependency::TcpConnect { timeout, .. } => Some(timeout.unwrap_or(Duration::from_secs(60))),
+        Dependency::FileContainsKey { timeout, .. } => {
+            Some(timeout.unwrap_or(Duration::from_secs(60)))
+        }
+        Dependency::FileExists { .. } => Some(Duration::from_secs(60)),
+        Dependency::ProcessExited { timeout, .. } => *timeout,
+        Dependency::TcpNotListening { timeout, .. } => {
+            Some(timeout.unwrap_or(Duration::from_secs(60)))
+        }
+        Dependency::FileNotExists { .. } => Some(Duration::from_secs(60)),
+        Dependency::ProcessNotRunning { .. } => Some(Duration::from_secs(60)),
     }
 }
 
@@ -226,6 +232,7 @@ mod tests {
     fn process_exited_check_returns_false_then_true() {
         let dep = Dependency::ProcessExited {
             name: "migrate".to_string(),
+            timeout: Some(Duration::from_secs(60)),
             retry: true,
         };
         let agent = make_agent();

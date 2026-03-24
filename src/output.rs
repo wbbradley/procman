@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 use anyhow::{Context, Result, bail};
 
@@ -269,6 +269,7 @@ mod tests {
                 false,
                 vec![Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    timeout: Some(Duration::from_secs(60)),
                     retry: true,
                 }],
                 HashMap::new(),
@@ -300,6 +301,7 @@ mod tests {
                 false,
                 vec![Dependency::ProcessExited {
                     name: "server".to_string(),
+                    timeout: Some(Duration::from_secs(60)),
                     retry: true,
                 }],
                 HashMap::new(),
@@ -339,6 +341,7 @@ mod tests {
                 true,
                 vec![Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    timeout: Some(Duration::from_secs(60)),
                     retry: true,
                 }],
                 HashMap::new(),
@@ -349,6 +352,7 @@ mod tests {
                 false,
                 vec![Dependency::ProcessExited {
                     name: "middle".to_string(),
+                    timeout: Some(Duration::from_secs(60)),
                     retry: true,
                 }],
                 HashMap::new(),
@@ -369,6 +373,7 @@ mod tests {
                 false,
                 vec![Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    timeout: Some(Duration::from_secs(60)),
                     retry: true,
                 }],
                 env,

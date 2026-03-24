@@ -505,6 +505,110 @@ mod tests {
     }
 
     #[test]
+    fn parse_process_exited_expanded_no_timeout() {
+        let yaml = "\
+jobs:
+  setup:
+    run: echo setup
+    once: true
+  api:
+    depends:
+      - process_exited:
+          name: setup
+    run: api-server start
+";
+        let path = write_yaml(yaml);
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
+        let api = configs.iter().find(|c| c.name == "api").unwrap();
+        assert_eq!(api.depends.len(), 1);
+        match &api.depends[0] {
+            Dependency::ProcessExited {
+                name,
+                timeout,
+                retry,
+            } => {
+                assert_eq!(name, "setup");
+                assert!(
+                    timeout.is_none(),
+                    "absent timeout_seconds should be None (infinite)"
+                );
+                assert!(*retry);
+            }
+            _ => panic!("expected ProcessExited"),
+        }
+    }
+
+    #[test]
+    fn parse_process_exited_expanded_with_timeout() {
+        let yaml = "\
+jobs:
+  setup:
+    run: echo setup
+    once: true
+  api:
+    depends:
+      - process_exited:
+          name: setup
+          timeout_seconds: 30
+    run: api-server start
+";
+        let path = write_yaml(yaml);
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
+        let api = configs.iter().find(|c| c.name == "api").unwrap();
+        match &api.depends[0] {
+            Dependency::ProcessExited { name, timeout, .. } => {
+                assert_eq!(name, "setup");
+                assert_eq!(*timeout, Some(std::time::Duration::from_secs(30)));
+            }
+            _ => panic!("expected ProcessExited"),
+        }
+    }
+
+    #[test]
+    fn parse_process_exited_expanded_null_timeout() {
+        let yaml = "\
+jobs:
+  setup:
+    run: echo setup
+    once: true
+  api:
+    depends:
+      - process_exited:
+          name: setup
+          timeout_seconds: null
+    run: api-server start
+";
+        let path = write_yaml(yaml);
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
+        let api = configs.iter().find(|c| c.name == "api").unwrap();
+        match &api.depends[0] {
+            Dependency::ProcessExited { name, timeout, .. } => {
+                assert_eq!(name, "setup");
+                assert!(
+                    timeout.is_none(),
+                    "null timeout_seconds should be None (infinite)"
+                );
+            }
+            _ => panic!("expected ProcessExited"),
+        }
+    }
+
+    #[test]
+    fn parse_process_exited_simple_has_default_timeout() {
+        let path = write_yaml(
+            "jobs:\n  api:\n    depends:\n      - process_exited: db-migrate\n    run: api-server start\n  db-migrate:\n    run: echo migrate\n    once: true\n",
+        );
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
+        let api = configs.iter().find(|c| c.name == "api").unwrap();
+        match &api.depends[0] {
+            Dependency::ProcessExited { timeout, .. } => {
+                assert_eq!(*timeout, Some(std::time::Duration::from_secs(60)));
+            }
+            _ => panic!("expected ProcessExited"),
+        }
+    }
+
+    #[test]
     fn parse_with_tcp_dependency() {
         let path = write_yaml(
             "jobs:\n  api:\n    depends:\n      - tcp: \"127.0.0.1:50051\"\n    run: api-server start\n",

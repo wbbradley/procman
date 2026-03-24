@@ -38,7 +38,9 @@ fn wait_for_dependencies(
                 return false;
             }
 
-            if start.elapsed() > timeout(dep) {
+            if let Some(t) = timeout(dep)
+                && start.elapsed() > t
+            {
                 let desc = description(dep);
                 logger
                     .lock()
@@ -337,6 +339,7 @@ mod tests {
             "api",
             vec![Dependency::ProcessExited {
                 name: "migrate".to_string(),
+                timeout: Some(Duration::from_secs(60)),
                 retry: true,
             }],
         );
@@ -396,6 +399,7 @@ mod tests {
             vec![
                 Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    timeout: Some(Duration::from_secs(60)),
                     retry: true,
                 },
                 Dependency::FileExists {
@@ -444,6 +448,7 @@ mod tests {
             vec![
                 Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    timeout: Some(Duration::from_secs(60)),
                     retry: true,
                 },
                 Dependency::FileExists {

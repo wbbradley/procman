@@ -76,6 +76,7 @@ pub enum Dependency {
     },
     ProcessExited {
         name: String,
+        timeout: Option<Duration>,
         retry: bool,
     },
     TcpNotListening {
@@ -130,6 +131,15 @@ pub struct FileContainsDef {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
+pub struct ProcessExitedDef {
+    pub name: String,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub retry: Option<bool>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum DependencyDef {
     HttpHealthCheck {
@@ -154,6 +164,9 @@ pub enum DependencyDef {
         path: String,
         #[serde(default)]
         retry: Option<bool>,
+    },
+    ProcessExitedExpanded {
+        process_exited: ProcessExitedDef,
     },
     ProcessExited {
         process_exited: String,
@@ -290,11 +303,17 @@ impl DependencyDef {
                 path: expand_env_vars(&path, env)?,
                 retry: retry.unwrap_or(true),
             },
+            DependencyDef::ProcessExitedExpanded { process_exited } => Dependency::ProcessExited {
+                name: process_exited.name,
+                timeout: process_exited.timeout_seconds.map(Duration::from_secs),
+                retry: process_exited.retry.unwrap_or(true),
+            },
             DependencyDef::ProcessExited {
                 process_exited,
                 retry,
             } => Dependency::ProcessExited {
                 name: process_exited,
+                timeout: Some(Duration::from_secs(60)),
                 retry: retry.unwrap_or(true),
             },
             DependencyDef::TcpNotListening {
