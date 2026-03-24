@@ -12,7 +12,7 @@ use std::{
 
 use crate::{
     checks::{check, collect_dependency_env, description, poll_interval, retry, timeout},
-    config::{Dependency, ProcessConfig, SupervisorCommand},
+    config::{ProcessConfig, SupervisorCommand},
     log::Logger,
 };
 
@@ -149,6 +149,7 @@ mod tests {
     use std::{collections::HashMap, sync::atomic::AtomicUsize};
 
     use super::*;
+    use crate::config::Dependency;
 
     fn make_exit_registry() -> Arc<Mutex<HashSet<String>>> {
         Arc::new(Mutex::new(HashSet::new()))
