@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.1] - 2026-03-24
+
+### Fixed
+- `for_each` glob patterns containing environment variables (e.g., `$DIR/node-*.yaml`) are now expanded before glob matching. Previously, the raw unexpanded string was passed to the glob engine, causing zero matches.
+- `${{ args.* }}` templates now work in `for_each` glob patterns, dependency fields (`url`, `tcp`, `path`, `not_listening`, `not_exists`, `not_running`), and watch check fields. Previously, only `run`, `env`, and `condition` supported arg templates.
+- Environment variable expansion in dependencies and watches now runs after arg template resolution, fixing cases where `${{ args.* }}` placeholders in these fields were misinterpreted.
+- Invalid characters in braced env var references (e.g., `${VAR:-fallback}`) now produce a clear parse-time error instead of a confusing "undefined variable" error at runtime.
+- `for_each` glob patterns with invalid env var references are now caught at config parse time rather than at process spawn time.
+
+### Changed
+- Documentation (mdbook) updated to reflect current CLI, `jobs:`/`config:` YAML structure, `config.args`, `condition:` field, expanded `process_exited` form, `watch`, and `autostart`. Removed stale references to removed `serve`/`start`/`stop` subcommands.
+
 ## [0.15.0] - 2026-03-23
 
 ### Added

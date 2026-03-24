@@ -164,6 +164,7 @@ Each job definition supports:
 
 - `run` (required): the command to execute. All commands are passed to `sh -euo pipefail -c`, so shell features (pipes, redirects, `&&`, variable expansion) work in both single-line and multi-line commands. The strict flags mean unset variable references and pipeline failures are treated as errors. Supports `${{ process.KEY }}` templates to reference output values from `once` dependencies, and `${{ args.name }}` to reference user-defined arg values.
 - `env` (optional): per-process environment variables (also supports `${{ }}` templates).
+  - `${{ args.name }}` templates are supported in `run`, `env`, `condition`, `for_each.glob`, dependency fields, and watch check fields.
 - `once` (optional): if `true`, the process exits cleanly on success (code 0) without triggering supervisor shutdown. Processes can write key-value pairs to `$PROCMAN_OUTPUT` for downstream template resolution.
 - `for_each` (optional): fan-out a template process across glob matches. Requires `glob` (pattern) and `as` (variable name). Each match spawns an instance with the variable set in env and substituted in the run string.
 - `depends` (optional): list of dependencies that must be satisfied before the process starts. Circular dependencies are detected at config parse time. Dependency fields (`url`, `tcp`, `path`, `file_contains.path`, `not_listening`, `not_exists`, `not_running`) support `$VAR` and `${VAR}` environment variable expansion (including per-process `env` overrides); use `$$` for a literal `$`.
