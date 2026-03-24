@@ -129,6 +129,7 @@ fn execute_action(
                 name: target.clone(),
                 env: watch_env,
                 run: String::new(),
+                condition: None,
                 depends: vec![],
                 once: false,
                 for_each: None,

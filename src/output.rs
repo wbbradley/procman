@@ -167,6 +167,7 @@ mod tests {
             name: name.to_string(),
             env,
             run: run.to_string(),
+            condition: None,
             depends,
             once,
             for_each: None,

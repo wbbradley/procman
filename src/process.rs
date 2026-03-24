@@ -57,6 +57,32 @@ fn build_command(resolved_run: &str, name: &str) -> Result<std::process::Command
     Ok(cmd)
 }
 
+fn evaluate_condition(
+    condition: &str,
+    env: &HashMap<String, String>,
+    name: &str,
+    logger: &Arc<Mutex<Logger>>,
+) -> Result<bool> {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.args(["-e", "-u", "-o", "pipefail", "-c", condition]);
+    cmd.env_clear();
+    cmd.envs(env);
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
+    let status = cmd
+        .status()
+        .with_context(|| format!("{name}: failed to run condition: {condition}"))?;
+    if status.success() {
+        Ok(true)
+    } else {
+        logger
+            .lock()
+            .unwrap()
+            .log_line(name, &format!("skipped (condition failed: {condition})"));
+        Ok(false)
+    }
+}
+
 impl ProcessGroup {
     fn spawn_one(&mut self, cmd: &ProcessConfig, logger: &Arc<Mutex<Logger>>) -> Result<Pid> {
         let log_dir = &self.log_dir;
@@ -202,6 +228,7 @@ impl ProcessGroup {
                 name: instance_name.clone(),
                 env,
                 run,
+                condition: None,
                 depends: vec![],
                 once: config.once,
                 for_each: None,
@@ -253,6 +280,14 @@ impl ProcessGroup {
         for cmd in commands {
             if !cmd.autostart {
                 group.dormant.insert(cmd.name.clone(), cmd.clone());
+                continue;
+            }
+            if let Some(ref condition) = cmd.condition
+                && !evaluate_condition(condition, &cmd.env, &cmd.name, &logger)?
+            {
+                if cmd.once {
+                    group.exit_registry.lock().unwrap().insert(cmd.name.clone());
+                }
                 continue;
             }
             if cmd.depends.is_empty() {
@@ -309,6 +344,28 @@ impl ProcessGroup {
                     } else {
                         config
                     };
+                    if let Some(ref condition) = config.condition {
+                        match evaluate_condition(condition, &config.env, &config.name, logger) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                if config.once {
+                                    self.exit_registry
+                                        .lock()
+                                        .unwrap()
+                                        .insert(config.name.clone());
+                                }
+                                continue;
+                            }
+                            Err(e) => {
+                                logger.lock().unwrap().log_line(
+                                    "procman",
+                                    &format!("error evaluating condition for {}: {e}", config.name),
+                                );
+                                shutdown.store(true, Ordering::Relaxed);
+                                continue;
+                            }
+                        }
+                    }
                     if config.for_each.is_some() {
                         if let Err(e) = self.expand_fan_out(&config, logger) {
                             logger.lock().unwrap().log_line(
@@ -671,6 +728,7 @@ mod tests {
             name: "nodes".to_string(),
             env: std::env::vars().collect(),
             run: "true".to_string(),
+            condition: None,
             depends: vec![],
             once: true,
             autostart: true,
@@ -707,6 +765,7 @@ mod tests {
             name: "nodes".to_string(),
             env: HashMap::new(),
             run: "true".to_string(),
+            condition: None,
             depends: vec![],
             once: true,
             autostart: true,
@@ -729,6 +788,7 @@ mod tests {
             name: "nodes".to_string(),
             env: std::env::vars().collect(),
             run: "echo $CONFIG_PATH".to_string(),
+            condition: None,
             depends: vec![],
             once: true,
             autostart: true,
@@ -816,6 +876,7 @@ mod tests {
             name: "hello".to_string(),
             env: std::env::vars().collect(),
             run: "echo Hello".to_string(),
+            condition: None,
             depends: vec![],
             once: true,
             for_each: None,
@@ -870,6 +931,7 @@ mod tests {
                 name: "a".to_string(),
                 env: std::env::vars().collect(),
                 run: "echo A".to_string(),
+                condition: None,
                 depends: vec![],
                 once: true,
                 for_each: None,
@@ -880,6 +942,7 @@ mod tests {
                 name: "b".to_string(),
                 env: std::env::vars().collect(),
                 run: "echo B".to_string(),
+                condition: None,
                 depends: vec![],
                 once: true,
                 for_each: None,
@@ -939,6 +1002,7 @@ mod tests {
                 name: "quick".to_string(),
                 env: std::env::vars().collect(),
                 run: "echo done".to_string(),
+                condition: None,
                 depends: vec![],
                 once: true,
                 for_each: None,
@@ -949,6 +1013,7 @@ mod tests {
                 name: "slow".to_string(),
                 env: std::env::vars().collect(),
                 run: "sleep 60".to_string(),
+                condition: None,
                 depends: vec![],
                 once: false,
                 for_each: None,
@@ -1016,6 +1081,7 @@ mod tests {
                 name: "fast".to_string(),
                 env: std::env::vars().collect(),
                 run: "echo done".to_string(),
+                condition: None,
                 depends: vec![],
                 once: true,
                 for_each: None,
@@ -1026,6 +1092,7 @@ mod tests {
                 name: "crasher".to_string(),
                 env: std::env::vars().collect(),
                 run: "exit 1".to_string(),
+                condition: None,
                 depends: vec![],
                 once: false,
                 for_each: None,
@@ -1069,6 +1136,7 @@ mod tests {
                 name: "recovery".to_string(),
                 env: std::env::vars().collect(),
                 run: "echo recovering".to_string(),
+                condition: None,
                 depends: vec![],
                 once: true,
                 for_each: None,
@@ -1088,6 +1156,7 @@ mod tests {
             name: "recovery".to_string(),
             env: watch_env,
             run: String::new(),
+            condition: None,
             depends: vec![],
             once: false,
             for_each: None,
@@ -1114,6 +1183,7 @@ mod tests {
             name: "worker".to_string(),
             env: std::env::vars().collect(),
             run: "sleep 60".to_string(),
+            condition: None,
             depends: vec![],
             once: false,
             for_each: None,
@@ -1160,5 +1230,130 @@ mod tests {
         group.try_accept_new(&rx, &shutdown, &logger);
         assert!(group.debug_mode);
         assert!(shutdown.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn evaluate_condition_true_returns_true() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let (_, logger) = make_test_group();
+        let env: HashMap<String, String> = std::env::vars().collect();
+        assert!(evaluate_condition("true", &env, "test", &logger).unwrap());
+    }
+
+    #[test]
+    fn evaluate_condition_false_returns_false() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let (_, logger) = make_test_group();
+        let env: HashMap<String, String> = std::env::vars().collect();
+        assert!(!evaluate_condition("false", &env, "test", &logger).unwrap());
+    }
+
+    #[test]
+    fn evaluate_condition_uses_process_env() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let (_, logger) = make_test_group();
+        let mut env = HashMap::new();
+        env.insert("MY_FLAG".to_string(), "yes".to_string());
+        assert!(evaluate_condition("test \"$MY_FLAG\" = yes", &env, "test", &logger).unwrap());
+        env.insert("MY_FLAG".to_string(), "no".to_string());
+        assert!(!evaluate_condition("test \"$MY_FLAG\" = yes", &env, "test", &logger).unwrap());
+    }
+
+    #[test]
+    fn condition_false_skips_once_process_and_registers_exit() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let log_dir = std::env::temp_dir().join(format!(
+            "procman_cond_skip_test_{}_{id}",
+            std::process::id()
+        ));
+        let logger = Arc::new(Mutex::new(
+            Logger::new_for_test(&["procman".to_string(), "skipped".to_string()], log_dir).unwrap(),
+        ));
+        let configs = vec![ProcessConfig {
+            name: "skipped".to_string(),
+            env: std::env::vars().collect(),
+            run: "echo should-not-run".to_string(),
+            condition: Some("false".to_string()),
+            depends: vec![],
+            once: true,
+            for_each: None,
+            autostart: true,
+            watches: vec![],
+        }];
+        let group = ProcessGroup::spawn(
+            &configs,
+            tx,
+            Arc::clone(&shutdown),
+            Arc::clone(&logger),
+            false,
+        )
+        .unwrap();
+        assert!(group.children.is_empty());
+        assert!(group.exit_registry.lock().unwrap().contains("skipped"));
+    }
+
+    #[test]
+    fn condition_true_allows_spawn() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let (mut group, logger) = make_test_group();
+        let config = ProcessConfig {
+            name: "cond-pass".to_string(),
+            env: std::env::vars().collect(),
+            run: "true".to_string(),
+            condition: Some("true".to_string()),
+            depends: vec![],
+            once: true,
+            for_each: None,
+            autostart: true,
+            watches: vec![],
+        };
+        logger.lock().unwrap().add_process("cond-pass").ok();
+        group.spawn_one(&config, &logger).unwrap();
+        assert_eq!(group.children.len(), 1);
+        for (pid, _, _, _) in &group.children {
+            let _ = waitpid(*pid, None);
+        }
+        for handle in std::mem::take(&mut group.reader_threads) {
+            let _ = handle.join();
+        }
+    }
+
+    #[test]
+    fn condition_false_non_once_process_not_in_exit_registry() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let log_dir = std::env::temp_dir().join(format!(
+            "procman_cond_skip_noonce_test_{}_{id}",
+            std::process::id()
+        ));
+        let logger = Arc::new(Mutex::new(
+            Logger::new_for_test(&["procman".to_string(), "skipped".to_string()], log_dir).unwrap(),
+        ));
+        let configs = vec![ProcessConfig {
+            name: "skipped".to_string(),
+            env: std::env::vars().collect(),
+            run: "echo should-not-run".to_string(),
+            condition: Some("false".to_string()),
+            depends: vec![],
+            once: false,
+            for_each: None,
+            autostart: true,
+            watches: vec![],
+        }];
+        let group = ProcessGroup::spawn(
+            &configs,
+            tx,
+            Arc::clone(&shutdown),
+            Arc::clone(&logger),
+            false,
+        )
+        .unwrap();
+        assert!(group.children.is_empty());
+        assert!(!group.exit_registry.lock().unwrap().contains("skipped"));
     }
 }

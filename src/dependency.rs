@@ -174,6 +174,7 @@ mod tests {
             name: name.to_string(),
             env: HashMap::new(),
             run: "true".to_string(),
+            condition: None,
             depends,
             once: false,
             for_each: None,

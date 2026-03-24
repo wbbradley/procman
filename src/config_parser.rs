@@ -121,6 +121,7 @@ struct ForEachDef {
 struct YamlProcessDef {
     env: Option<HashMap<String, String>>,
     run: String,
+    condition: Option<String>,
     depends: Option<Vec<DependencyDef>>,
     once: Option<bool>,
     for_each: Option<ForEachDef>,
@@ -177,6 +178,7 @@ pub fn parse(
             name,
             env,
             run: def.run,
+            condition: def.condition,
             depends,
             once: def.once.unwrap_or(false),
             for_each: def.for_each.map(|fe| ForEachConfig {
@@ -229,6 +231,9 @@ fn resolve_arg_templates(
 ) -> Result<()> {
     for config in configs.iter_mut() {
         config.run = resolve_arg_in_str(&config.run, arg_values)?;
+        if let Some(ref mut condition) = config.condition {
+            *condition = resolve_arg_in_str(condition, arg_values)?;
+        }
         for value in config.env.values_mut() {
             *value = resolve_arg_in_str(value, arg_values)?;
         }

@@ -32,6 +32,7 @@ pub struct ProcessConfig {
     pub name: String,
     pub env: HashMap<String, String>,
     pub run: String,
+    pub condition: Option<String>,
     pub depends: Vec<Dependency>,
     pub once: bool,
     pub for_each: Option<ForEachConfig>,
