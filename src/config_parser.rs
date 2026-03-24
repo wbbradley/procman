@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::{
-    config::{Dependency, DependencyDef, ForEachConfig, ProcessConfig},
+    config::{Dependency, DependencyDef, ForEachConfig, OnFailAction, ProcessConfig, WatchDef},
     output,
 };
 
@@ -22,6 +22,8 @@ struct YamlProcessDef {
     depends: Option<Vec<DependencyDef>>,
     once: Option<bool>,
     for_each: Option<ForEachDef>,
+    autostart: Option<bool>,
+    watch: Option<Vec<WatchDef>>,
 }
 
 pub fn parse(path: &str, extra_env: &HashMap<String, String>) -> Result<Vec<ProcessConfig>> {
@@ -57,6 +59,15 @@ pub fn parse(path: &str, extra_env: &HashMap<String, String>) -> Result<Vec<Proc
             .collect::<Result<Vec<_>>>()
             .with_context(|| format!("parsing dependencies for process {name}"))?;
 
+        let watches = def
+            .watch
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(i, w)| w.into_watch(&name, i, &env))
+            .collect::<Result<Vec<_>>>()
+            .with_context(|| format!("parsing watches for process {name}"))?;
+
         configs.push(ProcessConfig {
             name,
             env,
@@ -67,11 +78,14 @@ pub fn parse(path: &str, extra_env: &HashMap<String, String>) -> Result<Vec<Proc
                 glob: fe.glob,
                 variable: fe.variable,
             }),
+            autostart: def.autostart.unwrap_or(true),
+            watches,
         });
     }
 
     output::validate_config_templates(&configs)?;
     validate_dependency_graph(&configs)?;
+    validate_watches(&configs)?;
     Ok(configs)
 }
 
@@ -148,6 +162,44 @@ fn dfs_find_cycle<'a>(
     color.insert(node, 2);
     path.pop();
     None
+}
+
+fn validate_watches(configs: &[ProcessConfig]) -> Result<()> {
+    use std::collections::HashSet;
+
+    let all_names: HashSet<&str> = configs.iter().map(|c| c.name.as_str()).collect();
+
+    for config in configs {
+        let mut watch_names: HashSet<&str> = HashSet::new();
+        for watch in &config.watches {
+            if !watch_names.insert(&watch.name) {
+                bail!(
+                    "process '{}' has duplicate watch name '{}'",
+                    config.name,
+                    watch.name
+                );
+            }
+
+            if let OnFailAction::Spawn(ref target) = watch.on_fail {
+                if !all_names.contains(target.as_str()) {
+                    bail!(
+                        "process '{}' watch '{}' references unknown spawn target '{target}'",
+                        config.name,
+                        watch.name,
+                    );
+                }
+                let target_config = configs.iter().find(|c| c.name == *target).unwrap();
+                if target_config.autostart {
+                    bail!(
+                        "process '{}' watch '{}' spawn target '{target}' must have autostart: false",
+                        config.name,
+                        watch.name,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -645,5 +697,228 @@ b:
             Dependency::FileExists { retry, .. } => assert!(retry),
             _ => panic!("expected FileExists"),
         }
+    }
+
+    #[test]
+    fn parse_autostart_false() {
+        let path = write_yaml("web:\n  run: echo hello\n  autostart: false\n");
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        assert_eq!(configs.len(), 1);
+        assert!(!configs[0].autostart);
+    }
+
+    #[test]
+    fn parse_autostart_default_true() {
+        let path = write_yaml("web:\n  run: echo hello\n");
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        assert!(configs[0].autostart);
+    }
+
+    #[test]
+    fn parse_autostart_false_still_validated() {
+        let yaml = "\
+dormant:
+  autostart: false
+  depends:
+    - process_exited: nonexistent
+  run: echo dormant
+";
+        let path = write_yaml(yaml);
+        let err = parse(&path, &HashMap::new()).unwrap_err();
+        assert!(format!("{err}").contains("unknown process"), "{err}");
+    }
+
+    #[test]
+    fn parse_watch_with_http_check() {
+        let yaml = "\
+web:
+  run: echo hello
+  watch:
+    - name: health
+      check:
+        url: http://localhost:8080/health
+        code: 200
+      initial_delay: 5.0
+      failure_threshold: 3
+      on_fail: shutdown
+";
+        let path = write_yaml(yaml);
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        assert_eq!(configs[0].watches.len(), 1);
+        let w = &configs[0].watches[0];
+        assert_eq!(w.name, "health");
+        assert_eq!(w.initial_delay, Duration::from_secs(5));
+        assert_eq!(w.failure_threshold, 3);
+        assert!(matches!(w.on_fail, OnFailAction::Shutdown));
+    }
+
+    #[test]
+    fn parse_watch_with_tcp_check() {
+        let yaml = "\
+web:
+  run: echo hello
+  watch:
+    - name: db
+      check:
+        tcp: localhost:5432
+      poll_interval: 10.0
+";
+        let path = write_yaml(yaml);
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        let w = &configs[0].watches[0];
+        assert_eq!(w.name, "db");
+        assert_eq!(w.poll_interval, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn parse_watch_defaults() {
+        let yaml = "\
+web:
+  run: echo hello
+  watch:
+    - name: disk
+      check:
+        path: /var/run/healthy
+";
+        let path = write_yaml(yaml);
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        let w = &configs[0].watches[0];
+        assert_eq!(w.initial_delay, Duration::from_secs(0));
+        assert_eq!(w.poll_interval, Duration::from_secs(5));
+        assert_eq!(w.failure_threshold, 3);
+        assert!(matches!(w.on_fail, OnFailAction::Shutdown));
+    }
+
+    #[test]
+    fn parse_watch_spawn_on_fail() {
+        let yaml = "\
+web:
+  run: echo hello
+  watch:
+    - name: recovery
+      check:
+        path: /tmp/healthy
+      on_fail:
+        spawn: recovery-script
+recovery-script:
+  run: echo recovering
+  autostart: false
+";
+        let path = write_yaml(yaml);
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        let web = configs.iter().find(|c| c.name == "web").unwrap();
+        assert!(
+            matches!(&web.watches[0].on_fail, OnFailAction::Spawn(name) if name == "recovery-script")
+        );
+    }
+
+    #[test]
+    fn parse_watch_spawn_target_must_exist() {
+        let yaml = "\
+web:
+  run: echo hello
+  watch:
+    - name: recovery
+      check:
+        path: /tmp/healthy
+      on_fail:
+        spawn: nonexistent
+";
+        let path = write_yaml(yaml);
+        let err = parse(&path, &HashMap::new()).unwrap_err();
+        assert!(format!("{err}").contains("unknown spawn target"), "{err}");
+    }
+
+    #[test]
+    fn parse_watch_spawn_target_must_be_autostart_false() {
+        let yaml = "\
+web:
+  run: echo hello
+  watch:
+    - name: recovery
+      check:
+        path: /tmp/healthy
+      on_fail:
+        spawn: helper
+helper:
+  run: echo helper
+";
+        let path = write_yaml(yaml);
+        let err = parse(&path, &HashMap::new()).unwrap_err();
+        assert!(format!("{err}").contains("autostart: false"), "{err}");
+    }
+
+    #[test]
+    fn parse_watch_duplicate_names_rejected() {
+        let yaml = "\
+web:
+  run: echo hello
+  watch:
+    - name: health
+      check:
+        path: /tmp/a
+    - name: health
+      check:
+        path: /tmp/b
+";
+        let path = write_yaml(yaml);
+        let err = parse(&path, &HashMap::new()).unwrap_err();
+        assert!(format!("{err}").contains("duplicate watch name"), "{err}");
+    }
+
+    #[test]
+    fn parse_watch_auto_name() {
+        let yaml = "\
+web:
+  run: echo hello
+  watch:
+    - check:
+        path: /tmp/a
+    - check:
+        path: /tmp/b
+";
+        let path = write_yaml(yaml);
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        assert_eq!(configs[0].watches[0].name, "web.watch-0");
+        assert_eq!(configs[0].watches[1].name, "web.watch-1");
+    }
+
+    #[test]
+    fn parse_no_watches_default() {
+        let path = write_yaml("web:\n  run: echo hello\n");
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        assert!(configs[0].watches.is_empty());
+    }
+
+    #[test]
+    fn parse_watch_on_fail_debug() {
+        let yaml = "\
+web:
+  run: echo hello
+  watch:
+    - name: health
+      check:
+        path: /tmp/a
+      on_fail: debug
+";
+        let path = write_yaml(yaml);
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        assert!(matches!(configs[0].watches[0].on_fail, OnFailAction::Debug));
+    }
+
+    #[test]
+    fn parse_watch_on_fail_log() {
+        let yaml = "\
+web:
+  run: echo hello
+  watch:
+    - name: health
+      check:
+        path: /tmp/a
+      on_fail: log
+";
+        let path = write_yaml(yaml);
+        let configs = parse(&path, &HashMap::new()).unwrap();
+        assert!(matches!(configs[0].watches[0].on_fail, OnFailAction::Log));
     }
 }

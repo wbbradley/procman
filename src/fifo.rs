@@ -85,6 +85,8 @@ impl FifoMessage {
                     depends,
                     once: once.unwrap_or(false),
                     for_each: None,
+                    autostart: true,
+                    watches: vec![],
                 }))
             }
             FifoMessage::Shutdown { user, message } => {

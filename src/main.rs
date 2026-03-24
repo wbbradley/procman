@@ -1,3 +1,4 @@
+mod checks;
 mod config;
 mod config_parser;
 mod dependency;

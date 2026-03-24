@@ -170,6 +170,8 @@ mod tests {
             depends,
             once,
             for_each: None,
+            autostart: true,
+            watches: vec![],
         }
     }
 

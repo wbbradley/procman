@@ -41,6 +41,7 @@ pub struct ProcessGroup {
     fan_out_groups: HashMap<String, HashSet<String>>,
     debug_mode: bool,
     serve_mode: bool,
+    dormant: HashMap<String, ProcessConfig>,
 }
 
 fn build_command(resolved_run: &str, name: &str) -> Result<std::process::Command> {
@@ -176,6 +177,8 @@ impl ProcessGroup {
                 depends: vec![],
                 once: config.once,
                 for_each: None,
+                autostart: true,
+                watches: vec![],
             };
 
             logger.lock().unwrap().add_process(&instance_name).ok();
@@ -214,9 +217,14 @@ impl ProcessGroup {
             fan_out_groups: HashMap::new(),
             debug_mode: debug,
             serve_mode,
+            dormant: HashMap::new(),
         };
 
         for cmd in commands {
+            if !cmd.autostart {
+                group.dormant.insert(cmd.name.clone(), cmd.clone());
+                continue;
+            }
             if cmd.depends.is_empty() {
                 if cmd.for_each.is_some() {
                     group.expand_fan_out(cmd, &logger)?;
@@ -250,6 +258,11 @@ impl ProcessGroup {
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
                 SupervisorCommand::Spawn(config) => {
+                    let config = if let Some(dormant_config) = self.dormant.remove(&config.name) {
+                        dormant_config
+                    } else {
+                        config
+                    };
                     if config.for_each.is_some() {
                         if let Err(e) = self.expand_fan_out(&config, logger) {
                             logger.lock().unwrap().log_line(
@@ -536,6 +549,7 @@ mod tests {
             fan_out_groups: HashMap::new(),
             debug_mode: false,
             serve_mode: false,
+            dormant: HashMap::new(),
         };
         (group, logger)
     }
@@ -593,10 +607,12 @@ mod tests {
             run: "true".to_string(),
             depends: vec![],
             once: true,
+            autostart: true,
             for_each: Some(ForEachConfig {
                 glob: pattern,
                 variable: "CONFIG_PATH".to_string(),
             }),
+            watches: vec![],
         };
         group.expand_fan_out(&config, &logger).unwrap();
         assert_eq!(group.children.len(), 3);
@@ -627,10 +643,12 @@ mod tests {
             run: "true".to_string(),
             depends: vec![],
             once: true,
+            autostart: true,
             for_each: Some(ForEachConfig {
                 glob: "/tmp/procman_nonexistent_glob_pattern_*.xyz".to_string(),
                 variable: "CONFIG_PATH".to_string(),
             }),
+            watches: vec![],
         };
         let err = group.expand_fan_out(&config, &logger).unwrap_err();
         assert!(err.to_string().contains("matched zero files"), "{err}");
@@ -647,10 +665,12 @@ mod tests {
             run: "echo $CONFIG_PATH".to_string(),
             depends: vec![],
             once: true,
+            autostart: true,
             for_each: Some(ForEachConfig {
                 glob: pattern,
                 variable: "CONFIG_PATH".to_string(),
             }),
+            watches: vec![],
         };
         group.expand_fan_out(&config, &logger).unwrap();
         // Verify that the run strings got substituted
@@ -733,6 +753,8 @@ mod tests {
             depends: vec![],
             once: true,
             for_each: None,
+            autostart: true,
+            watches: vec![],
         }];
         let group = ProcessGroup::spawn(
             &configs,
@@ -786,6 +808,8 @@ mod tests {
                 depends: vec![],
                 once: true,
                 for_each: None,
+                autostart: true,
+                watches: vec![],
             },
             ProcessConfig {
                 name: "b".to_string(),
@@ -794,6 +818,8 @@ mod tests {
                 depends: vec![],
                 once: true,
                 for_each: None,
+                autostart: true,
+                watches: vec![],
             },
         ];
         let group = ProcessGroup::spawn(
@@ -852,6 +878,8 @@ mod tests {
                 depends: vec![],
                 once: true,
                 for_each: None,
+                autostart: true,
+                watches: vec![],
             },
             ProcessConfig {
                 name: "slow".to_string(),
@@ -860,6 +888,8 @@ mod tests {
                 depends: vec![],
                 once: false,
                 for_each: None,
+                autostart: true,
+                watches: vec![],
             },
         ];
         let group = ProcessGroup::spawn(
@@ -926,6 +956,8 @@ mod tests {
                 depends: vec![],
                 once: true,
                 for_each: None,
+                autostart: true,
+                watches: vec![],
             },
             ProcessConfig {
                 name: "crasher".to_string(),
@@ -934,6 +966,8 @@ mod tests {
                 depends: vec![],
                 once: false,
                 for_each: None,
+                autostart: true,
+                watches: vec![],
             },
         ];
         let group = ProcessGroup::spawn(

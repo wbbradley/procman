@@ -10,6 +10,25 @@ pub struct ForEachConfig {
 }
 
 #[derive(Clone, Debug)]
+pub enum OnFailAction {
+    Shutdown,
+    Debug,
+    Log,
+    Spawn(String),
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // fields consumed in Phase 2 (watch runtime)
+pub struct Watch {
+    pub name: String,
+    pub check: Dependency,
+    pub initial_delay: Duration,
+    pub poll_interval: Duration,
+    pub failure_threshold: u32,
+    pub on_fail: OnFailAction,
+}
+
+#[derive(Clone, Debug)]
 pub struct ProcessConfig {
     pub name: String,
     pub env: HashMap<String, String>,
@@ -17,6 +36,8 @@ pub struct ProcessConfig {
     pub depends: Vec<Dependency>,
     pub once: bool,
     pub for_each: Option<ForEachConfig>,
+    pub autostart: bool,
+    pub watches: Vec<Watch>,
 }
 
 #[derive(Clone, Debug)]
@@ -277,6 +298,62 @@ impl DependencyDef {
                     retry: retry.unwrap_or(true),
                 }
             }
+        })
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum OnFailActionDef {
+    Simple(String),
+    Spawn { spawn: String },
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct WatchDef {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub check: DependencyDef,
+    #[serde(default)]
+    pub initial_delay: Option<f64>,
+    #[serde(default)]
+    pub poll_interval: Option<f64>,
+    #[serde(default)]
+    pub failure_threshold: Option<u32>,
+    #[serde(default)]
+    pub on_fail: Option<OnFailActionDef>,
+}
+
+impl WatchDef {
+    pub fn into_watch(
+        self,
+        process_name: &str,
+        index: usize,
+        env: &HashMap<String, String>,
+    ) -> Result<Watch> {
+        let name = self
+            .name
+            .unwrap_or_else(|| format!("{process_name}.watch-{index}"));
+        let check = self.check.into_dependency(env)?;
+        let on_fail = match self.on_fail {
+            None => OnFailAction::Shutdown,
+            Some(OnFailActionDef::Simple(s)) => match s.as_str() {
+                "shutdown" => OnFailAction::Shutdown,
+                "debug" => OnFailAction::Debug,
+                "log" => OnFailAction::Log,
+                other => bail!(
+                    "unknown on_fail action: {other:?} (expected \"shutdown\", \"debug\", \"log\", or {{spawn: \"name\"}})"
+                ),
+            },
+            Some(OnFailActionDef::Spawn { spawn }) => OnFailAction::Spawn(spawn),
+        };
+        Ok(Watch {
+            name,
+            check,
+            initial_delay: Duration::from_secs_f64(self.initial_delay.unwrap_or(0.0)),
+            poll_interval: Duration::from_secs_f64(self.poll_interval.unwrap_or(5.0)),
+            failure_threshold: self.failure_threshold.unwrap_or(3),
+            on_fail,
         })
     }
 }
