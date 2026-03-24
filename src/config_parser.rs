@@ -174,16 +174,10 @@ pub fn parse(
             .collect::<Result<Vec<_>>>()
             .with_context(|| format!("parsing watches for process {name}"))?;
 
-        let for_each = if let Some(fe) = def.for_each {
-            crate::config::expand_env_vars(&fe.glob, &env)
-                .with_context(|| format!("in for_each glob for process {name}"))?;
-            Some(ForEachConfig {
-                glob: fe.glob,
-                variable: fe.variable,
-            })
-        } else {
-            None
-        };
+        let for_each = def.for_each.map(|fe| ForEachConfig {
+            glob: fe.glob,
+            variable: fe.variable,
+        });
 
         configs.push(ProcessConfig {
             name,
@@ -199,6 +193,7 @@ pub fn parse(
     }
 
     resolve_arg_templates(&mut configs, arg_values)?;
+    validate_for_each_globs(&configs)?;
     output::validate_config_templates(&configs)?;
     validate_dependency_graph(&configs)?;
     validate_watches(&configs)?;
@@ -244,6 +239,19 @@ fn resolve_arg_templates(
         }
         for value in config.env.values_mut() {
             *value = resolve_arg_in_str(value, arg_values)?;
+        }
+        if let Some(ref mut fe) = config.for_each {
+            fe.glob = resolve_arg_in_str(&fe.glob, arg_values)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_for_each_globs(configs: &[ProcessConfig]) -> Result<()> {
+    for config in configs {
+        if let Some(ref fe) = config.for_each {
+            crate::config::expand_env_vars(&fe.glob, &config.env)
+                .with_context(|| format!("in for_each glob for process {}", config.name))?;
         }
     }
     Ok(())
@@ -742,6 +750,25 @@ jobs:
         assert_eq!(fe.glob, "/tmp/test-*.yaml");
         assert_eq!(fe.variable, "CONFIG_PATH");
         assert!(configs[0].once);
+    }
+
+    #[test]
+    fn parse_for_each_glob_expands_arg_templates() {
+        let yaml = "\
+jobs:
+  nodes:
+    for_each:
+      glob: \"${{ args.dir }}/node-*.yaml\"
+      as: CONFIG_PATH
+    run: echo $CONFIG_PATH
+    once: true
+";
+        let path = write_yaml(yaml);
+        let mut args = HashMap::new();
+        args.insert("dir".to_string(), "/tmp/mydir".to_string());
+        let (configs, _) = parse(&path, &HashMap::new(), &args).unwrap();
+        let fe = configs[0].for_each.as_ref().unwrap();
+        assert_eq!(fe.glob, "/tmp/mydir/node-*.yaml");
     }
 
     #[test]
