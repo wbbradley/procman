@@ -1,3 +1,4 @@
+mod args;
 mod checks;
 mod config;
 mod config_parser;
@@ -22,11 +23,14 @@ use clap::Parser;
     about = "A process supervisor driven by a YAML config file",
     after_help = "\
 EXAMPLES:
-    # Run all jobs defined in procman.yaml
+    # Run all jobs defined in a config file
     procman procman.yaml
 
     # Pass extra environment variables
     procman myfile.yaml -e PORT=3000 -e DEBUG=1
+
+    # Pass user-defined args (defined in config args: section)
+    procman myfile.yaml -- --rust-log debug --enable-feature
 
     # Pause shutdown on child failure for interactive debugging
     procman procman.yaml --debug
@@ -44,6 +48,9 @@ struct Cli {
     /// Pause shutdown on child failure for interactive debugging
     #[arg(long)]
     debug: bool,
+    /// Arguments for config-defined args (passed after --)
+    #[arg(last = true)]
+    user_args: Vec<String>,
 }
 
 fn parse_env_args(args: &[String]) -> Result<HashMap<String, String>> {
@@ -63,6 +70,7 @@ fn parse_env_args(args: &[String]) -> Result<HashMap<String, String>> {
 fn run_supervisor(
     config_path: String,
     extra_env: HashMap<String, String>,
+    user_args: Vec<String>,
     debug: bool,
 ) -> Result<()> {
     if debug {
@@ -72,7 +80,26 @@ fn run_supervisor(
         );
     }
 
-    let (configs, custom_log_dir) = config_parser::parse(&config_path, &extra_env)?;
+    // Phase 1: parse config header for arg definitions
+    let header = config_parser::parse_header(&config_path)?;
+
+    // Phase 2: parse user args using definitions
+    let arg_values = args::parse_user_args(&user_args, &header.arg_defs)?;
+
+    // Phase 3: build env with correct precedence
+    // arg env vars (defaults + user overrides) < -e flags
+    let mut merged_env = HashMap::new();
+    for def in &header.arg_defs {
+        if let Some(ref env_name) = def.env
+            && let Some(value) = arg_values.get(&def.name)
+        {
+            merged_env.insert(env_name.clone(), value.clone());
+        }
+    }
+    merged_env.extend(extra_env);
+
+    // Phase 4: full config parse with arg values for template resolution
+    let (configs, _) = config_parser::parse(&config_path, &merged_env, &arg_values)?;
 
     let (shutdown, signal_triggered) = signal::setup()?;
 
@@ -80,7 +107,7 @@ fn run_supervisor(
     names.insert(0, "procman".to_string());
     let logger = Arc::new(Mutex::new(log::Logger::new(
         &names,
-        custom_log_dir.as_deref(),
+        header.log_dir.as_deref(),
     )?));
 
     logger
@@ -110,7 +137,7 @@ fn run_supervisor(
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let extra_env = parse_env_args(&cli.env)?;
-    run_supervisor(cli.file, extra_env, cli.debug)
+    run_supervisor(cli.file, extra_env, cli.user_args, cli.debug)
 }
 
 #[cfg(test)]

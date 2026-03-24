@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0] - 2026-03-23
+
+### Added
+- User-defined CLI arguments via `config.args`. Define typed parameters (string/bool) in the config file, parsed from argv after `--`. Args can inject env vars via `env:` field and are available as `${{ args.name }}` templates in `run` and `env` fields.
+- `-- --help` prints usage for config-defined args.
+- Args without a `default` are required; args with a default are optional.
+
 ## [0.13.0] - 2026-03-23
 
 ### Breaking Changes

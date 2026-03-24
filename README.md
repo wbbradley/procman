@@ -14,10 +14,11 @@ cargo install --path .
 ```bash
 procman myapp.yaml                             # run all jobs
 procman myapp.yaml -e PORT=3000 -e RUST_LOG=debug  # inject env vars
+procman myapp.yaml -- --rust-log debug --verbose   # pass config-defined args
 procman myapp.yaml --debug                     # pause before shutdown on failure
 ```
 
-The first positional argument is the path to the config file (required).
+The first positional argument is the path to the config file (required). Arguments after `--` are parsed according to `config.args` definitions (see below).
 
 ### Dependency graph
 
@@ -64,6 +65,17 @@ procman myapp.yaml --debug
 ```yaml
 config:
   logs: ./my-logs    # optional: custom log directory (default: procman-logs)
+  args:              # optional: user-defined CLI arguments (parsed after --)
+    rust_log:
+      short: r
+      description: "RUST_LOG configuration"
+      type: string
+      default: "info"
+      env: RUST_LOG
+    enable_feature:
+      type: bool
+      default: false
+      env: FEATURE_ENABLED
 
 jobs:
   web:
@@ -134,11 +146,19 @@ The config file has two top-level keys:
 
 - `config` (optional): global settings.
   - `logs` (optional): custom log directory path (default: `procman-logs`).
+  - `args` (optional): map of user-defined CLI arguments parsed from argv after `--`. Each key is the arg name (underscores in YAML become dashes on the CLI, e.g. `rust_log` → `--rust-log`). Fields:
+    - `type` (optional, default `string`): `string` or `bool`. String args take a value (`--name VALUE`), bool args are flags (`--name` = true).
+    - `short` (optional): single-character or short string for `-s` shorthand.
+    - `description` (optional): help text shown with `-- --help`.
+    - `default` (optional): fallback value. Args without a default are required.
+    - `env` (optional): environment variable name to inject the arg value into (e.g. `env: RUST_LOG`).
+  - Arg values are available as `${{ args.var_name }}` templates in `run` and `env` fields.
+  - Env precedence (lowest → highest): system env → arg defaults → CLI `--` args → `-e` flags → YAML `env:` blocks.
 - `jobs` (required): map of job name to job definition.
 
 Each job definition supports:
 
-- `run` (required): the command to execute. All commands are passed to `sh -euo pipefail -c`, so shell features (pipes, redirects, `&&`, variable expansion) work in both single-line and multi-line commands. The strict flags mean unset variable references and pipeline failures are treated as errors. Supports `${{ process.KEY }}` templates to reference output values from `once` dependencies.
+- `run` (required): the command to execute. All commands are passed to `sh -euo pipefail -c`, so shell features (pipes, redirects, `&&`, variable expansion) work in both single-line and multi-line commands. The strict flags mean unset variable references and pipeline failures are treated as errors. Supports `${{ process.KEY }}` templates to reference output values from `once` dependencies, and `${{ args.name }}` to reference user-defined arg values.
 - `env` (optional): per-process environment variables (also supports `${{ }}` templates).
 - `once` (optional): if `true`, the process exits cleanly on success (code 0) without triggering supervisor shutdown. Processes can write key-value pairs to `$PROCMAN_OUTPUT` for downstream template resolution.
 - `for_each` (optional): fan-out a template process across glob matches. Requires `glob` (pattern) and `as` (variable name). Each match spawns an instance with the variable set in env and substituted in the run string.

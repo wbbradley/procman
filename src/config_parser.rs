@@ -8,6 +8,27 @@ use crate::{
     output,
 };
 
+#[derive(Clone, Debug)]
+pub enum ArgType {
+    String,
+    Bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ArgDef {
+    pub name: String,
+    pub short: Option<String>,
+    pub description: Option<String>,
+    pub arg_type: ArgType,
+    pub default: Option<String>,
+    pub env: Option<String>,
+}
+
+pub struct ConfigHeader {
+    pub log_dir: Option<String>,
+    pub arg_defs: Vec<ArgDef>,
+}
+
 #[derive(Deserialize)]
 struct ProcmanFile {
     config: Option<ConfigSection>,
@@ -17,6 +38,76 @@ struct ProcmanFile {
 #[derive(Deserialize)]
 struct ConfigSection {
     logs: Option<String>,
+    args: Option<HashMap<String, YamlArgDef>>,
+}
+
+#[derive(Deserialize)]
+struct YamlArgDef {
+    short: Option<String>,
+    description: Option<String>,
+    #[serde(rename = "type")]
+    arg_type: Option<String>,
+    default: Option<serde_yaml::Value>,
+    env: Option<String>,
+}
+
+fn yaml_value_to_string(v: &serde_yaml::Value) -> String {
+    match v {
+        serde_yaml::Value::Bool(b) => b.to_string(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        serde_yaml::Value::String(s) => s.clone(),
+        other => format!("{other:?}"),
+    }
+}
+
+fn convert_arg_defs(yaml_args: HashMap<String, YamlArgDef>) -> Result<Vec<ArgDef>> {
+    let mut defs = Vec::new();
+    for (name, def) in yaml_args {
+        let arg_type = match def.arg_type.as_deref() {
+            None | Some("string") => ArgType::String,
+            Some("bool") => ArgType::Bool,
+            Some(other) => {
+                bail!("unknown arg type '{other}' for arg '{name}' (expected 'string' or 'bool')")
+            }
+        };
+        defs.push(ArgDef {
+            name,
+            short: def.short,
+            description: def.description,
+            arg_type,
+            default: def.default.as_ref().map(yaml_value_to_string),
+            env: def.env,
+        });
+    }
+    defs.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(defs)
+}
+
+fn parse_procman_file(path: &str) -> Result<ProcmanFile> {
+    let content = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
+    match serde_yaml::from_str(&content) {
+        Ok(f) => Ok(f),
+        Err(e) => {
+            if let Ok(flat) = serde_yaml::from_str::<HashMap<String, serde_yaml::Value>>(&content)
+                && flat.values().any(|v| v.get("run").is_some())
+            {
+                bail!(
+                    "config format has changed: wrap process definitions under a 'jobs:' key. See README for the new format."
+                );
+            }
+            Err(e).with_context(|| format!("parsing YAML from {path}"))
+        }
+    }
+}
+
+pub fn parse_header(path: &str) -> Result<ConfigHeader> {
+    let file = parse_procman_file(path)?;
+    let log_dir = file.config.as_ref().and_then(|c| c.logs.clone());
+    let arg_defs = match file.config.and_then(|c| c.args) {
+        Some(args) => convert_arg_defs(args)?,
+        None => Vec::new(),
+    };
+    Ok(ConfigHeader { log_dir, arg_defs })
 }
 
 #[derive(Deserialize)]
@@ -40,23 +131,9 @@ struct YamlProcessDef {
 pub fn parse(
     path: &str,
     extra_env: &HashMap<String, String>,
+    arg_values: &HashMap<String, String>,
 ) -> Result<(Vec<ProcessConfig>, Option<String>)> {
-    let content = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
-    let file: ProcmanFile = match serde_yaml::from_str(&content) {
-        Ok(f) => f,
-        Err(e) => {
-            // Detect old flat format and give a helpful error
-            if let Ok(flat) = serde_yaml::from_str::<HashMap<String, serde_yaml::Value>>(&content)
-                && flat.values().any(|v| v.get("run").is_some())
-            {
-                bail!(
-                    "config format has changed: wrap process definitions under a 'jobs:' key. See README for the new format."
-                );
-            }
-            return Err(e).with_context(|| format!("parsing YAML from {path}"));
-        }
-    };
-
+    let file = parse_procman_file(path)?;
     let log_dir = file.config.as_ref().and_then(|c| c.logs.clone());
 
     if file.jobs.is_empty() {
@@ -111,10 +188,52 @@ pub fn parse(
         });
     }
 
+    resolve_arg_templates(&mut configs, arg_values)?;
     output::validate_config_templates(&configs)?;
     validate_dependency_graph(&configs)?;
     validate_watches(&configs)?;
     Ok((configs, log_dir))
+}
+
+fn resolve_arg_in_str(s: &str, arg_values: &HashMap<String, String>) -> Result<String> {
+    let mut result = String::new();
+    let mut remaining = s;
+    while let Some(start) = remaining.find("${{") {
+        result.push_str(&remaining[..start]);
+        let after_open = &remaining[start + 3..];
+        if let Some(end) = after_open.find("}}") {
+            let inner = after_open[..end].trim();
+            if let Some(key) = inner.strip_prefix("args.") {
+                let key = key.trim();
+                let value = arg_values.get(key).ok_or_else(|| {
+                    anyhow::anyhow!("unknown arg in template: ${{{{ args.{key} }}}}")
+                })?;
+                result.push_str(value);
+            } else {
+                // Not an args template — preserve it for runtime resolution
+                result.push_str(&remaining[start..start + 3 + end + 2]);
+            }
+            remaining = &after_open[end + 2..];
+        } else {
+            result.push_str(&remaining[..start + 3]);
+            remaining = after_open;
+        }
+    }
+    result.push_str(remaining);
+    Ok(result)
+}
+
+fn resolve_arg_templates(
+    configs: &mut [ProcessConfig],
+    arg_values: &HashMap<String, String>,
+) -> Result<()> {
+    for config in configs.iter_mut() {
+        config.run = resolve_arg_in_str(&config.run, arg_values)?;
+        for value in config.env.values_mut() {
+            *value = resolve_arg_in_str(value, arg_values)?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_dependency_graph(configs: &[ProcessConfig]) -> Result<()> {
@@ -255,7 +374,7 @@ mod tests {
     #[test]
     fn parse_simple_run() {
         let path = write_yaml("jobs:\n  web:\n    run: echo hello\n");
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name, "web");
         assert_eq!(configs[0].run, "echo hello");
@@ -268,7 +387,7 @@ mod tests {
         let path = write_yaml(
             "jobs:\n  worker:\n    env:\n      RUST_LOG: debug\n      PORT: \"3000\"\n    run: my-server --port 3000\n",
         );
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name, "worker");
         assert_eq!(configs[0].env.get("RUST_LOG").unwrap(), "debug");
@@ -281,7 +400,7 @@ mod tests {
         let path = write_yaml(
             "jobs:\n  api:\n    depends:\n      - url: http://localhost:8080/health\n        code: 200\n    run: worker start\n",
         );
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].depends.len(), 1);
         match &configs[0].depends[0] {
@@ -306,7 +425,7 @@ mod tests {
         let path = write_yaml(
             "jobs:\n  api:\n    depends:\n      - path: /tmp/ready.flag\n    run: worker start\n",
         );
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs[0].depends.len(), 1);
         match &configs[0].depends[0] {
             Dependency::FileExists { path, .. } => {
@@ -321,7 +440,7 @@ mod tests {
         let path = write_yaml(
             "jobs:\n  api:\n    depends:\n      - url: http://localhost:8080/\n        code: 200\n        poll_interval: 0.5\n        timeout_seconds: 30\n    run: worker\n",
         );
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         match &configs[0].depends[0] {
             Dependency::HttpHealthCheck {
                 poll_interval,
@@ -339,7 +458,7 @@ mod tests {
     fn parse_multiple_processes() {
         let path =
             write_yaml("jobs:\n  web:\n    run: echo web\n  worker:\n    run: echo worker\n");
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs.len(), 2);
         let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"web"));
@@ -349,19 +468,19 @@ mod tests {
     #[test]
     fn parse_invalid_yaml_returns_error() {
         let path = write_yaml("not: valid: yaml: [[[");
-        assert!(parse(&path, &HashMap::new()).is_err());
+        assert!(parse(&path, &HashMap::new(), &HashMap::new()).is_err());
     }
 
     #[test]
     fn parse_empty_jobs_returns_error() {
         let path = write_yaml("jobs: {}");
-        assert!(parse(&path, &HashMap::new()).is_err());
+        assert!(parse(&path, &HashMap::new(), &HashMap::new()).is_err());
     }
 
     #[test]
     fn parse_missing_run_returns_error() {
         let path = write_yaml("jobs:\n  web:\n    env:\n      FOO: bar\n");
-        assert!(parse(&path, &HashMap::new()).is_err());
+        assert!(parse(&path, &HashMap::new(), &HashMap::new()).is_err());
     }
 
     #[test]
@@ -369,7 +488,7 @@ mod tests {
         let path = write_yaml(
             "jobs:\n  api:\n    depends:\n      - process_exited: db-migrate\n    run: api-server start\n  db-migrate:\n    run: echo migrate\n    once: true\n",
         );
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         let api = configs.iter().find(|c| c.name == "api").unwrap();
         assert_eq!(api.depends.len(), 1);
         match &api.depends[0] {
@@ -385,7 +504,7 @@ mod tests {
         let path = write_yaml(
             "jobs:\n  api:\n    depends:\n      - tcp: \"127.0.0.1:50051\"\n    run: api-server start\n",
         );
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs[0].depends.len(), 1);
         match &configs[0].depends[0] {
             Dependency::TcpConnect {
@@ -407,7 +526,7 @@ mod tests {
         let path = write_yaml(
             "jobs:\n  api:\n    depends:\n      - tcp: \"127.0.0.1:50051\"\n        poll_interval: 0.5\n        timeout_seconds: 30\n    run: api-server start\n",
         );
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         match &configs[0].depends[0] {
             Dependency::TcpConnect {
                 address,
@@ -426,7 +545,7 @@ mod tests {
     #[test]
     fn parse_with_once_flag() {
         let path = write_yaml("jobs:\n  migrate:\n    run: echo done\n    once: true\n");
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs.len(), 1);
         assert!(configs[0].once);
     }
@@ -446,7 +565,7 @@ jobs:
     run: echo app
 ";
         let path = write_yaml(yaml);
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs.len(), 2);
         let app = configs.iter().find(|c| c.name == "app").unwrap();
         assert_eq!(app.env.get("DB_URL").unwrap(), "${{ setup.DB_URL }}");
@@ -457,7 +576,7 @@ jobs:
         let path = write_yaml(
             "jobs:\n  api:\n    depends:\n      - file_contains:\n          path: /tmp/config.yaml\n          format: yaml\n          key: \"$.database.url\"\n          env: DATABASE_URL\n    run: api-server start\n",
         );
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs[0].depends.len(), 1);
         match &configs[0].depends[0] {
             Dependency::FileContainsKey { path, key, env, .. } => {
@@ -482,7 +601,7 @@ jobs:
     run: echo ${{ setup.DB_URL }}
 ";
         let path = write_yaml(yaml);
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs.len(), 2);
         let app = configs.iter().find(|c| c.name == "app").unwrap();
         assert_eq!(app.run, "echo ${{ setup.DB_URL }}");
@@ -500,7 +619,7 @@ jobs:
     once: true
 ";
         let path = write_yaml(yaml);
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs.len(), 1);
         let fe = configs[0].for_each.as_ref().unwrap();
         assert_eq!(fe.glob, "/tmp/test-*.yaml");
@@ -518,7 +637,7 @@ jobs:
     run: echo hello
 ";
         let path = write_yaml(yaml);
-        assert!(parse(&path, &HashMap::new()).is_err());
+        assert!(parse(&path, &HashMap::new(), &HashMap::new()).is_err());
     }
 
     #[test]
@@ -535,7 +654,7 @@ jobs:
     run: echo b
 ";
         let path = write_yaml(yaml);
-        let err = parse(&path, &HashMap::new()).unwrap_err();
+        let err = parse(&path, &HashMap::new(), &HashMap::new()).unwrap_err();
         assert!(
             format!("{err}").contains("circular dependency"),
             "expected circular dependency error, got: {err}"
@@ -552,7 +671,7 @@ jobs:
     run: echo a
 ";
         let path = write_yaml(yaml);
-        let err = parse(&path, &HashMap::new()).unwrap_err();
+        let err = parse(&path, &HashMap::new(), &HashMap::new()).unwrap_err();
         assert!(
             format!("{err}").contains("circular dependency"),
             "expected circular dependency error, got: {err}"
@@ -577,7 +696,7 @@ jobs:
     run: echo c
 ";
         let path = write_yaml(yaml);
-        let err = parse(&path, &HashMap::new()).unwrap_err();
+        let err = parse(&path, &HashMap::new(), &HashMap::new()).unwrap_err();
         assert!(
             format!("{err}").contains("circular dependency"),
             "expected circular dependency error, got: {err}"
@@ -594,7 +713,7 @@ jobs:
     run: echo a
 ";
         let path = write_yaml(yaml);
-        let err = parse(&path, &HashMap::new()).unwrap_err();
+        let err = parse(&path, &HashMap::new(), &HashMap::new()).unwrap_err();
         assert!(
             format!("{err}").contains("unknown process"),
             "expected unknown process error, got: {err}"
@@ -611,7 +730,7 @@ jobs:
       exec my-server --port 3000
 ";
         let path = write_yaml(yaml);
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name, "web");
         assert!(configs[0].run.contains('\n'));
@@ -629,7 +748,7 @@ jobs:
     run: echo b
 ";
         let path = write_yaml(yaml);
-        parse(&path, &HashMap::new()).unwrap();
+        parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
     }
 
     #[test]
@@ -637,7 +756,7 @@ jobs:
         let path = write_yaml(
             "jobs:\n  api:\n    depends:\n      - file_contains:\n          path: /tmp/config.yaml\n          format: yaml\n          key: \"$[invalid\"\n    run: echo hi\n",
         );
-        let err = parse(&path, &HashMap::new()).unwrap_err();
+        let err = parse(&path, &HashMap::new(), &HashMap::new()).unwrap_err();
         assert!(
             format!("{err:?}").contains("invalid JSONPath"),
             "expected JSONPath error, got: {err:?}"
@@ -649,7 +768,7 @@ jobs:
         let path = write_yaml(
             "jobs:\n  api:\n    depends:\n      - not_listening: \"127.0.0.1:8080\"\n    run: api-server start\n",
         );
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs[0].depends.len(), 1);
         match &configs[0].depends[0] {
             Dependency::TcpNotListening {
@@ -671,7 +790,7 @@ jobs:
         let path = write_yaml(
             "jobs:\n  api:\n    depends:\n      - not_exists: /tmp/api.lock\n    run: api-server start\n",
         );
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs[0].depends.len(), 1);
         match &configs[0].depends[0] {
             Dependency::FileNotExists { path, .. } => {
@@ -686,7 +805,7 @@ jobs:
         let path = write_yaml(
             "jobs:\n  api:\n    depends:\n      - not_running: \"old-api.*\"\n    run: api-server start\n",
         );
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs[0].depends.len(), 1);
         match &configs[0].depends[0] {
             Dependency::ProcessNotRunning { pattern, .. } => {
@@ -701,7 +820,7 @@ jobs:
         let path = write_yaml("jobs:\n  web:\n    run: echo hello\n");
         let mut extra = HashMap::new();
         extra.insert("PROCMAN_TEST_EXTRA".to_string(), "from_cli".to_string());
-        let (configs, _) = parse(&path, &extra).unwrap();
+        let (configs, _) = parse(&path, &extra, &HashMap::new()).unwrap();
         assert_eq!(
             configs[0].env.get("PROCMAN_TEST_EXTRA").unwrap(),
             "from_cli"
@@ -714,7 +833,7 @@ jobs:
             write_yaml("jobs:\n  web:\n    env:\n      MY_VAR: from_yaml\n    run: echo hello\n");
         let mut extra = HashMap::new();
         extra.insert("MY_VAR".to_string(), "from_cli".to_string());
-        let (configs, _) = parse(&path, &extra).unwrap();
+        let (configs, _) = parse(&path, &extra, &HashMap::new()).unwrap();
         assert_eq!(configs[0].env.get("MY_VAR").unwrap(), "from_yaml");
     }
 
@@ -723,7 +842,7 @@ jobs:
         let path = write_yaml(
             "jobs:\n  api:\n    depends:\n      - path: /tmp/ready.flag\n        retry: false\n    run: echo hi\n",
         );
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         match &configs[0].depends[0] {
             Dependency::FileExists { retry, .. } => assert!(!retry),
             _ => panic!("expected FileExists"),
@@ -735,7 +854,7 @@ jobs:
         let path = write_yaml(
             "jobs:\n  api:\n    depends:\n      - path: /tmp/ready.flag\n    run: echo hi\n",
         );
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         match &configs[0].depends[0] {
             Dependency::FileExists { retry, .. } => assert!(retry),
             _ => panic!("expected FileExists"),
@@ -745,7 +864,7 @@ jobs:
     #[test]
     fn parse_autostart_false() {
         let path = write_yaml("jobs:\n  web:\n    run: echo hello\n    autostart: false\n");
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs.len(), 1);
         assert!(!configs[0].autostart);
     }
@@ -753,7 +872,7 @@ jobs:
     #[test]
     fn parse_autostart_default_true() {
         let path = write_yaml("jobs:\n  web:\n    run: echo hello\n");
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert!(configs[0].autostart);
     }
 
@@ -768,7 +887,7 @@ jobs:
     run: echo dormant
 ";
         let path = write_yaml(yaml);
-        let err = parse(&path, &HashMap::new()).unwrap_err();
+        let err = parse(&path, &HashMap::new(), &HashMap::new()).unwrap_err();
         assert!(format!("{err}").contains("unknown process"), "{err}");
     }
 
@@ -788,7 +907,7 @@ jobs:
         on_fail: shutdown
 ";
         let path = write_yaml(yaml);
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs[0].watches.len(), 1);
         let w = &configs[0].watches[0];
         assert_eq!(w.name, "health");
@@ -810,7 +929,7 @@ jobs:
         poll_interval: 10.0
 ";
         let path = write_yaml(yaml);
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         let w = &configs[0].watches[0];
         assert_eq!(w.name, "db");
         assert_eq!(w.poll_interval, Duration::from_secs(10));
@@ -828,7 +947,7 @@ jobs:
           path: /var/run/healthy
 ";
         let path = write_yaml(yaml);
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         let w = &configs[0].watches[0];
         assert_eq!(w.initial_delay, Duration::from_secs(0));
         assert_eq!(w.poll_interval, Duration::from_secs(5));
@@ -853,7 +972,7 @@ jobs:
     autostart: false
 ";
         let path = write_yaml(yaml);
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         let web = configs.iter().find(|c| c.name == "web").unwrap();
         assert!(
             matches!(&web.watches[0].on_fail, OnFailAction::Spawn(name) if name == "recovery-script")
@@ -874,7 +993,7 @@ jobs:
           spawn: nonexistent
 ";
         let path = write_yaml(yaml);
-        let err = parse(&path, &HashMap::new()).unwrap_err();
+        let err = parse(&path, &HashMap::new(), &HashMap::new()).unwrap_err();
         assert!(format!("{err}").contains("unknown spawn target"), "{err}");
     }
 
@@ -894,7 +1013,7 @@ jobs:
     run: echo helper
 ";
         let path = write_yaml(yaml);
-        let err = parse(&path, &HashMap::new()).unwrap_err();
+        let err = parse(&path, &HashMap::new(), &HashMap::new()).unwrap_err();
         assert!(format!("{err}").contains("autostart: false"), "{err}");
     }
 
@@ -913,7 +1032,7 @@ jobs:
           path: /tmp/b
 ";
         let path = write_yaml(yaml);
-        let err = parse(&path, &HashMap::new()).unwrap_err();
+        let err = parse(&path, &HashMap::new(), &HashMap::new()).unwrap_err();
         assert!(format!("{err}").contains("duplicate watch name"), "{err}");
     }
 
@@ -930,7 +1049,7 @@ jobs:
           path: /tmp/b
 ";
         let path = write_yaml(yaml);
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs[0].watches[0].name, "web.watch-0");
         assert_eq!(configs[0].watches[1].name, "web.watch-1");
     }
@@ -938,7 +1057,7 @@ jobs:
     #[test]
     fn parse_no_watches_default() {
         let path = write_yaml("jobs:\n  web:\n    run: echo hello\n");
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert!(configs[0].watches.is_empty());
     }
 
@@ -955,7 +1074,7 @@ jobs:
         on_fail: debug
 ";
         let path = write_yaml(yaml);
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert!(matches!(configs[0].watches[0].on_fail, OnFailAction::Debug));
     }
 
@@ -972,7 +1091,7 @@ jobs:
         on_fail: log
 ";
         let path = write_yaml(yaml);
-        let (configs, _) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, _) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert!(matches!(configs[0].watches[0].on_fail, OnFailAction::Log));
     }
 
@@ -986,7 +1105,7 @@ jobs:
     run: echo hello
 ";
         let path = write_yaml(yaml);
-        let (configs, log_dir) = parse(&path, &HashMap::new()).unwrap();
+        let (configs, log_dir) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert_eq!(configs.len(), 1);
         assert_eq!(log_dir.as_deref(), Some("./my-logs"));
     }
@@ -994,14 +1113,14 @@ jobs:
     #[test]
     fn parse_without_config_section() {
         let path = write_yaml("jobs:\n  web:\n    run: echo hello\n");
-        let (_, log_dir) = parse(&path, &HashMap::new()).unwrap();
+        let (_, log_dir) = parse(&path, &HashMap::new(), &HashMap::new()).unwrap();
         assert!(log_dir.is_none());
     }
 
     #[test]
     fn parse_old_format_gives_helpful_error() {
         let path = write_yaml("web:\n  run: echo hello\n");
-        let err = parse(&path, &HashMap::new()).unwrap_err();
+        let err = parse(&path, &HashMap::new(), &HashMap::new()).unwrap_err();
         assert!(
             format!("{err}").contains("config format has changed"),
             "expected migration error, got: {err}"
@@ -1011,6 +1130,117 @@ jobs:
     #[test]
     fn parse_missing_jobs_key_errors() {
         let path = write_yaml("config:\n  logs: ./logs\n");
-        assert!(parse(&path, &HashMap::new()).is_err());
+        assert!(parse(&path, &HashMap::new(), &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn parse_header_with_args() {
+        let yaml = "\
+config:
+  args:
+    rust_log:
+      short: r
+      description: \"RUST_LOG configuration\"
+      type: string
+      default: info
+      env: RUST_LOG
+    verbose:
+      type: bool
+      default: false
+jobs:
+  web:
+    run: echo hello
+";
+        let path = write_yaml(yaml);
+        let header = parse_header(&path).unwrap();
+        assert_eq!(header.arg_defs.len(), 2);
+        let rl = header
+            .arg_defs
+            .iter()
+            .find(|d| d.name == "rust_log")
+            .unwrap();
+        assert!(matches!(rl.arg_type, ArgType::String));
+        assert_eq!(rl.default.as_deref(), Some("info"));
+        assert_eq!(rl.env.as_deref(), Some("RUST_LOG"));
+        assert_eq!(rl.short.as_deref(), Some("r"));
+        let v = header
+            .arg_defs
+            .iter()
+            .find(|d| d.name == "verbose")
+            .unwrap();
+        assert!(matches!(v.arg_type, ArgType::Bool));
+        assert_eq!(v.default.as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn parse_header_no_args() {
+        let path = write_yaml("jobs:\n  web:\n    run: echo hello\n");
+        let header = parse_header(&path).unwrap();
+        assert!(header.arg_defs.is_empty());
+    }
+
+    #[test]
+    fn parse_arg_template_in_run() {
+        let yaml = "\
+jobs:
+  web:
+    run: echo ${{ args.log_level }}
+";
+        let path = write_yaml(yaml);
+        let mut arg_values = HashMap::new();
+        arg_values.insert("log_level".to_string(), "debug".to_string());
+        let (configs, _) = parse(&path, &HashMap::new(), &arg_values).unwrap();
+        assert_eq!(configs[0].run, "echo debug");
+    }
+
+    #[test]
+    fn parse_arg_template_in_env() {
+        let yaml = "\
+jobs:
+  web:
+    env:
+      MY_LOG: \"${{ args.log_level }}\"
+    run: echo hello
+";
+        let path = write_yaml(yaml);
+        let mut arg_values = HashMap::new();
+        arg_values.insert("log_level".to_string(), "trace".to_string());
+        let (configs, _) = parse(&path, &HashMap::new(), &arg_values).unwrap();
+        assert_eq!(configs[0].env.get("MY_LOG").unwrap(), "trace");
+    }
+
+    #[test]
+    fn parse_unknown_arg_template_errors() {
+        let yaml = "\
+jobs:
+  web:
+    run: echo ${{ args.nonexistent }}
+";
+        let path = write_yaml(yaml);
+        let err = parse(&path, &HashMap::new(), &HashMap::new()).unwrap_err();
+        assert!(
+            format!("{err}").contains("unknown arg"),
+            "expected unknown arg error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_arg_template_preserves_process_templates() {
+        let yaml = "\
+jobs:
+  setup:
+    run: echo done
+    once: true
+  app:
+    depends:
+      - process_exited: setup
+    run: echo ${{ setup.DB_URL }} ${{ args.level }}
+";
+        let path = write_yaml(yaml);
+        let mut arg_values = HashMap::new();
+        arg_values.insert("level".to_string(), "info".to_string());
+        let (configs, _) = parse(&path, &HashMap::new(), &arg_values).unwrap();
+        let app = configs.iter().find(|c| c.name == "app").unwrap();
+        assert_eq!(app.run, "echo ${{ setup.DB_URL }} info");
     }
 }
