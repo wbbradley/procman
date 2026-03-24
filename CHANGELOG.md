@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.15.0] - 2026-03-23
+
+### Added
+- Conditional process execution via `condition:` field. A shell command is evaluated before spawning; if it exits non-zero, the job is skipped. Skipped `once: true` jobs are registered as exited so `process_exited` dependents can proceed.
+- Infinite wait on `process_exited` dependencies via expanded object form: `process_exited: { name: ..., timeout_seconds: null }`. The simple string form retains the 60-second default.
+
 ## [0.14.0] - 2026-03-23
 
 ### Added

@@ -113,6 +113,10 @@ jobs:
       - not_running: "old-api.*"
     run: api-server --port 8080
 
+  optional-worker:
+    condition: test -n "$WORKER_ENABLED"
+    run: worker-service start
+
   nodes:
     for_each:
       glob: "/etc/nodes/*.yaml"
@@ -167,12 +171,13 @@ Each job definition supports:
   - **TCP connect**: `tcp` (address:port), with optional `poll_interval` and `timeout_seconds`.
   - **File exists**: `path` to a file that must exist.
   - **File contains key**: `file_contains` with `path`, `format` (json/yaml), `key` (JSONPath expression per RFC 9535, e.g. `$.database.url`), and optional `env` (variable name to extract the value into). With optional `poll_interval` and `timeout_seconds`.
-  - **Process exited**: `process_exited` names a `once: true` process that must complete successfully before this process starts.
+  - **Process exited**: `process_exited` names a `once: true` process that must complete successfully before this process starts. Supports an expanded form for timeout control: `process_exited: { name: ..., timeout_seconds: 30 }`. Use `timeout_seconds: null` to wait indefinitely (the simple string form defaults to 60 seconds).
   - **TCP not listening**: `not_listening` (address:port), with optional `poll_interval` and `timeout_seconds`. Waits until no service is accepting connections.
   - **File not exists**: `not_exists` path that must not exist.
   - **Process not running**: `not_running` pattern (matched via `pgrep -f`). Waits until no matching process is found.
 
   All dependency types accept an optional `retry` (default `true`). Set `retry: false` to fail immediately if the dependency is not satisfied on the first check — useful to catch stale state (leftover lock files, ports still bound, zombie processes).
+- `condition` (optional): a shell command evaluated before spawning. If it exits non-zero, the job is skipped entirely. Runs via `sh -euo pipefail -c` in the process's resolved environment. Skipped `once: true` jobs are registered as exited so `process_exited` dependents can proceed. Supports `${{ args.name }}` templates.
 - `autostart` (optional, default `true`): if `false`, the process is dormant — it won't start until explicitly spawned via a watch `on_fail: spawn` action.
 - `watch` (optional): list of runtime health checks that monitor the process after it starts. Each watch polls a check (same types as dependencies) and takes an action when consecutive failures exceed the threshold.
   - `name` (optional): human-readable name; auto-generated if omitted.
