@@ -21,6 +21,22 @@ Extension: `.pman`
 
 Comments: `#` to end of line.
 
+### Identifiers
+
+Job names, event names, arg names, and variable names are identifiers. Valid identifiers match `[a-zA-Z_][a-zA-Z0-9_-]*` — they start with a letter or underscore, followed by letters, digits, underscores, or hyphens.
+
+### String Literals
+
+String literals are double-quoted. Supported escape sequences: `\"` (literal quote), `\\` (literal backslash), `\n` (newline), `\t` (tab). No other backslash escapes are recognized.
+
+### Duration Literals
+
+Duration literals are a number followed by a unit suffix: `s` (seconds), `ms` (milliseconds), `m` (minutes). Fractional values are allowed (e.g., `1.5s`). No other units in v1.
+
+### The `none` Literal
+
+`none` represents the absence of a value. It is valid only in specific positions: `timeout = none` (infinite wait), `default = none` (no default). Using `none` in env value positions or boolean contexts is a parse-time error.
+
 ## Top-Level Blocks
 
 A `.pman` file contains top-level blocks in any order:
@@ -87,9 +103,12 @@ Arg values are referenced in expressions as `args.name`. There is no `env` field
 Lowest to highest:
 
 1. System env (inherited)
-2. Global `config { env { } }`
-3. Per-job `env`
-4. Per-iteration `for` bindings
+2. CLI `-e KEY=VALUE` flags
+3. Global `config { env { } }`
+4. Per-job `env`
+5. Per-iteration `for` bindings
+
+Note: `var` bindings from `contains` conditions are procman expressions, not direct env injections. They enter the environment only when explicitly assigned via `env KEY = var_name`.
 
 ## Job Definition
 
@@ -178,7 +197,7 @@ job nodes {
 
 | Syntax | Description |
 |--------|-------------|
-| `glob("pattern")` | File glob, sorted lexicographically. Zero matches is an error. |
+| `glob("pattern")` | File glob, evaluated at parse time, sorted lexicographically. Zero matches is a parse-time error. |
 | `["a", "b", "c"]` | Literal array of strings |
 | `0..3` | Exclusive range: 0, 1, 2 |
 | `0..=3` | Inclusive range: 0, 1, 2, 3 |
@@ -186,8 +205,9 @@ job nodes {
 ### Scoping
 
 - The iteration variable is scoped to the `for` block
-- It lives in the same namespace as `args.x` and `@job.KEY`
-- Shadowing any existing name is a parse-time error
+- It shares the local variable namespace with `var` bindings from `contains` conditions
+- `args.x` and `@job.KEY` have distinct syntactic prefixes and cannot collide with bare local names
+- Shadowing any existing local variable name is a parse-time error
 - Lowercase is convention, not enforced
 
 ### Instance Naming
@@ -242,13 +262,13 @@ wait {
 
 | Syntax | Description |
 |--------|-------------|
-| `after @job` | Wait for a `once = true` job to exit successfully |
+| `after @job` | Wait for a `once = true` job to exit successfully. Parse-time error if the target is not `once = true`. |
 | `http "url" { status = N }` | HTTP GET returns expected status |
 | `connect "host:port"` | TCP port accepts connections |
 | `!connect "host:port"` | TCP port stops accepting connections |
 | `exists "path"` | File exists on disk |
 | `!exists "path"` | File does not exist |
-| `!running "pattern"` | No process matches pattern (`pgrep -f`) |
+| `!running "pattern"` | No process matches pattern (`pgrep -f`). No positive `running` form — "wait until a process is running" is inherently racy; use `connect` or `http` for readiness checks instead. |
 | `contains "path" { ... }` | File contains a key; optionally binds to a local `var` |
 
 ### Condition Options
@@ -292,7 +312,7 @@ env DB_URL = database_url
 run "start-api --db $DB_URL"
 ```
 
-The variable follows the same scoping and no-shadowing rules as `for` iteration variables.
+The variable is scoped to the enclosing job (not to the `wait` block), so it can be referenced in `env` bindings and other expressions anywhere in the job body. It follows the same no-shadowing rules as `for` iteration variables — shadowing any existing name (args, other locals, other `var` bindings) is a parse-time error.
 
 ## Watches and Events
 
@@ -350,7 +370,7 @@ event recovery {
 }
 ```
 
-`on_fail spawn @name` must reference an `event`, not a `job`. When spawned, the event handler receives `PROCMAN_WATCH_*` environment variables with failure context.
+`on_fail spawn @name` must reference an `event`, not a `job`. The `@` sigil is a general "named entity" prefix used for both jobs and events throughout the DSL; the parser validates the target type based on context (`after` requires a `once = true` job, `spawn` requires an event). When spawned, the event handler receives `PROCMAN_WATCH_*` environment variables with failure context.
 
 ## Expression Language
 
@@ -384,6 +404,23 @@ Expressions appear in `if` conditions, `env` value positions, and `var` bindings
 
 No arithmetic in v1.
 
+### PROCMAN_OUTPUT Format
+
+Every job receives a `PROCMAN_OUTPUT` environment variable pointing to a per-job output file. Jobs write key-value data to this file, which other jobs reference via `@job.KEY` expressions.
+
+**Simple key-value lines:** `KEY=VALUE` (one per line, first `=` splits key from value).
+
+**Heredoc blocks** for multi-line values:
+```
+CERT<<EOF
+-----BEGIN CERTIFICATE-----
+MIIBxTCCAWugAwIBAgIJALP...
+-----END CERTIFICATE-----
+EOF
+```
+
+The heredoc delimiter is arbitrary — `KEY<<DELIM` starts a block and a line containing only `DELIM` ends it.
+
 ### Type Errors
 
 Type errors in expressions cause immediate procman runtime panic and shutdown. There is no silent coercion. A type error is a bug in the config.
@@ -394,6 +431,7 @@ Type errors in expressions cause immediate procman runtime panic and shutdown. T
 
 - Syntax errors
 - Unknown identifiers (referencing an arg or job that doesn't exist)
+- `after @job` must target a `once = true` job
 - `@job.KEY` references must point to a `once = true` job
 - `@job.KEY` references require `after @job` in the job's `wait` block (direct or transitive)
 - Circular dependencies in `after` references
