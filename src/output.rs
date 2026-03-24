@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path, time::Duration};
+use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context, Result, bail};
 
@@ -139,6 +139,8 @@ fn has_transitive_process_exited_dep(
 
 #[cfg(test)]
 mod tests {
+
+    use std::time::Duration;
 
     use super::*;
 
