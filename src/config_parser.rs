@@ -174,6 +174,17 @@ pub fn parse(
             .collect::<Result<Vec<_>>>()
             .with_context(|| format!("parsing watches for process {name}"))?;
 
+        let for_each = if let Some(fe) = def.for_each {
+            crate::config::expand_env_vars(&fe.glob, &env)
+                .with_context(|| format!("in for_each glob for process {name}"))?;
+            Some(ForEachConfig {
+                glob: fe.glob,
+                variable: fe.variable,
+            })
+        } else {
+            None
+        };
+
         configs.push(ProcessConfig {
             name,
             env,
@@ -181,10 +192,7 @@ pub fn parse(
             condition: def.condition,
             depends,
             once: def.once.unwrap_or(false),
-            for_each: def.for_each.map(|fe| ForEachConfig {
-                glob: fe.glob,
-                variable: fe.variable,
-            }),
+            for_each,
             autostart: def.autostart.unwrap_or(true),
             watches,
         });
@@ -734,6 +742,25 @@ jobs:
         assert_eq!(fe.glob, "/tmp/test-*.yaml");
         assert_eq!(fe.variable, "CONFIG_PATH");
         assert!(configs[0].once);
+    }
+
+    #[test]
+    fn parse_for_each_glob_rejects_invalid_env_var() {
+        let yaml = "\
+jobs:
+  nodes:
+    for_each:
+      glob: \"${BAD:-fallback}/test-*.yaml\"
+      as: CONFIG_PATH
+    run: echo $CONFIG_PATH
+    once: true
+";
+        let path = write_yaml(yaml);
+        let err = parse(&path, &HashMap::new(), &HashMap::new()).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("invalid environment variable name"),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
