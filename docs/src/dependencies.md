@@ -111,22 +111,47 @@ passing data between processes.
 
 Wait for another process to exit successfully (`once: true` processes only, in practice).
 
+**Simple string form** — uses a 60-second default timeout:
+
 ```yaml
 depends:
   - process_exited: migrate
 ```
 
+**Expanded object form** — allows timeout control:
+
+```yaml
+depends:
+  - process_exited:
+      name: migrate
+      timeout_seconds: 30
+```
+
+**Infinite wait** — use `timeout_seconds: null` to wait indefinitely:
+
+```yaml
+depends:
+  - process_exited:
+      name: migrate
+      timeout_seconds: null
+```
+
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `process_exited` | string | yes | — | Name of the process to wait for |
+| `process_exited` | string or object | yes | — | Process name (string) or object with `name` and `timeout_seconds` |
+| `process_exited.name` | string | yes (object form) | — | Name of the process to wait for |
+| `process_exited.timeout_seconds` | integer or null | no | 60 | Seconds before giving up. `null` waits indefinitely. |
 | `retry` | bool | no | true | If false, fail immediately on first check instead of polling |
 
-Poll interval is 100ms. Timeout is 60 seconds. These are not configurable for this
-dependency type.
+Poll interval is 100ms. This is not configurable for this dependency type.
 
 This dependency is satisfied when the named process has exited successfully (exit code 0).
 A non-zero exit triggers supervisor shutdown and the dependency is never satisfied. This
 only works with `once: true` processes (e.g. migrations or setup scripts).
+
+Use the simple string form for most cases. Use the expanded form when you need a shorter
+timeout (to fail fast) or an infinite wait (for long-running setup tasks where 60 seconds
+isn't enough).
 
 For `for_each` processes, a `process_exited` dependency on the template name is satisfied
 only when **all** fan-out instances have exited.

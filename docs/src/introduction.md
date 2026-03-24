@@ -19,8 +19,11 @@ exits or a signal arrives, procman tears everything down cleanly.
   `${{ process.key }}` syntax.
 - **Fan-out** — use `for_each` with a glob pattern to spawn multiple instances
   of a process template.
-- **Dynamic process management** — `procman serve` listens on a FIFO so you can
-  add processes at runtime with `procman start`.
+- **User-defined CLI arguments** — define typed arguments in the config file
+  and pass them after `--` on the command line, with template expansion into
+  `run`, `env`, and `condition` fields.
+- **Conditional process execution** — use `condition:` to evaluate a shell
+  command before spawning; non-zero exit skips the job entirely.
 - **Clean shutdown** — Ctrl-C sends SIGTERM to every child, waits 2 seconds,
   then sends SIGKILL to anything still running.
 

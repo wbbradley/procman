@@ -1,95 +1,53 @@
 # CLI Reference
 
-Procman provides four subcommands. If no subcommand is given, `run` is used by default.
-
-## `procman run [CONFIG]`
+## `procman <CONFIG> [OPTIONS] [-- ARGS]`
 
 Spawn all processes defined in the config file and wait for exit or signal.
 
-- **CONFIG** defaults to `procman.yaml`.
+- **CONFIG** is a required positional argument — the path to the YAML config file.
 - Acquires an exclusive advisory lock on the config file to prevent concurrent instances.
 - On SIGINT or SIGTERM, initiates [graceful shutdown](shutdown.md).
 
 ```sh
-procman run                 # uses procman.yaml
-procman run services.yaml   # uses a custom config
-procman run -e PORT=3000 -e RUST_LOG=debug
-```
-
-## `procman serve [CONFIG]`
-
-Like `run`, but also listens on a FIFO for dynamically added processes. See the
-[Dynamic Process Management](dynamic.md) chapter for details.
-
-- **CONFIG** defaults to `procman.yaml`.
-- The FIFO path is auto-derived from the config path (deterministic, based on the parent
-  directory name and a path hash).
-- Also acquires an exclusive advisory lock on the config file.
-
-```sh
-procman serve &
-procman serve -e PORT=3000
-```
-
-## `procman start COMMAND [--config CONFIG]`
-
-Send a run command to a running `procman serve` instance.
-
-- **COMMAND** is the full command line to run. The process name is derived from the program
-  basename (e.g. `"redis-server --port 6380"` runs as `redis-server`).
-- **--config** defaults to `procman.yaml` and is used to derive the FIFO path.
-- Fails immediately with a clear error if no server is listening (uses `O_NONBLOCK`).
-
-```sh
-procman start "redis-server --port 6380"
-procman start "worker --threads 4" --config services.yaml
-procman start "my-worker" -e DB_URL=postgres://localhost/mydb
-```
-
-## `procman stop [CONFIG]`
-
-Send a shutdown command to a running `procman serve` instance.
-
-- **CONFIG** defaults to `procman.yaml`.
-- Fails immediately if no server is listening.
-
-```sh
-procman stop
+procman myapp.yaml
+procman myapp.yaml -e PORT=3000 -e RUST_LOG=debug
+procman myapp.yaml --debug
+procman myapp.yaml -- --rust-log debug --verbose
 ```
 
 ## `-e` / `--env` — Extra environment variables
 
-The `run`, `serve`, and `start` subcommands accept a repeatable `-e KEY=VALUE` flag to inject
-environment variables without modifying `procman.yaml`.
+A repeatable `-e KEY=VALUE` flag to inject environment variables without modifying the
+config file.
 
 ```sh
-procman run -e PORT=3000 -e RUST_LOG=debug
-procman start "my-worker" -e DB_URL=postgres://localhost/mydb
+procman myapp.yaml -e PORT=3000 -e RUST_LOG=debug
 ```
 
-**Precedence (lowest → highest):**
+## `-- [ARGS]` — User-defined arguments
 
-| Source | `run` / `serve` | `start` |
-|--------|-----------------|---------|
-| System environment | lowest | lowest (server-side) |
-| CLI `-e` flags | middle | sent as JSON `env` field |
-| YAML `env:` block | highest | N/A (no YAML for dynamic processes) |
+Arguments after `--` are parsed according to the `config.args` definitions in the config
+file. See the [Configuration](configuration.md#configargs) chapter for how to define args.
 
-For `run` and `serve`, YAML `env:` values always win over `-e` flags, which in turn override
-inherited system environment variables.
+```sh
+procman myapp.yaml -- --rust-log debug --enable-feature
+```
 
-For `start`, the `-e` flags are sent to the server as part of the JSON message and merged on top
-of the server's system environment.
+Running `-- --help` prints generated usage based on the `config.args` definitions:
+
+```sh
+procman myapp.yaml -- --help
+```
+
+This shows each defined argument's name, type, description, default value, and short form.
 
 ## `--debug` — Pause before shutdown
 
-The `run` and `serve` subcommands accept a `--debug` flag that pauses the shutdown sequence
-when a child process fails or a dependency times out, giving you time to inspect remaining
-processes before they are terminated.
+The `--debug` flag pauses the shutdown sequence when a child process fails or a dependency
+times out, giving you time to inspect remaining processes before they are terminated.
 
 ```sh
-procman run --debug
-procman serve --debug
+procman myapp.yaml --debug
 ```
 
 When triggered, procman prints:
@@ -100,11 +58,26 @@ When triggered, procman prints:
 The `--debug` flag requires an interactive terminal (stdin must be a TTY). If stdin is not
 a TTY, procman exits immediately with an error.
 
+## Environment variable precedence
+
+**Precedence (lowest → highest):**
+
+| Source | Priority |
+|--------|----------|
+| System environment | lowest |
+| Arg defaults (`config.args` `default` values) | |
+| CLI `--` args (parsed from `config.args`) | |
+| CLI `-e` flags | |
+| YAML `env:` blocks | highest |
+
+YAML `env:` values always win over `-e` flags, which win over `--` arg values, which win
+over arg defaults, which win over inherited system environment variables.
+
 ## File locking
 
-Both `run` and `serve` acquire an **exclusive advisory lock** (`flock`) on the config file
-before starting. If another procman instance is already running with the same config, the
-second instance exits immediately with an error message.
+Procman acquires an **exclusive advisory lock** (`flock`) on the config file before starting.
+If another procman instance is already running with the same config, the second instance exits
+immediately with an error message.
 
 ## Exit code
 

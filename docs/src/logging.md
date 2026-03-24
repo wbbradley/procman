@@ -51,8 +51,3 @@ Each child process has stderr redirected to stdout (`dup2`) before exec. This me
 streams are captured through the same pipe and appear interleaved in the logs. There is no
 separate stderr log.
 
-## Dynamic processes
-
-Processes added via the FIFO (see [Dynamic Process Management](dynamic.md)) get their log files
-created on demand. They appear in both the combined log and get their own per-process log file,
-just like statically configured processes.

@@ -5,32 +5,27 @@
 Create a file called `procman.yaml` in your project root:
 
 ```yaml
-web:
-  run: python3 -m http.server 8000
+jobs:
+  web:
+    run: python3 -m http.server 8000
 
-api:
-  run: node server.js
+  api:
+    run: node server.js
 ```
 
-Each top-level key is a process name, and `run` is the command to execute. That's
-all you need.
+Each key under `jobs` is a process name, and `run` is the command to execute.
+That's all you need.
 
 ## Running
 
 Start everything with:
 
 ```sh
-procman run
+procman procman.yaml
 ```
 
-Or simply:
-
-```sh
-procman
-```
-
-The `run` subcommand is the default. procman reads `procman.yaml` from the
-current directory, spawns both processes, and multiplexes their output:
+The config file path is a required positional argument. procman spawns both
+processes and multiplexes their output:
 
 ```
    web | Serving HTTP on 0.0.0.0 port 8000
@@ -62,23 +57,24 @@ running. procman exits with the exit code of the first process that terminated.
 Here's a configuration that uses `once` processes and dependencies:
 
 ```yaml
-migrate:
-  run: db-migrate up
-  once: true
+jobs:
+  migrate:
+    run: db-migrate up
+    once: true
 
-web:
-  env:
-    PORT: "3000"
-  run: serve --port $PORT
+  web:
+    env:
+      PORT: "3000"
+    run: serve --port $PORT
 
-api:
-  depends:
-    - process_exited: migrate
-    - url: http://localhost:3000/health
-      code: 200
-      poll_interval: 0.5
-      timeout_seconds: 30
-  run: api-server start
+  api:
+    depends:
+      - process_exited: migrate
+      - url: http://localhost:3000/health
+        code: 200
+        poll_interval: 0.5
+        timeout_seconds: 30
+    run: api-server start
 ```
 
 In this setup:
