@@ -197,7 +197,7 @@ job nodes {
 
 | Syntax | Description |
 |--------|-------------|
-| `glob("pattern")` | File glob, evaluated at parse time, sorted lexicographically. Zero matches is a parse-time error. |
+| `glob("pattern")` | File glob, evaluated at runtime (after `wait` conditions are satisfied), sorted lexicographically. Zero matches is a runtime error. |
 | `["a", "b", "c"]` | Literal array of strings |
 | `0..3` | Exclusive range: 0, 1, 2 |
 | `0..=3` | Inclusive range: 0, 1, 2, 3 |
@@ -438,7 +438,6 @@ Type errors in expressions cause immediate procman runtime panic and shutdown. T
 - `on_fail spawn @name` must reference an `event`
 - Variable shadowing
 - Empty `run` commands
-- `glob()` patterns that match zero files
 
 ### Runtime
 
@@ -446,8 +445,11 @@ All fatal — immediate shutdown:
 
 - Type errors in expression evaluation
 - Missing key in `@job.KEY` resolution
+- `glob()` pattern matching zero files
 - Dependency timeout exceeded
 - Non-zero exit from a `once = true` job
+
+**General principle:** All expressions in `.pman` files are evaluated at runtime, not parse time. The parser validates syntax, identifiers, and structural rules. Value resolution (including `glob()`, `@job.KEY`, and `args.*` references) happens at the point of use — after upstream dependencies are satisfied.
 
 ## Future Work (Out of Scope for v1)
 
