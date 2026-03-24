@@ -5,6 +5,7 @@ mod config_parser;
 mod dependency;
 mod log;
 mod output;
+mod pman;
 mod process;
 mod signal;
 mod watch;
