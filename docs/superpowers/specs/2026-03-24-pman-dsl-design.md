@@ -427,6 +427,10 @@ Type errors in expressions cause immediate procman runtime panic and shutdown. T
 
 ## Validation
 
+### Error Reporting
+
+All parse-time and runtime errors include the source file path, line number, and column number (1-based) where the error was detected. Format: `{path}:{line}:{col}: {message}`.
+
 ### Parse-Time
 
 - Syntax errors
