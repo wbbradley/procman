@@ -478,9 +478,8 @@ impl ProcessGroup {
                             shutdown_trigger =
                                 Some(format!("{name} [pid {pid}] exited with code {code}"));
                         }
-                    } else if first_exit_code.is_none() {
-                        first_exit_code = Some(code);
                     }
+                    // Unknown pid — ignore (don't influence exit code)
                 }
                 Ok(WaitStatus::Signaled(pid, sig, _)) => {
                     remaining.retain(|p| *p != pid);
@@ -497,9 +496,8 @@ impl ProcessGroup {
                             first_exit_code = Some(1);
                             shutdown_trigger = Some(format!("{name} [pid {pid}] killed by {sig}"));
                         }
-                    } else if first_exit_code.is_none() {
-                        first_exit_code = Some(1);
                     }
+                    // Unknown pid — ignore (don't influence exit code)
                 }
                 Ok(WaitStatus::StillAlive) => {
                     self.try_accept_new(&rx, &shutdown, &logger);
@@ -534,9 +532,10 @@ impl ProcessGroup {
         loop {
             match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
                 Ok(WaitStatus::Exited(pid, code)) => {
+                    let was_known = self.children.iter().any(|(p, _, _, _)| *p == pid);
                     remaining.retain(|p| *p != pid);
                     self.children.retain(|(p, _, _, _)| *p != pid);
-                    if first_exit_code.is_none() {
+                    if was_known && first_exit_code.is_none() {
                         first_exit_code = Some(code);
                     }
                 }
@@ -601,8 +600,9 @@ impl ProcessGroup {
         while !remaining.is_empty() && Instant::now() < deadline {
             match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
                 Ok(WaitStatus::Exited(pid, code)) => {
+                    let was_remaining = remaining.contains(&pid);
                     remaining.retain(|p| *p != pid);
-                    if first_exit_code.is_none() {
+                    if was_remaining && first_exit_code.is_none() {
                         first_exit_code = Some(code);
                     }
                 }
@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn expand_fan_out_creates_instances() {
-        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (mut group, logger) = make_test_group();
         let (_dir, pattern) = make_temp_glob_files(3);
         let config = ProcessConfig {
@@ -782,7 +782,7 @@ mod tests {
 
     #[test]
     fn expand_fan_out_sets_env_var() {
-        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (mut group, logger) = make_test_group();
         let (dir, pattern) = make_temp_glob_files(2);
         let config = ProcessConfig {
@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn expand_fan_out_expands_env_in_glob() {
-        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (mut group, logger) = make_test_group();
         // Create temp files manually (don't use make_temp_glob_files since we need the dir separate)
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -903,7 +903,7 @@ mod tests {
 
     #[test]
     fn once_process_exits_cleanly() {
-        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (tx, rx) = mpsc::channel::<crate::config::SupervisorCommand>();
         let shutdown = Arc::new(AtomicBool::new(false));
         let signal_triggered = Arc::new(AtomicBool::new(false));
@@ -953,7 +953,7 @@ mod tests {
 
     #[test]
     fn all_once_processes_exit_cleanly() {
-        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (tx, rx) = mpsc::channel::<crate::config::SupervisorCommand>();
         let shutdown = Arc::new(AtomicBool::new(false));
         let signal_triggered = Arc::new(AtomicBool::new(false));
@@ -1020,7 +1020,7 @@ mod tests {
 
     #[test]
     fn once_with_long_running_does_not_auto_exit() {
-        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (tx, rx) = mpsc::channel::<crate::config::SupervisorCommand>();
         let shutdown = Arc::new(AtomicBool::new(false));
         let signal_triggered = Arc::new(AtomicBool::new(false));
@@ -1099,7 +1099,7 @@ mod tests {
 
     #[test]
     fn debug_mode_excludes_completed_once_processes() {
-        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (tx, rx) = mpsc::channel::<crate::config::SupervisorCommand>();
         let shutdown = Arc::new(AtomicBool::new(false));
         let signal_triggered = Arc::new(AtomicBool::new(false));
@@ -1218,7 +1218,7 @@ mod tests {
 
     #[test]
     fn try_accept_new_skips_already_running() {
-        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (mut group, logger) = make_test_group();
 
         // Spawn a process first
@@ -1277,7 +1277,7 @@ mod tests {
 
     #[test]
     fn evaluate_condition_true_returns_true() {
-        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_, logger) = make_test_group();
         let env: HashMap<String, String> = std::env::vars().collect();
         assert!(evaluate_condition("true", &env, "test", &logger).unwrap());
@@ -1285,7 +1285,7 @@ mod tests {
 
     #[test]
     fn evaluate_condition_false_returns_false() {
-        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_, logger) = make_test_group();
         let env: HashMap<String, String> = std::env::vars().collect();
         assert!(!evaluate_condition("false", &env, "test", &logger).unwrap());
@@ -1293,7 +1293,7 @@ mod tests {
 
     #[test]
     fn evaluate_condition_uses_process_env() {
-        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_, logger) = make_test_group();
         let mut env = HashMap::new();
         env.insert("MY_FLAG".to_string(), "yes".to_string());
@@ -1304,7 +1304,7 @@ mod tests {
 
     #[test]
     fn condition_false_skips_once_process_and_registers_exit() {
-        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (tx, _rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1340,7 +1340,7 @@ mod tests {
 
     #[test]
     fn condition_true_allows_spawn() {
-        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (mut group, logger) = make_test_group();
         let config = ProcessConfig {
             name: "cond-pass".to_string(),
@@ -1366,7 +1366,7 @@ mod tests {
 
     #[test]
     fn condition_false_non_once_process_not_in_exit_registry() {
-        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (tx, _rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);

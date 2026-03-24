@@ -316,7 +316,7 @@ mod tests {
         let logger = make_logger(&["tcp-waiter"]);
         let pending = Arc::new(AtomicUsize::new(1));
 
-        let _handle = spawn_waiter(
+        let handle = spawn_waiter(
             config,
             tx,
             Arc::clone(&shutdown),
@@ -330,6 +330,7 @@ mod tests {
             SupervisorCommand::Spawn(config) => assert_eq!(config.name, "tcp-waiter"),
             _ => panic!("expected Spawn"),
         }
+        handle.join().unwrap();
         assert_eq!(pending.load(Ordering::Relaxed), 0);
     }
 
