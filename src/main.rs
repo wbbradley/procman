@@ -8,6 +8,7 @@ mod log;
 mod output;
 mod process;
 mod signal;
+mod watch;
 
 use std::{
     collections::HashMap,

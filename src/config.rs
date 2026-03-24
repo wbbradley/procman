@@ -18,7 +18,6 @@ pub enum OnFailAction {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // fields consumed in Phase 2 (watch runtime)
 pub struct Watch {
     pub name: String,
     pub check: Dependency,
@@ -92,6 +91,26 @@ pub enum Dependency {
         pattern: String,
         retry: bool,
     },
+}
+
+impl Dependency {
+    pub fn substitute_var(&mut self, var: &str, value: &str) {
+        let replace = |s: &mut String| {
+            *s = s
+                .replace(&format!("${}", var), value)
+                .replace(&format!("${{{}}}", var), value);
+        };
+        match self {
+            Dependency::HttpHealthCheck { url, .. } => replace(url),
+            Dependency::TcpConnect { address, .. } => replace(address),
+            Dependency::FileContainsKey { path, .. } => replace(path),
+            Dependency::FileExists { path, .. } => replace(path),
+            Dependency::ProcessExited { name, .. } => replace(name),
+            Dependency::TcpNotListening { address, .. } => replace(address),
+            Dependency::FileNotExists { path, .. } => replace(path),
+            Dependency::ProcessNotRunning { pattern, .. } => replace(pattern),
+        }
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -361,6 +380,7 @@ impl WatchDef {
 pub enum SupervisorCommand {
     Spawn(ProcessConfig),
     Shutdown { message: String },
+    DebugPause { message: String },
 }
 
 #[cfg(test)]
@@ -442,5 +462,55 @@ mod tests {
     fn expand_underscore_var() {
         let e = env(&[("MY_DIR", "/tmp")]);
         assert_eq!(expand_env_vars("$MY_DIR/file", &e).unwrap(), "/tmp/file");
+    }
+
+    #[test]
+    fn substitute_var_http_health_check() {
+        let mut dep = Dependency::HttpHealthCheck {
+            url: "http://${HOST}:8080/health".to_string(),
+            code: 200,
+            poll_interval: None,
+            timeout: None,
+            retry: true,
+        };
+        dep.substitute_var("HOST", "localhost");
+        match &dep {
+            Dependency::HttpHealthCheck { url, .. } => {
+                assert_eq!(url, "http://localhost:8080/health");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn substitute_var_file_exists() {
+        let mut dep = Dependency::FileExists {
+            path: "/tmp/$NODE/healthy".to_string(),
+            retry: true,
+        };
+        dep.substitute_var("NODE", "node-0");
+        match &dep {
+            Dependency::FileExists { path, .. } => {
+                assert_eq!(path, "/tmp/node-0/healthy");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn substitute_var_tcp_connect() {
+        let mut dep = Dependency::TcpConnect {
+            address: "${HOST}:5432".to_string(),
+            poll_interval: None,
+            timeout: None,
+            retry: true,
+        };
+        dep.substitute_var("HOST", "db.local");
+        match &dep {
+            Dependency::TcpConnect { address, .. } => {
+                assert_eq!(address, "db.local:5432");
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }

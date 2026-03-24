@@ -218,6 +218,12 @@ impl FifoServer {
                             .unwrap()
                             .log_line("procman", &format!("shutdown via FIFO: {message}"));
                     }
+                    SupervisorCommand::DebugPause { message } => {
+                        logger
+                            .lock()
+                            .unwrap()
+                            .log_line("procman", &format!("debug pause via FIFO: {message}"));
+                    }
                 }
 
                 if tx.send(cmd).is_err() {

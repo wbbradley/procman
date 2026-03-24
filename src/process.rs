@@ -29,12 +29,14 @@ use crate::{
     dependency,
     log::Logger,
     output,
+    watch,
 };
 
 pub struct ProcessGroup {
     children: Vec<(Pid, String, Instant, bool)>,
     reader_threads: Vec<thread::JoinHandle<()>>,
     waiter_threads: Vec<thread::JoinHandle<()>>,
+    watcher_threads: Vec<thread::JoinHandle<()>>,
     pending_deps: Arc<AtomicUsize>,
     exit_registry: Arc<Mutex<HashSet<String>>>,
     log_dir: PathBuf,
@@ -42,6 +44,8 @@ pub struct ProcessGroup {
     debug_mode: bool,
     serve_mode: bool,
     dormant: HashMap<String, ProcessConfig>,
+    tx: Option<mpsc::Sender<SupervisorCommand>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 fn build_command(resolved_run: &str, name: &str) -> Result<std::process::Command> {
@@ -136,6 +140,22 @@ impl ProcessGroup {
         Ok(pid)
     }
 
+    fn start_watchers(&mut self, config: &ProcessConfig, logger: &Arc<Mutex<Logger>>) {
+        if config.watches.is_empty() {
+            return;
+        }
+        if let Some(tx) = &self.tx {
+            self.watcher_threads.push(watch::spawn_watcher(
+                config.name.clone(),
+                config.watches.clone(),
+                tx.clone(),
+                Arc::clone(&self.shutdown),
+                Arc::clone(logger),
+                Arc::clone(&self.exit_registry),
+            ));
+        }
+    }
+
     fn expand_fan_out(
         &mut self,
         config: &ProcessConfig,
@@ -170,6 +190,15 @@ impl ProcessGroup {
                 .replace(&format!("${}", fe.variable), matched_path)
                 .replace(&format!("${{{}}}", fe.variable), matched_path);
 
+            let mut instance_watches = config.watches.clone();
+            for w in &mut instance_watches {
+                w.name = format!(
+                    "{instance_name}.{}",
+                    w.name.rsplit_once('.').map(|(_, s)| s).unwrap_or(&w.name)
+                );
+                w.check.substitute_var(&fe.variable, matched_path);
+            }
+
             let instance_config = ProcessConfig {
                 name: instance_name.clone(),
                 env,
@@ -178,11 +207,12 @@ impl ProcessGroup {
                 once: config.once,
                 for_each: None,
                 autostart: true,
-                watches: vec![],
+                watches: instance_watches,
             };
 
             logger.lock().unwrap().add_process(&instance_name).ok();
             self.spawn_one(&instance_config, logger)?;
+            self.start_watchers(&instance_config, logger);
         }
 
         self.fan_out_groups
@@ -211,6 +241,7 @@ impl ProcessGroup {
             children: Vec::new(),
             reader_threads: Vec::new(),
             waiter_threads: Vec::new(),
+            watcher_threads: Vec::new(),
             pending_deps: Arc::new(AtomicUsize::new(0)),
             exit_registry: Arc::new(Mutex::new(HashSet::new())),
             log_dir,
@@ -218,6 +249,8 @@ impl ProcessGroup {
             debug_mode: debug,
             serve_mode,
             dormant: HashMap::new(),
+            tx: Some(tx),
+            shutdown: Arc::clone(&shutdown),
         };
 
         for cmd in commands {
@@ -230,13 +263,15 @@ impl ProcessGroup {
                     group.expand_fan_out(cmd, &logger)?;
                 } else {
                     group.spawn_one(cmd, &logger)?;
+                    group.start_watchers(cmd, &logger);
                 }
             } else {
                 logger.lock().unwrap().add_process(&cmd.name).ok();
                 group.pending_deps.fetch_add(1, Ordering::Relaxed);
+                let tx = group.tx.as_ref().unwrap().clone();
                 group.waiter_threads.push(dependency::spawn_waiter(
                     cmd.clone(),
-                    tx.clone(),
+                    tx,
                     Arc::clone(&shutdown),
                     Arc::clone(&logger),
                     Arc::clone(&group.pending_deps),
@@ -245,7 +280,6 @@ impl ProcessGroup {
             }
         }
 
-        drop(tx);
         Ok(group)
     }
 
@@ -258,7 +292,22 @@ impl ProcessGroup {
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
                 SupervisorCommand::Spawn(config) => {
-                    let config = if let Some(dormant_config) = self.dormant.remove(&config.name) {
+                    // Skip if already running
+                    if self
+                        .children
+                        .iter()
+                        .any(|(_, name, _, _)| *name == config.name)
+                    {
+                        logger.lock().unwrap().log_line(
+                            "procman",
+                            &format!("{}: already running, skipping spawn", config.name),
+                        );
+                        continue;
+                    }
+
+                    let config = if let Some(mut dormant_config) = self.dormant.remove(&config.name)
+                    {
+                        dormant_config.env.extend(config.env);
                         dormant_config
                     } else {
                         config
@@ -273,11 +322,14 @@ impl ProcessGroup {
                         }
                     } else {
                         logger.lock().unwrap().add_process(&config.name).ok();
-                        if let Err(e) = self.spawn_one(&config, logger) {
-                            logger.lock().unwrap().log_line(
-                                "procman",
-                                &format!("error spawning {}: {e}", config.name),
-                            );
+                        match self.spawn_one(&config, logger) {
+                            Ok(_) => self.start_watchers(&config, logger),
+                            Err(e) => {
+                                logger.lock().unwrap().log_line(
+                                    "procman",
+                                    &format!("error spawning {}: {e}", config.name),
+                                );
+                            }
                         }
                     }
                 }
@@ -286,6 +338,14 @@ impl ProcessGroup {
                         .lock()
                         .unwrap()
                         .log_line("procman", &format!("shutdown: {message}"));
+                    shutdown.store(true, Ordering::Relaxed);
+                }
+                SupervisorCommand::DebugPause { message } => {
+                    logger
+                        .lock()
+                        .unwrap()
+                        .log_line("procman", &format!("debug pause: {message}"));
+                    self.debug_mode = true;
                     shutdown.store(true, Ordering::Relaxed);
                 }
             }
@@ -299,6 +359,9 @@ impl ProcessGroup {
         rx: mpsc::Receiver<SupervisorCommand>,
         logger: Arc<Mutex<Logger>>,
     ) -> i32 {
+        // Drop our sender so channel closes when all watcher/waiter threads finish
+        self.tx = None;
+
         let mut first_exit_code: Option<i32> = None;
         let mut shutdown_trigger: Option<String> = None;
         let mut remaining: Vec<Pid> = self.children.iter().map(|(pid, _, _, _)| *pid).collect();
@@ -515,6 +578,11 @@ impl ProcessGroup {
             let _ = handle.join();
         }
 
+        // Join watcher threads
+        for handle in self.watcher_threads {
+            let _ = handle.join();
+        }
+
         first_exit_code.unwrap_or(0)
     }
 }
@@ -543,6 +611,7 @@ mod tests {
             children: Vec::new(),
             reader_threads: Vec::new(),
             waiter_threads: Vec::new(),
+            watcher_threads: Vec::new(),
             pending_deps: Arc::new(AtomicUsize::new(0)),
             exit_registry: Arc::new(Mutex::new(HashSet::new())),
             log_dir,
@@ -550,6 +619,8 @@ mod tests {
             debug_mode: false,
             serve_mode: false,
             dormant: HashMap::new(),
+            tx: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
         };
         (group, logger)
     }
@@ -996,5 +1067,107 @@ mod tests {
             .expect("wait_and_shutdown should not hang");
         assert_eq!(code, 1);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn try_accept_new_merges_env_into_dormant() {
+        let (mut group, logger) = make_test_group();
+        group.dormant.insert(
+            "recovery".to_string(),
+            ProcessConfig {
+                name: "recovery".to_string(),
+                env: std::env::vars().collect(),
+                run: "echo recovering".to_string(),
+                depends: vec![],
+                once: true,
+                for_each: None,
+                autostart: false,
+                watches: vec![],
+            },
+        );
+
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        // Send a Spawn with extra env vars (simulating watch trigger)
+        let mut watch_env = HashMap::new();
+        watch_env.insert("PROCMAN_WATCH_NAME".to_string(), "health".to_string());
+        watch_env.insert("PROCMAN_WATCH_PROCESS".to_string(), "web".to_string());
+        let config = ProcessConfig {
+            name: "recovery".to_string(),
+            env: watch_env,
+            run: String::new(),
+            depends: vec![],
+            once: false,
+            for_each: None,
+            autostart: true,
+            watches: vec![],
+        };
+        tx.send(SupervisorCommand::Spawn(config)).unwrap();
+        drop(tx);
+
+        // The dormant config should be removed and env merged
+        // We can't easily test the merged env without spawning, but we can verify
+        // the dormant map was consumed
+        group.try_accept_new(&rx, &shutdown, &logger);
+        assert!(!group.dormant.contains_key("recovery"));
+    }
+
+    #[test]
+    fn try_accept_new_skips_already_running() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let (mut group, logger) = make_test_group();
+
+        // Spawn a process first
+        let config = ProcessConfig {
+            name: "worker".to_string(),
+            env: std::env::vars().collect(),
+            run: "sleep 60".to_string(),
+            depends: vec![],
+            once: false,
+            for_each: None,
+            autostart: true,
+            watches: vec![],
+        };
+        logger.lock().unwrap().add_process("worker").ok();
+        group.spawn_one(&config, &logger).unwrap();
+        assert_eq!(group.children.len(), 1);
+
+        // Try to spawn again with the same name
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        tx.send(SupervisorCommand::Spawn(config)).unwrap();
+        drop(tx);
+
+        group.try_accept_new(&rx, &shutdown, &logger);
+        // Should still have only 1 child
+        assert_eq!(group.children.len(), 1);
+
+        // Clean up
+        for (pid, _, _, _) in &group.children {
+            let _ = nix::sys::signal::killpg(*pid, Signal::SIGKILL);
+            let _ = waitpid(*pid, None);
+        }
+        for handle in std::mem::take(&mut group.reader_threads) {
+            let _ = handle.join();
+        }
+    }
+
+    #[test]
+    fn debug_pause_sets_debug_and_shutdown() {
+        let (mut group, logger) = make_test_group();
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        tx.send(SupervisorCommand::DebugPause {
+            message: "watch triggered".to_string(),
+        })
+        .unwrap();
+        drop(tx);
+
+        assert!(!group.debug_mode);
+        group.try_accept_new(&rx, &shutdown, &logger);
+        assert!(group.debug_mode);
+        assert!(shutdown.load(Ordering::Relaxed));
     }
 }
