@@ -384,8 +384,7 @@ mod tests {
                 retry: None,
             },
         };
-        let env = std::collections::HashMap::new();
-        let err = def.into_dependency(&env).unwrap_err();
+        let err = def.into_dependency().unwrap_err();
         assert!(err.to_string().contains("invalid JSONPath"), "{err}");
     }
 
@@ -612,8 +611,7 @@ mod tests {
         let depends = api_val.get("depends").unwrap().as_sequence().unwrap();
         let dep_def: crate::config::DependencyDef =
             serde_yaml::from_value(depends[0].clone()).unwrap();
-        let env = std::collections::HashMap::new();
-        let dep = dep_def.into_dependency(&env).unwrap();
+        let dep = dep_def.into_dependency().unwrap();
         match dep {
             Dependency::FileExists { retry, .. } => assert!(retry),
             _ => panic!("expected FileExists"),

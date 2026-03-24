@@ -96,22 +96,36 @@ pub enum Dependency {
 }
 
 impl Dependency {
+    pub(crate) fn map_string_field(
+        &mut self,
+        mut f: impl FnMut(&mut String) -> Result<()>,
+    ) -> Result<()> {
+        match self {
+            Dependency::HttpHealthCheck { url, .. } => f(url),
+            Dependency::TcpConnect { address, .. } => f(address),
+            Dependency::FileContainsKey { path, .. } => f(path),
+            Dependency::FileExists { path, .. } => f(path),
+            Dependency::ProcessExited { name, .. } => f(name),
+            Dependency::TcpNotListening { address, .. } => f(address),
+            Dependency::FileNotExists { path, .. } => f(path),
+            Dependency::ProcessNotRunning { pattern, .. } => f(pattern),
+        }
+    }
+
     pub fn substitute_var(&mut self, var: &str, value: &str) {
-        let replace = |s: &mut String| {
+        let _ = self.map_string_field(|s| {
             *s = s
                 .replace(&format!("${}", var), value)
                 .replace(&format!("${{{}}}", var), value);
-        };
-        match self {
-            Dependency::HttpHealthCheck { url, .. } => replace(url),
-            Dependency::TcpConnect { address, .. } => replace(address),
-            Dependency::FileContainsKey { path, .. } => replace(path),
-            Dependency::FileExists { path, .. } => replace(path),
-            Dependency::ProcessExited { name, .. } => replace(name),
-            Dependency::TcpNotListening { address, .. } => replace(address),
-            Dependency::FileNotExists { path, .. } => replace(path),
-            Dependency::ProcessNotRunning { pattern, .. } => replace(pattern),
-        }
+            Ok(())
+        });
+    }
+
+    pub(crate) fn resolve_env_vars(&mut self, env: &HashMap<String, String>) -> Result<()> {
+        self.map_string_field(|s| {
+            *s = expand_env_vars(s, env)?;
+            Ok(())
+        })
     }
 }
 
@@ -255,7 +269,7 @@ pub(crate) fn expand_env_vars(s: &str, env: &HashMap<String, String>) -> Result<
 }
 
 impl DependencyDef {
-    pub fn into_dependency(self, env: &HashMap<String, String>) -> Result<Dependency> {
+    pub fn into_dependency(self) -> Result<Dependency> {
         Ok(match self {
             DependencyDef::HttpHealthCheck {
                 url,
@@ -264,7 +278,7 @@ impl DependencyDef {
                 timeout_seconds,
                 retry,
             } => Dependency::HttpHealthCheck {
-                url: expand_env_vars(&url, env)?,
+                url,
                 code,
                 poll_interval: poll_interval.map(Duration::from_secs_f64),
                 timeout: timeout_seconds.map(Duration::from_secs),
@@ -276,7 +290,7 @@ impl DependencyDef {
                 timeout_seconds,
                 retry,
             } => Dependency::TcpConnect {
-                address: expand_env_vars(&tcp, env)?,
+                address: tcp,
                 poll_interval: poll_interval.map(Duration::from_secs_f64),
                 timeout: timeout_seconds.map(Duration::from_secs),
                 retry: retry.unwrap_or(true),
@@ -296,7 +310,7 @@ impl DependencyDef {
                     )
                 })?;
                 Dependency::FileContainsKey {
-                    path: expand_env_vars(&file_contains.path, env)?,
+                    path: file_contains.path,
                     format,
                     key,
                     env: file_contains.env,
@@ -306,7 +320,7 @@ impl DependencyDef {
                 }
             }
             DependencyDef::FileExists { path, retry } => Dependency::FileExists {
-                path: expand_env_vars(&path, env)?,
+                path,
                 retry: retry.unwrap_or(true),
             },
             DependencyDef::ProcessExitedExpanded { process_exited } => Dependency::ProcessExited {
@@ -328,18 +342,18 @@ impl DependencyDef {
                 timeout_seconds,
                 retry,
             } => Dependency::TcpNotListening {
-                address: expand_env_vars(&not_listening, env)?,
+                address: not_listening,
                 poll_interval: poll_interval.map(Duration::from_secs_f64),
                 timeout: timeout_seconds.map(Duration::from_secs),
                 retry: retry.unwrap_or(true),
             },
             DependencyDef::FileNotExists { not_exists, retry } => Dependency::FileNotExists {
-                path: expand_env_vars(&not_exists, env)?,
+                path: not_exists,
                 retry: retry.unwrap_or(true),
             },
             DependencyDef::ProcessNotRunning { not_running, retry } => {
                 Dependency::ProcessNotRunning {
-                    pattern: expand_env_vars(&not_running, env)?,
+                    pattern: not_running,
                     retry: retry.unwrap_or(true),
                 }
             }
@@ -370,16 +384,11 @@ pub struct WatchDef {
 }
 
 impl WatchDef {
-    pub fn into_watch(
-        self,
-        process_name: &str,
-        index: usize,
-        env: &HashMap<String, String>,
-    ) -> Result<Watch> {
+    pub fn into_watch(self, process_name: &str, index: usize) -> Result<Watch> {
         let name = self
             .name
             .unwrap_or_else(|| format!("{process_name}.watch-{index}"));
-        let check = self.check.into_dependency(env)?;
+        let check = self.check.into_dependency()?;
         let on_fail = match self.on_fail {
             None => OnFailAction::Shutdown,
             Some(OnFailActionDef::Simple(s)) => match s.as_str() {

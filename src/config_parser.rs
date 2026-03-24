@@ -161,7 +161,7 @@ pub fn parse(
             .depends
             .unwrap_or_default()
             .into_iter()
-            .map(|d| d.into_dependency(&env))
+            .map(|d| d.into_dependency())
             .collect::<Result<Vec<_>>>()
             .with_context(|| format!("parsing dependencies for process {name}"))?;
 
@@ -170,7 +170,7 @@ pub fn parse(
             .unwrap_or_default()
             .into_iter()
             .enumerate()
-            .map(|(i, w)| w.into_watch(&name, i, &env))
+            .map(|(i, w)| w.into_watch(&name, i))
             .collect::<Result<Vec<_>>>()
             .with_context(|| format!("parsing watches for process {name}"))?;
 
@@ -193,7 +193,7 @@ pub fn parse(
     }
 
     resolve_arg_templates(&mut configs, arg_values)?;
-    validate_for_each_globs(&configs)?;
+    resolve_env_vars(&mut configs)?;
     output::validate_config_templates(&configs)?;
     validate_dependency_graph(&configs)?;
     validate_watches(&configs)?;
@@ -243,15 +243,36 @@ fn resolve_arg_templates(
         if let Some(ref mut fe) = config.for_each {
             fe.glob = resolve_arg_in_str(&fe.glob, arg_values)?;
         }
+        for dep in &mut config.depends {
+            dep.map_string_field(|s| {
+                *s = resolve_arg_in_str(s, arg_values)?;
+                Ok(())
+            })?;
+        }
+        for watch in &mut config.watches {
+            watch.check.map_string_field(|s| {
+                *s = resolve_arg_in_str(s, arg_values)?;
+                Ok(())
+            })?;
+        }
     }
     Ok(())
 }
 
-fn validate_for_each_globs(configs: &[ProcessConfig]) -> Result<()> {
-    for config in configs {
+fn resolve_env_vars(configs: &mut [ProcessConfig]) -> Result<()> {
+    for config in configs.iter_mut() {
         if let Some(ref fe) = config.for_each {
             crate::config::expand_env_vars(&fe.glob, &config.env)
                 .with_context(|| format!("in for_each glob for process {}", config.name))?;
+        }
+        for dep in &mut config.depends {
+            dep.resolve_env_vars(&config.env)
+                .with_context(|| format!("in dependency for process {}", config.name))?;
+        }
+        for watch in &mut config.watches {
+            watch.check.resolve_env_vars(&config.env).with_context(|| {
+                format!("in watch '{}' for process {}", watch.name, config.name)
+            })?;
         }
     }
     Ok(())
