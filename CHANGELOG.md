@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.12.0] - 2026-03-23
+
+### Added
+- Runtime health watches: processes can define `watch` entries that continuously poll health checks (HTTP, TCP, file existence, etc.) after startup. Configurable `initial_delay`, `poll_interval`, and `failure_threshold`.
+- Watch failure actions: `shutdown` (default), `debug` (pause for inspection), `log` (log-only), or `spawn: <process>` (start a dormant process with `PROCMAN_WATCH_*` context env vars).
+- `autostart: false` for dormant processes that are not started until explicitly spawned by a watch action or `procman start` command.
+- Duplicate-spawn protection: spawning an already-running process is silently skipped with a log message.
+- Watches on `for_each` processes are automatically cloned per fan-out instance with check targets substituted.
+
+### Changed
+- Internal: dependency check functions extracted into shared `checks.rs` module for reuse by both dependency waiting and watch polling.
+
 ## [0.11.0] - 2026-03-22
 
 ### Breaking Changes

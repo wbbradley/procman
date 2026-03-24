@@ -145,6 +145,27 @@ nodes:
     as: NODE_CONFIG
   run: node-agent --config $NODE_CONFIG
   once: true
+
+recovery:
+  run: ./scripts/recover.sh
+  autostart: false
+
+web:
+  run: web-server --port 8080
+  watch:
+    - name: health
+      check:
+        url: http://localhost:8080/health
+        code: 200
+      initial_delay: 5.0
+      poll_interval: 10.0
+      failure_threshold: 3
+      on_fail: shutdown
+    - name: disk
+      check:
+        path: /var/run/healthy
+      on_fail:
+        spawn: recovery
 ```
 
 - Each top-level key is a process name.
@@ -163,6 +184,14 @@ nodes:
   - **Process not running**: `not_running` pattern (matched via `pgrep -f`). Waits until no matching process is found.
 
   All dependency types accept an optional `retry` (default `true`). Set `retry: false` to fail immediately if the dependency is not satisfied on the first check — useful to catch stale state (leftover lock files, ports still bound, zombie processes).
+- `autostart` (optional, default `true`): if `false`, the process is dormant — it won't start until explicitly spawned via a watch `on_fail: spawn` action or a `procman start` command.
+- `watch` (optional): list of runtime health checks that monitor the process after it starts. Each watch polls a check (same types as dependencies) and takes an action when consecutive failures exceed the threshold.
+  - `name` (optional): human-readable name; auto-generated if omitted.
+  - `check` (required): same syntax as a dependency (HTTP, TCP, file exists, etc.).
+  - `initial_delay` (optional, default 0): seconds to wait before the first check.
+  - `poll_interval` (optional, default 5): seconds between checks.
+  - `failure_threshold` (optional, default 3): consecutive failures before triggering the action.
+  - `on_fail` (optional, default `shutdown`): action to take — `shutdown`, `debug`, `log`, or `spawn: <process_name>` (starts a dormant process with `PROCMAN_WATCH_*` env vars).
 
 ## Behavior
 
