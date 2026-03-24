@@ -187,8 +187,9 @@ impl ProcessGroup {
         logger: &Arc<Mutex<Logger>>,
     ) -> Result<()> {
         let fe = config.for_each.as_ref().unwrap();
-        let mut matches: Vec<String> = glob::glob(&fe.glob)
-            .with_context(|| format!("invalid glob pattern: {}", fe.glob))?
+        let glob_pattern = crate::config::expand_env_vars(&fe.glob, &config.env)?;
+        let mut matches: Vec<String> = glob::glob(&glob_pattern)
+            .with_context(|| format!("invalid glob pattern: {glob_pattern}"))?
             .filter_map(|entry| entry.ok())
             .map(|p| p.to_string_lossy().to_string())
             .collect();
@@ -198,7 +199,7 @@ impl ProcessGroup {
             anyhow::bail!(
                 "fan-out for '{}': glob '{}' matched zero files",
                 config.name,
-                fe.glob
+                glob_pattern
             );
         }
 
@@ -816,6 +817,48 @@ mod tests {
         assert!(group.children.iter().any(|(_, n, _, _)| n == "nodes-1"));
         drop(expected_path_0);
         drop(expected_path_1);
+        for (pid, _, _, _) in &group.children {
+            let _ = waitpid(*pid, None);
+        }
+        for handle in std::mem::take(&mut group.reader_threads) {
+            let _ = handle.join();
+        }
+    }
+
+    #[test]
+    fn expand_fan_out_expands_env_in_glob() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap();
+        let (mut group, logger) = make_test_group();
+        // Create temp files manually (don't use make_temp_glob_files since we need the dir separate)
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("procman_envglob_test_{}_{id}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..2 {
+            std::fs::write(dir.join(format!("node-{i}.yaml")), format!("node{i}")).unwrap();
+        }
+
+        let mut env: HashMap<String, String> = std::env::vars().collect();
+        env.insert("TEST_DIR".to_string(), dir.to_string_lossy().to_string());
+
+        let config = ProcessConfig {
+            name: "nodes".to_string(),
+            env,
+            run: "true".to_string(),
+            condition: None,
+            depends: vec![],
+            once: true,
+            autostart: true,
+            for_each: Some(ForEachConfig {
+                glob: "$TEST_DIR/node-*.yaml".to_string(),
+                variable: "CONFIG_PATH".to_string(),
+            }),
+            watches: vec![],
+        };
+        group.expand_fan_out(&config, &logger).unwrap();
+        assert_eq!(group.children.len(), 2);
+        assert!(group.children.iter().any(|(_, n, _, _)| n == "nodes-0"));
+        assert!(group.children.iter().any(|(_, n, _, _)| n == "nodes-1"));
         for (pid, _, _, _) in &group.children {
             let _ = waitpid(*pid, None);
         }

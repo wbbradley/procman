@@ -192,7 +192,7 @@ pub enum DependencyDef {
     },
 }
 
-fn expand_env_vars(s: &str, env: &HashMap<String, String>) -> Result<String> {
+pub(crate) fn expand_env_vars(s: &str, env: &HashMap<String, String>) -> Result<String> {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -212,6 +212,12 @@ fn expand_env_vars(s: &str, env: &HashMap<String, String>) -> Result<String> {
                         }
                         name.push(c);
                         chars.next();
+                    }
+                    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                        bail!(
+                            "invalid environment variable name '${{{}}}': names may only contain letters, digits, and underscores",
+                            name
+                        );
                     }
                     if let Some(val) = env.get(&name) {
                         result.push_str(val);
@@ -515,6 +521,36 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn expand_braced_var_rejects_invalid_chars() {
+        let e = HashMap::new();
+        let err = expand_env_vars("${VAR:-fallback}", &e).unwrap_err();
+        assert!(
+            format!("{err}").contains("invalid environment variable name"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn expand_braced_var_rejects_dots() {
+        let e = HashMap::new();
+        let err = expand_env_vars("${MY.VAR}", &e).unwrap_err();
+        assert!(
+            format!("{err}").contains("invalid environment variable name"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn expand_braced_var_rejects_hyphens() {
+        let e = HashMap::new();
+        let err = expand_env_vars("${my-var}", &e).unwrap_err();
+        assert!(
+            format!("{err}").contains("invalid environment variable name"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
