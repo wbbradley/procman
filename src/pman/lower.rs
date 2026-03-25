@@ -42,9 +42,10 @@ pub fn lower(
     let mut skipped_jobs: HashSet<String> = HashSet::new();
     for job in &file.jobs {
         if let Some(cond_expr) = &job.condition
-            && !eval_condition_expr(cond_expr, arg_values)? {
-                skipped_jobs.insert(job.name.clone());
-            }
+            && !eval_condition_expr(cond_expr, arg_values)?
+        {
+            skipped_jobs.insert(job.name.clone());
+        }
     }
 
     let mut configs = Vec::new();
@@ -393,9 +394,10 @@ fn lower_job_or_event(
         for cond in &wait.conditions {
             // Strip `after @skipped_job` dependencies.
             if let ast::ConditionKind::After { job } = &cond.kind
-                && skipped_jobs.contains(job) {
-                    continue;
-                }
+                && skipped_jobs.contains(job)
+            {
+                continue;
+            }
 
             let dep = lower_wait_condition(cond, arg_values, &local_vars)?;
 
@@ -413,12 +415,13 @@ fn lower_job_or_event(
     let mut env_keys_from_vars: HashMap<String, String> = HashMap::new();
     for binding in &body.env {
         if let Expr::LocalVar(var_name, _) = &binding.value
-            && let Some(&dep_idx) = var_to_dep_index.get(var_name) {
-                if let Dependency::FileContainsKey { env, .. } = &mut depends[dep_idx] {
-                    *env = Some(binding.key.clone());
-                }
-                env_keys_from_vars.insert(binding.key.clone(), var_name.clone());
+            && let Some(&dep_idx) = var_to_dep_index.get(var_name)
+        {
+            if let Dependency::FileContainsKey { env, .. } = &mut depends[dep_idx] {
+                *env = Some(binding.key.clone());
             }
+            env_keys_from_vars.insert(binding.key.clone(), var_name.clone());
+        }
     }
 
     // Evaluate env bindings (skipping those wired to contains var).

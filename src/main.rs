@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, Mutex, mpsc},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -68,6 +68,10 @@ fn parse_env_args(args: &[String]) -> Result<HashMap<String, String>> {
     Ok(map)
 }
 
+fn is_pman_file(path: &str) -> bool {
+    path.ends_with(".pman")
+}
+
 fn run_supervisor(
     config_path: String,
     extra_env: HashMap<String, String>,
@@ -82,7 +86,13 @@ fn run_supervisor(
     }
 
     // Phase 1: parse config header for arg definitions
-    let header = config_parser::parse_header(&config_path)?;
+    let header = if is_pman_file(&config_path) {
+        let content = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("reading {config_path}"))?;
+        pman::parse_header(&content)?
+    } else {
+        config_parser::parse_header(&config_path)?
+    };
 
     // Phase 2: parse user args using definitions
     let arg_values = args::parse_user_args(&user_args, &header.arg_defs)?;
@@ -100,7 +110,13 @@ fn run_supervisor(
     merged_env.extend(extra_env);
 
     // Phase 4: full config parse with arg values for template resolution
-    let (configs, _) = config_parser::parse(&config_path, &merged_env, &arg_values)?;
+    let (configs, _) = if is_pman_file(&config_path) {
+        let content = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("reading {config_path}"))?;
+        pman::parse(&content, &merged_env, &arg_values)?
+    } else {
+        config_parser::parse(&config_path, &merged_env, &arg_values)?
+    };
 
     let (shutdown, signal_triggered) = signal::setup()?;
 
@@ -179,5 +195,12 @@ mod tests {
         let args = vec!["URL=http://host:8080/path?a=1".to_string()];
         let map = parse_env_args(&args).unwrap();
         assert_eq!(map.get("URL").unwrap(), "http://host:8080/path?a=1");
+    }
+
+    #[test]
+    fn detect_pman_extension() {
+        assert!(is_pman_file("myapp.pman"));
+        assert!(!is_pman_file("myapp.yaml"));
+        assert!(!is_pman_file("myapp.yml"));
     }
 }
