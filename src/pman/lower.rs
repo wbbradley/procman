@@ -17,11 +17,12 @@ use crate::{
 
 pub fn lower(
     input: &str,
+    path: &str,
     extra_env: &HashMap<String, String>,
     arg_values: &HashMap<String, String>,
 ) -> Result<(Vec<ProcessConfig>, Option<String>)> {
-    let file = parser::parse(input)?;
-    validate::validate(&file)?;
+    let file = parser::parse(input, path)?;
+    validate::validate(&file, path)?;
 
     let log_dir = file
         .config
@@ -34,7 +35,7 @@ pub fn lower(
 
     // Evaluate global env from config.env bindings.
     let global_env = match &file.config {
-        Some(config) => eval_env_bindings(&config.env, arg_values, &HashMap::new())?,
+        Some(config) => eval_env_bindings(&config.env, arg_values, &HashMap::new(), path)?,
         None => HashMap::new(),
     };
 
@@ -42,7 +43,7 @@ pub fn lower(
     let mut skipped_jobs: HashSet<String> = HashSet::new();
     for job in &file.jobs {
         if let Some(cond_expr) = &job.condition
-            && !eval_condition_expr(cond_expr, arg_values)?
+            && !eval_condition_expr(cond_expr, arg_values, path)?
         {
             skipped_jobs.insert(job.name.clone());
         }
@@ -62,6 +63,7 @@ pub fn lower(
             &global_env,
             arg_values,
             &skipped_jobs,
+            path,
         )?;
         configs.append(&mut job_configs);
     }
@@ -75,6 +77,7 @@ pub fn lower(
             &global_env,
             arg_values,
             &skipped_jobs,
+            path,
         )?;
         configs.append(&mut event_configs);
     }
@@ -84,7 +87,12 @@ pub fn lower(
 
 pub fn lower_arg_def(arg: ast::ArgDef) -> Result<config_parser::ArgDef> {
     let default = match &arg.default {
-        Some(expr) => Some(eval_expr_to_string(expr, &HashMap::new(), &HashMap::new())?),
+        Some(expr) => Some(eval_expr_to_string(
+            expr,
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+        )?),
         None => None,
     };
     let arg_type = match arg.arg_type {
@@ -105,6 +113,7 @@ fn eval_expr_to_string(
     expr: &Expr,
     arg_values: &HashMap<String, String>,
     local_vars: &HashMap<String, String>,
+    path: &str,
 ) -> Result<String> {
     match expr {
         Expr::StringLit(s, _) => Ok(s.clone()),
@@ -116,47 +125,67 @@ fn eval_expr_to_string(
             }
         }
         Expr::BoolLit(b, _) => Ok(if *b { "true" } else { "false" }.to_string()),
-        Expr::DurationLit(_, _) => bail!("duration not valid in env context"),
-        Expr::NoneLit(_) => bail!("none not valid in env context"),
-        Expr::ArgsRef(name, _) => match arg_values.get(name) {
+        Expr::DurationLit(_, span) => {
+            bail!(
+                "{}",
+                span.fmt_error(path, "duration not valid in env context")
+            )
+        }
+        Expr::NoneLit(span) => bail!("{}", span.fmt_error(path, "none not valid in env context")),
+        Expr::ArgsRef(name, span) => match arg_values.get(name) {
             Some(v) => Ok(v.clone()),
-            None => bail!("undefined arg: args.{name}"),
+            None => bail!(
+                "{}",
+                span.fmt_error(path, &format!("undefined arg: args.{name}"))
+            ),
         },
         Expr::JobOutputRef(job, key, _) => Ok(format!("${{{{ {job}.{key} }}}}")),
-        Expr::LocalVar(name, _) => match local_vars.get(name) {
+        Expr::LocalVar(name, span) => match local_vars.get(name) {
             Some(v) => Ok(v.clone()),
-            None => bail!("undefined local variable: {name}"),
+            None => bail!(
+                "{}",
+                span.fmt_error(path, &format!("undefined local variable: {name}"))
+            ),
         },
-        Expr::BinOp(_, _, _, _) => bail!("binary expression not valid in env context"),
-        Expr::UnaryNot(_, _) => bail!("unary not not valid in env context"),
+        Expr::BinOp(_, _, _, span) => bail!(
+            "{}",
+            span.fmt_error(path, "binary expression not valid in env context")
+        ),
+        Expr::UnaryNot(_, span) => bail!(
+            "{}",
+            span.fmt_error(path, "unary not not valid in env context")
+        ),
     }
 }
 
-fn eval_condition_expr(expr: &Expr, arg_values: &HashMap<String, String>) -> Result<bool> {
+fn eval_condition_expr(
+    expr: &Expr,
+    arg_values: &HashMap<String, String>,
+    path: &str,
+) -> Result<bool> {
     match expr {
         Expr::BoolLit(b, _) => Ok(*b),
         Expr::StringLit(s, _) => Ok(!s.is_empty()),
-        Expr::ArgsRef(name, _) => {
-            let v = arg_values
-                .get(name)
-                .ok_or_else(|| anyhow::anyhow!("undefined arg: args.{name}"))?;
+        Expr::ArgsRef(name, span) => {
+            let v = arg_values.get(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{}",
+                    span.fmt_error(path, &format!("undefined arg: args.{name}"))
+                )
+            })?;
             Ok(v != "false" && v != "0" && !v.is_empty())
         }
-        Expr::UnaryNot(inner, _) => Ok(!eval_condition_expr(inner, arg_values)?),
+        Expr::UnaryNot(inner, _) => Ok(!eval_condition_expr(inner, arg_values, path)?),
         Expr::BinOp(lhs, op, rhs, _) => {
             match op {
-                BinOp::And => {
-                    Ok(eval_condition_expr(lhs, arg_values)?
-                        && eval_condition_expr(rhs, arg_values)?)
-                }
-                BinOp::Or => {
-                    Ok(eval_condition_expr(lhs, arg_values)?
-                        || eval_condition_expr(rhs, arg_values)?)
-                }
+                BinOp::And => Ok(eval_condition_expr(lhs, arg_values, path)?
+                    && eval_condition_expr(rhs, arg_values, path)?),
+                BinOp::Or => Ok(eval_condition_expr(lhs, arg_values, path)?
+                    || eval_condition_expr(rhs, arg_values, path)?),
                 _ => {
                     // Comparison operators: evaluate both sides as strings and compare.
-                    let l = eval_expr_to_string(lhs, arg_values, &HashMap::new())?;
-                    let r = eval_expr_to_string(rhs, arg_values, &HashMap::new())?;
+                    let l = eval_expr_to_string(lhs, arg_values, &HashMap::new(), path)?;
+                    let r = eval_expr_to_string(rhs, arg_values, &HashMap::new(), path)?;
                     Ok(match op {
                         BinOp::Eq => l == r,
                         BinOp::Ne => l != r,
@@ -169,12 +198,24 @@ fn eval_condition_expr(expr: &Expr, arg_values: &HashMap<String, String>) -> Res
                 }
             }
         }
-        Expr::NumberLit(_, _) | Expr::LocalVar(_, _) => {
-            bail!("expression type not valid in condition context")
+        Expr::NumberLit(_, span) | Expr::LocalVar(_, span) => {
+            bail!(
+                "{}",
+                span.fmt_error(path, "expression type not valid in condition context")
+            )
         }
-        Expr::DurationLit(_, _) => bail!("duration not valid in condition context"),
-        Expr::NoneLit(_) => bail!("none not valid in condition context"),
-        Expr::JobOutputRef(_, _, _) => bail!("job output ref not valid in condition context"),
+        Expr::DurationLit(_, span) => bail!(
+            "{}",
+            span.fmt_error(path, "duration not valid in condition context")
+        ),
+        Expr::NoneLit(span) => bail!(
+            "{}",
+            span.fmt_error(path, "none not valid in condition context")
+        ),
+        Expr::JobOutputRef(_, _, span) => bail!(
+            "{}",
+            span.fmt_error(path, "job output ref not valid in condition context")
+        ),
     }
 }
 
@@ -182,61 +223,93 @@ fn eval_env_bindings(
     bindings: &[ast::EnvBinding],
     arg_values: &HashMap<String, String>,
     local_vars: &HashMap<String, String>,
+    path: &str,
 ) -> Result<HashMap<String, String>> {
     let mut env = HashMap::new();
     for binding in bindings {
-        let value = eval_expr_to_string(&binding.value, arg_values, local_vars)?;
+        let value = eval_expr_to_string(&binding.value, arg_values, local_vars, path)?;
         env.insert(binding.key.clone(), value);
     }
     Ok(env)
 }
 
-fn eval_option_timeout(opt: &Option<Expr>) -> Result<Option<Duration>> {
+fn eval_option_timeout(opt: &Option<Expr>, path: &str) -> Result<Option<Duration>> {
     match opt {
         None => Ok(Some(Duration::from_secs(60))),
         Some(Expr::NoneLit(_)) => Ok(None),
         Some(Expr::DurationLit(d, _)) => Ok(Some(Duration::from_secs_f64(*d))),
-        Some(other) => bail!("expected duration or none for timeout, got {other:?}"),
+        Some(other) => bail!(
+            "{}",
+            other.span().fmt_error(
+                path,
+                &format!("expected duration or none for timeout, got {other:?}")
+            )
+        ),
     }
 }
 
-fn eval_option_poll(opt: &Option<Expr>) -> Result<Option<Duration>> {
+fn eval_option_poll(opt: &Option<Expr>, path: &str) -> Result<Option<Duration>> {
     match opt {
         None => Ok(None),
         Some(Expr::DurationLit(d, _)) => Ok(Some(Duration::from_secs_f64(*d))),
-        Some(other) => bail!("expected duration for poll, got {other:?}"),
+        Some(other) => bail!(
+            "{}",
+            other
+                .span()
+                .fmt_error(path, &format!("expected duration for poll, got {other:?}"))
+        ),
     }
 }
 
-fn eval_option_retry(opt: &Option<Expr>) -> Result<bool> {
+fn eval_option_retry(opt: &Option<Expr>, path: &str) -> Result<bool> {
     match opt {
         None => Ok(true),
         Some(Expr::BoolLit(b, _)) => Ok(*b),
-        Some(other) => bail!("expected bool for retry, got {other:?}"),
+        Some(other) => bail!(
+            "{}",
+            other
+                .span()
+                .fmt_error(path, &format!("expected bool for retry, got {other:?}"))
+        ),
     }
 }
 
-fn eval_option_status(opt: &Option<Expr>) -> Result<u16> {
+fn eval_option_status(opt: &Option<Expr>, path: &str) -> Result<u16> {
     match opt {
         None => Ok(200),
         Some(Expr::NumberLit(n, _)) => Ok(*n as u16),
-        Some(other) => bail!("expected number for status, got {other:?}"),
+        Some(other) => bail!(
+            "{}",
+            other
+                .span()
+                .fmt_error(path, &format!("expected number for status, got {other:?}"))
+        ),
     }
 }
 
-fn eval_option_duration(opt: &Option<Expr>, default: Duration) -> Result<Duration> {
+fn eval_option_duration(opt: &Option<Expr>, default: Duration, path: &str) -> Result<Duration> {
     match opt {
         None => Ok(default),
         Some(Expr::DurationLit(d, _)) => Ok(Duration::from_secs_f64(*d)),
-        Some(other) => bail!("expected duration, got {other:?}"),
+        Some(other) => bail!(
+            "{}",
+            other
+                .span()
+                .fmt_error(path, &format!("expected duration, got {other:?}"))
+        ),
     }
 }
 
-fn eval_option_u32(opt: &Option<Expr>, default: u32) -> Result<u32> {
+fn eval_option_u32(opt: &Option<Expr>, default: u32, path: &str) -> Result<u32> {
     match opt {
         None => Ok(default),
         Some(Expr::NumberLit(n, _)) => Ok(*n as u32),
-        Some(other) => bail!("expected number, got {other:?}"),
+        Some(other) => bail!(
+            "{}",
+            other
+                .span()
+                .fmt_error(path, &format!("expected number, got {other:?}"))
+        ),
     }
 }
 
@@ -244,11 +317,12 @@ fn lower_wait_condition(
     cond: &ast::WaitCondition,
     arg_values: &HashMap<String, String>,
     local_vars: &HashMap<String, String>,
+    path: &str,
 ) -> Result<Dependency> {
     let opts = &cond.options;
-    let timeout = eval_option_timeout(&opts.timeout)?;
-    let poll = eval_option_poll(&opts.poll)?;
-    let retry = eval_option_retry(&opts.retry)?;
+    let timeout = eval_option_timeout(&opts.timeout, path)?;
+    let poll = eval_option_poll(&opts.poll, path)?;
+    let retry = eval_option_retry(&opts.retry, path)?;
 
     match (&cond.kind, cond.negated) {
         (ast::ConditionKind::After { job }, false) => Ok(Dependency::ProcessExited {
@@ -257,7 +331,7 @@ fn lower_wait_condition(
             retry,
         }),
         (ast::ConditionKind::Http { url }, false) => {
-            let code = eval_option_status(&opts.status)?;
+            let code = eval_option_status(&opts.status, path)?;
             Ok(Dependency::HttpHealthCheck {
                 url: eval_string_lit_or_expr(url, arg_values, local_vars)?,
                 code,
@@ -278,12 +352,12 @@ fn lower_wait_condition(
             timeout,
             retry,
         }),
-        (ast::ConditionKind::Exists { path }, false) => Ok(Dependency::FileExists {
-            path: eval_string_lit_or_expr(path, arg_values, local_vars)?,
+        (ast::ConditionKind::Exists { path: p }, false) => Ok(Dependency::FileExists {
+            path: eval_string_lit_or_expr(p, arg_values, local_vars)?,
             retry,
         }),
-        (ast::ConditionKind::Exists { path }, true) => Ok(Dependency::FileNotExists {
-            path: eval_string_lit_or_expr(path, arg_values, local_vars)?,
+        (ast::ConditionKind::Exists { path: p }, true) => Ok(Dependency::FileNotExists {
+            path: eval_string_lit_or_expr(p, arg_values, local_vars)?,
             retry,
         }),
         (ast::ConditionKind::Running { pattern }, true) => Ok(Dependency::ProcessNotRunning {
@@ -292,7 +366,7 @@ fn lower_wait_condition(
         }),
         (
             ast::ConditionKind::Contains {
-                path,
+                path: p,
                 format,
                 key,
                 var: _,
@@ -302,12 +376,16 @@ fn lower_wait_condition(
             let file_format = match format.as_str() {
                 "json" => FileFormat::Json,
                 "yaml" => FileFormat::Yaml,
-                other => bail!("unsupported format: {other:?}"),
+                other => bail!(
+                    "{}",
+                    key.span
+                        .fmt_error(path, &format!("unsupported format: {other:?}"))
+                ),
             };
             let json_path = serde_json_path::JsonPath::parse(&key.value)
                 .map_err(|e| anyhow::anyhow!("invalid JSONPath {:?}: {e}", key.value))?;
             Ok(Dependency::FileContainsKey {
-                path: eval_string_lit_or_expr(path, arg_values, local_vars)?,
+                path: eval_string_lit_or_expr(p, arg_values, local_vars)?,
                 format: file_format,
                 key: json_path,
                 env: None, // Will be wired up in lower_job_or_event.
@@ -317,16 +395,33 @@ fn lower_wait_condition(
             })
         }
         (ast::ConditionKind::After { .. }, true) => {
-            bail!("negated 'after' is not supported")
+            bail!(
+                "{}",
+                cond.span
+                    .fmt_error(path, "negated 'after' is not supported")
+            )
         }
         (ast::ConditionKind::Http { .. }, true) => {
-            bail!("negated 'http' is not supported")
+            bail!(
+                "{}",
+                cond.span.fmt_error(path, "negated 'http' is not supported")
+            )
         }
         (ast::ConditionKind::Running { .. }, false) => {
-            bail!("non-negated 'running' is not supported (use !running)")
+            bail!(
+                "{}",
+                cond.span.fmt_error(
+                    path,
+                    "non-negated 'running' is not supported (use !running)"
+                )
+            )
         }
         (ast::ConditionKind::Contains { .. }, true) => {
-            bail!("negated 'contains' is not supported")
+            bail!(
+                "{}",
+                cond.span
+                    .fmt_error(path, "negated 'contains' is not supported")
+            )
         }
     }
 }
@@ -343,11 +438,12 @@ fn lower_watch(
     watch: &ast::WatchDef,
     arg_values: &HashMap<String, String>,
     local_vars: &HashMap<String, String>,
+    path: &str,
 ) -> Result<Watch> {
-    let check = lower_wait_condition(&watch.condition, arg_values, local_vars)?;
-    let initial_delay = eval_option_duration(&watch.initial_delay, Duration::ZERO)?;
-    let poll_interval = eval_option_duration(&watch.poll, Duration::from_secs(5))?;
-    let failure_threshold = eval_option_u32(&watch.threshold, 3)?;
+    let check = lower_wait_condition(&watch.condition, arg_values, local_vars, path)?;
+    let initial_delay = eval_option_duration(&watch.initial_delay, Duration::ZERO, path)?;
+    let poll_interval = eval_option_duration(&watch.poll, Duration::from_secs(5), path)?;
+    let failure_threshold = eval_option_u32(&watch.threshold, 3, path)?;
     let on_fail = match &watch.on_fail {
         None => config::OnFailAction::Shutdown,
         Some(ast::OnFailAction::Shutdown) => config::OnFailAction::Shutdown,
@@ -372,6 +468,7 @@ fn extract_shell(shell: &ShellBlock) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_job_or_event(
     name: &str,
     body: &ast::JobBody,
@@ -380,6 +477,7 @@ fn lower_job_or_event(
     global_env: &HashMap<String, String>,
     arg_values: &HashMap<String, String>,
     skipped_jobs: &HashSet<String>,
+    path: &str,
 ) -> Result<Vec<ProcessConfig>> {
     let once = body.once.unwrap_or(false);
 
@@ -399,7 +497,7 @@ fn lower_job_or_event(
                 continue;
             }
 
-            let dep = lower_wait_condition(cond, arg_values, &local_vars)?;
+            let dep = lower_wait_condition(cond, arg_values, &local_vars, path)?;
 
             // Track var bindings from contains.
             if let ast::ConditionKind::Contains { var: Some(v), .. } = &cond.kind {
@@ -430,7 +528,7 @@ fn lower_job_or_event(
         if env_keys_from_vars.contains_key(&binding.key) {
             continue;
         }
-        let value = eval_expr_to_string(&binding.value, arg_values, &local_vars)?;
+        let value = eval_expr_to_string(&binding.value, arg_values, &local_vars, path)?;
         job_env.insert(binding.key.clone(), value);
     }
 
@@ -443,7 +541,7 @@ fn lower_job_or_event(
     let watches: Vec<Watch> = body
         .watches
         .iter()
-        .map(|w| lower_watch(w, arg_values, &local_vars))
+        .map(|w| lower_watch(w, arg_values, &local_vars, path))
         .collect::<Result<_>>()?;
 
     match &body.run_section {
@@ -476,12 +574,12 @@ fn lower_job_or_event(
             ast::Iterable::Array(items) => {
                 let mut configs = Vec::new();
                 for (i, item_expr) in items.iter().enumerate() {
-                    let item_value = eval_expr_to_string(item_expr, arg_values, &local_vars)?;
+                    let item_value = eval_expr_to_string(item_expr, arg_values, &local_vars, path)?;
                     let mut iter_local_vars = HashMap::new();
                     iter_local_vars.insert(fl.var.clone(), item_value);
 
                     // Evaluate for-loop env with the loop var in scope.
-                    let for_env = eval_env_bindings(&fl.env, arg_values, &iter_local_vars)?;
+                    let for_env = eval_env_bindings(&fl.env, arg_values, &iter_local_vars, path)?;
                     let mut iter_env = merged_env.clone();
                     iter_env.extend(for_env);
 
@@ -500,14 +598,14 @@ fn lower_job_or_event(
                 Ok(configs)
             }
             ast::Iterable::RangeExclusive(start_expr, end_expr) => {
-                let start = eval_expr_to_number(start_expr)? as i64;
-                let end = eval_expr_to_number(end_expr)? as i64;
+                let start = eval_expr_to_number(start_expr, path)? as i64;
+                let end = eval_expr_to_number(end_expr, path)? as i64;
                 let mut configs = Vec::new();
                 for (i, val) in (start..end).enumerate() {
                     let mut iter_local_vars = HashMap::new();
                     iter_local_vars.insert(fl.var.clone(), val.to_string());
 
-                    let for_env = eval_env_bindings(&fl.env, arg_values, &iter_local_vars)?;
+                    let for_env = eval_env_bindings(&fl.env, arg_values, &iter_local_vars, path)?;
                     let mut iter_env = merged_env.clone();
                     iter_env.extend(for_env);
 
@@ -526,14 +624,14 @@ fn lower_job_or_event(
                 Ok(configs)
             }
             ast::Iterable::RangeInclusive(start_expr, end_expr) => {
-                let start = eval_expr_to_number(start_expr)? as i64;
-                let end = eval_expr_to_number(end_expr)? as i64;
+                let start = eval_expr_to_number(start_expr, path)? as i64;
+                let end = eval_expr_to_number(end_expr, path)? as i64;
                 let mut configs = Vec::new();
                 for (i, val) in (start..=end).enumerate() {
                     let mut iter_local_vars = HashMap::new();
                     iter_local_vars.insert(fl.var.clone(), val.to_string());
 
-                    let for_env = eval_env_bindings(&fl.env, arg_values, &iter_local_vars)?;
+                    let for_env = eval_env_bindings(&fl.env, arg_values, &iter_local_vars, path)?;
                     let mut iter_env = merged_env.clone();
                     iter_env.extend(for_env);
 
@@ -555,10 +653,15 @@ fn lower_job_or_event(
     }
 }
 
-fn eval_expr_to_number(expr: &Expr) -> Result<f64> {
+fn eval_expr_to_number(expr: &Expr, path: &str) -> Result<f64> {
     match expr {
         Expr::NumberLit(n, _) => Ok(*n),
-        other => bail!("expected number, got {other:?}"),
+        other => bail!(
+            "{}",
+            other
+                .span()
+                .fmt_error(path, &format!("expected number, got {other:?}"))
+        ),
     }
 }
 
@@ -569,7 +672,7 @@ mod tests {
     use super::*;
 
     fn lower_str(input: &str) -> (Vec<ProcessConfig>, Option<String>) {
-        lower(input, &HashMap::new(), &HashMap::new()).unwrap()
+        lower(input, "test.pman", &HashMap::new(), &HashMap::new()).unwrap()
     }
 
     fn lower_with_args(input: &str, args: &[(&str, &str)]) -> (Vec<ProcessConfig>, Option<String>) {
@@ -577,7 +680,7 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        lower(input, &HashMap::new(), &arg_values).unwrap()
+        lower(input, "test.pman", &HashMap::new(), &arg_values).unwrap()
     }
 
     #[test]
@@ -1000,7 +1103,7 @@ event recovery {
             ("log_level".to_string(), "info".to_string()),
             ("enable_worker".to_string(), "false".to_string()),
         ]);
-        let (configs, log_dir) = lower(input, &HashMap::new(), &args).unwrap();
+        let (configs, log_dir) = lower(input, "test.pman", &HashMap::new(), &args).unwrap();
 
         assert_eq!(log_dir.as_deref(), Some("./my-logs"));
 

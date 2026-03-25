@@ -89,7 +89,7 @@ fn run_supervisor(
     let header = if is_pman_file(&config_path) {
         let content = std::fs::read_to_string(&config_path)
             .with_context(|| format!("reading {config_path}"))?;
-        pman::parse_header(&content)?
+        pman::parse_header(&content, &config_path)?
     } else {
         config_parser::parse_header(&config_path)?
     };
@@ -113,7 +113,7 @@ fn run_supervisor(
     let (configs, _) = if is_pman_file(&config_path) {
         let content = std::fs::read_to_string(&config_path)
             .with_context(|| format!("reading {config_path}"))?;
-        pman::parse(&content, &merged_env, &arg_values)?
+        pman::parse(&content, &config_path, &merged_env, &arg_values)?
     } else {
         config_parser::parse(&config_path, &merged_env, &arg_values)?
     };

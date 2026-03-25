@@ -37,7 +37,6 @@ pub struct JobDef {
     pub name: String,
     pub condition: Option<Expr>,
     pub body: JobBody,
-    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -45,7 +44,6 @@ pub struct JobDef {
 pub struct EventDef {
     pub name: String,
     pub body: JobBody,
-    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -71,7 +69,6 @@ pub struct ForLoop {
     pub iterable: Iterable,
     pub env: Vec<EnvBinding>,
     pub run: ShellBlock,
-    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -94,13 +91,12 @@ pub struct EnvBinding {
 #[derive(Debug)]
 pub enum ShellBlock {
     Inline(StringLit),
-    Fenced(String, #[allow(dead_code)] Span),
+    Fenced(String, Span),
 }
 
 #[derive(Debug)]
 pub struct StringLit {
     pub value: String,
-    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -117,7 +113,6 @@ pub struct WaitCondition {
     pub negated: bool,
     pub kind: ConditionKind,
     pub options: ConditionOptions,
-    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -162,7 +157,6 @@ pub struct WatchDef {
     pub poll: Option<Expr>,
     pub threshold: Option<Expr>,
     pub on_fail: Option<OnFailAction>,
-    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -187,6 +181,23 @@ pub enum Expr {
     LocalVar(String, Span),             // bare identifier in expression context
     BinOp(Box<Expr>, BinOp, Box<Expr>, Span),
     UnaryNot(Box<Expr>, Span),
+}
+
+impl Expr {
+    pub fn span(&self) -> Span {
+        match self {
+            Expr::StringLit(_, s)
+            | Expr::NumberLit(_, s)
+            | Expr::BoolLit(_, s)
+            | Expr::DurationLit(_, s)
+            | Expr::NoneLit(s)
+            | Expr::ArgsRef(_, s)
+            | Expr::JobOutputRef(_, _, s)
+            | Expr::LocalVar(_, s)
+            | Expr::BinOp(_, _, _, s)
+            | Expr::UnaryNot(_, s) => *s,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

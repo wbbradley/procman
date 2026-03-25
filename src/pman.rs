@@ -14,14 +14,15 @@ use crate::config_parser;
 
 pub fn parse(
     input: &str,
+    path: &str,
     extra_env: &HashMap<String, String>,
     arg_values: &HashMap<String, String>,
 ) -> Result<(Vec<crate::config::ProcessConfig>, Option<String>)> {
-    lower::lower(input, extra_env, arg_values)
+    lower::lower(input, path, extra_env, arg_values)
 }
 
-pub fn parse_header(input: &str) -> Result<config_parser::ConfigHeader> {
-    let file = parser::parse(input)?;
+pub fn parse_header(input: &str, path: &str) -> Result<config_parser::ConfigHeader> {
+    let file = parser::parse(input, path)?;
     let log_dir = file
         .config
         .as_ref()

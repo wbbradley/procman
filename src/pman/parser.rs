@@ -7,14 +7,23 @@ use crate::pman::{
     token::{Span, Token, TokenKind},
 };
 
-struct Parser {
+struct Parser<'a> {
     tokens: Vec<Token>,
     pos: usize,
+    path: &'a str,
 }
 
-impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+impl<'a> Parser<'a> {
+    fn new(tokens: Vec<Token>, path: &'a str) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            path,
+        }
+    }
+
+    fn fmt_error(&self, span: Span, msg: &str) -> String {
+        span.fmt_error(self.path, msg)
     }
 
     fn at_end(&self) -> bool {
@@ -49,18 +58,21 @@ impl Parser {
     fn expect(&mut self, expected: &TokenKind) -> Result<&Token> {
         if self.at_end() {
             bail!(
-                "{}: expected {:?}, got end of input",
-                fmt_span(self.span()),
-                expected
+                "{}",
+                self.fmt_error(
+                    self.span(),
+                    &format!("expected {:?}, got end of input", expected)
+                )
             );
         }
         let tok = &self.tokens[self.pos];
         if &tok.kind != expected {
             bail!(
-                "{}: expected {:?}, got {:?}",
-                fmt_span(tok.span),
-                expected,
-                tok.kind
+                "{}",
+                self.fmt_error(
+                    tok.span,
+                    &format!("expected {:?}, got {:?}", expected, tok.kind)
+                )
             );
         }
         self.pos += 1;
@@ -86,8 +98,8 @@ impl Parser {
     fn expect_string_lit(&mut self) -> Result<ast::StringLit> {
         if self.at_end() {
             bail!(
-                "{}: expected string literal, got end of input",
-                fmt_span(self.span())
+                "{}",
+                self.fmt_error(self.span(), "expected string literal, got end of input")
             );
         }
         let tok = &self.tokens[self.pos];
@@ -101,9 +113,11 @@ impl Parser {
                 Ok(lit)
             }
             other => bail!(
-                "{}: expected string literal, got {:?}",
-                fmt_span(tok.span),
-                other
+                "{}",
+                self.fmt_error(
+                    tok.span,
+                    &format!("expected string literal, got {:?}", other)
+                )
             ),
         }
     }
@@ -111,8 +125,8 @@ impl Parser {
     fn expect_ident(&mut self) -> Result<(String, Span)> {
         if self.at_end() {
             bail!(
-                "{}: expected identifier, got end of input",
-                fmt_span(self.span())
+                "{}",
+                self.fmt_error(self.span(), "expected identifier, got end of input")
             );
         }
         let tok = &self.tokens[self.pos];
@@ -123,9 +137,8 @@ impl Parser {
                 Ok(result)
             }
             other => bail!(
-                "{}: expected identifier, got {:?}",
-                fmt_span(tok.span),
-                other
+                "{}",
+                self.fmt_error(tok.span, &format!("expected identifier, got {:?}", other))
             ),
         }
     }
@@ -141,7 +154,7 @@ impl Parser {
             match self.peek() {
                 Some(TokenKind::Config) => {
                     if file.config.is_some() {
-                        bail!("{}: duplicate config block", fmt_span(self.span()));
+                        bail!("{}", self.fmt_error(self.span(), "duplicate config block"));
                     }
                     file.config = Some(self.parse_config_block()?);
                 }
@@ -153,9 +166,11 @@ impl Parser {
                 }
                 Some(other) => {
                     bail!(
-                        "{}: expected 'config', 'job', or 'event', got {:?}",
-                        fmt_span(self.span()),
-                        other
+                        "{}",
+                        self.fmt_error(
+                            self.span(),
+                            &format!("expected 'config', 'job', or 'event', got {:?}", other)
+                        )
                     );
                 }
                 None => break,
@@ -178,7 +193,10 @@ impl Parser {
 
         while !self.eat(&TokenKind::RBrace) {
             if self.at_end() {
-                bail!("{}: unterminated config block", fmt_span(start_span));
+                bail!(
+                    "{}",
+                    self.fmt_error(start_span, "unterminated config block")
+                );
             }
             match self.peek() {
                 Some(TokenKind::Ident(name)) if name == "logs" => {
@@ -194,9 +212,11 @@ impl Parser {
                 }
                 Some(other) => {
                     bail!(
-                        "{}: unexpected token in config block: {:?}",
-                        fmt_span(self.span()),
-                        other
+                        "{}",
+                        self.fmt_error(
+                            self.span(),
+                            &format!("unexpected token in config block: {:?}", other)
+                        )
                     );
                 }
                 None => unreachable!(),
@@ -223,7 +243,7 @@ impl Parser {
 
         while !self.eat(&TokenKind::RBrace) {
             if self.at_end() {
-                bail!("{}: unterminated arg block", fmt_span(start_span));
+                bail!("{}", self.fmt_error(start_span, "unterminated arg block"));
             }
             let (field_name, field_span) = self.expect_ident()?;
             self.expect(&TokenKind::Assign)?;
@@ -234,9 +254,14 @@ impl Parser {
                         "string" => ast::ArgType::String,
                         "bool" => ast::ArgType::Bool,
                         _ => bail!(
-                            "{}: unknown arg type '{}', expected 'string' or 'bool'",
-                            fmt_span(type_span),
-                            type_name
+                            "{}",
+                            self.fmt_error(
+                                type_span,
+                                &format!(
+                                    "unknown arg type '{}', expected 'string' or 'bool'",
+                                    type_name
+                                )
+                            )
                         ),
                     });
                 }
@@ -250,9 +275,8 @@ impl Parser {
                     arg.description = Some(self.expect_string_lit()?);
                 }
                 _ => bail!(
-                    "{}: unknown arg field '{}'",
-                    fmt_span(field_span),
-                    field_name
+                    "{}",
+                    self.fmt_error(field_span, &format!("unknown arg field '{}'", field_name))
                 ),
             }
         }
@@ -268,7 +292,7 @@ impl Parser {
             // env { KEY = expr ... }
             while !self.eat(&TokenKind::RBrace) {
                 if self.at_end() {
-                    bail!("{}: unterminated env block", fmt_span(self.span()));
+                    bail!("{}", self.fmt_error(self.span(), "unterminated env block"));
                 }
                 env.push(self.parse_env_binding()?);
             }
@@ -284,7 +308,7 @@ impl Parser {
         let (key, key_span) = self.expect_ident()?;
         self.expect(&TokenKind::Assign)?;
         let value = self.parse_expr()?;
-        let value_span = expr_span(&value);
+        let value_span = value.span();
         Ok(ast::EnvBinding {
             key,
             value,
@@ -333,7 +357,7 @@ impl Parser {
 
         while self.peek() != Some(&TokenKind::RBrace) {
             if self.at_end() {
-                bail!("{}: unterminated job body", fmt_span(self.span()));
+                bail!("{}", self.fmt_error(self.span(), "unterminated job body"));
             }
             match self.peek() {
                 Some(TokenKind::Once) => {
@@ -348,10 +372,15 @@ impl Parser {
                             self.advance();
                             once = Some(false);
                         }
-                        _ => bail!(
-                            "{}: expected 'true' or 'false' after 'once ='",
-                            fmt_span(self.span())
-                        ),
+                        _ => {
+                            bail!(
+                                "{}",
+                                self.fmt_error(
+                                    self.span(),
+                                    "expected 'true' or 'false' after 'once ='"
+                                )
+                            )
+                        }
                     }
                 }
                 Some(TokenKind::Env) => {
@@ -374,9 +403,11 @@ impl Parser {
                 }
                 Some(other) => {
                     bail!(
-                        "{}: unexpected token in job body: {:?}",
-                        fmt_span(self.span()),
-                        other
+                        "{}",
+                        self.fmt_error(
+                            self.span(),
+                            &format!("unexpected token in job body: {:?}", other)
+                        )
                     );
                 }
                 None => unreachable!(),
@@ -385,8 +416,8 @@ impl Parser {
 
         let run_section = run_section.ok_or_else(|| {
             anyhow::anyhow!(
-                "{}: missing 'run' or 'for' in job body",
-                fmt_span(self.span())
+                "{}",
+                self.fmt_error(self.span(), "missing 'run' or 'for' in job body")
             )
         })?;
 
@@ -419,10 +450,12 @@ impl Parser {
                 };
                 Ok(ast::ShellBlock::Fenced(s, span))
             }
-            _ => bail!(
-                "{}: expected string or fenced string after 'run'",
-                fmt_span(self.span())
-            ),
+            _ => {
+                bail!(
+                    "{}",
+                    self.fmt_error(self.span(), "expected string or fenced string after 'run'")
+                )
+            }
         }
     }
 
@@ -432,7 +465,7 @@ impl Parser {
         let mut conditions = Vec::new();
         while !self.eat(&TokenKind::RBrace) {
             if self.at_end() {
-                bail!("{}: unterminated wait block", fmt_span(start_span));
+                bail!("{}", self.fmt_error(start_span, "unterminated wait block"));
             }
             conditions.push(self.parse_wait_condition()?);
         }
@@ -521,7 +554,10 @@ impl Parser {
 
                 while !self.eat(&TokenKind::RBrace) {
                     if self.at_end() {
-                        bail!("{}: unterminated contains block", fmt_span(start_span));
+                        bail!(
+                            "{}",
+                            self.fmt_error(start_span, "unterminated contains block")
+                        );
                     }
                     let (field_name, field_span) = self.expect_ident()?;
                     self.expect(&TokenKind::Assign)?;
@@ -542,21 +578,26 @@ impl Parser {
                         "retry" => options.retry = Some(self.parse_expr()?),
                         "status" => options.status = Some(self.parse_expr()?),
                         _ => bail!(
-                            "{}: unknown field '{}' in contains block",
-                            fmt_span(field_span),
-                            field_name
+                            "{}",
+                            self.fmt_error(
+                                field_span,
+                                &format!("unknown field '{}' in contains block", field_name)
+                            )
                         ),
                     }
                 }
 
                 let format = format.ok_or_else(|| {
                     anyhow::anyhow!(
-                        "{}: missing 'format' in contains block",
-                        fmt_span(start_span)
+                        "{}",
+                        self.fmt_error(start_span, "missing 'format' in contains block")
                     )
                 })?;
                 let key = key.ok_or_else(|| {
-                    anyhow::anyhow!("{}: missing 'key' in contains block", fmt_span(start_span))
+                    anyhow::anyhow!(
+                        "{}",
+                        self.fmt_error(start_span, "missing 'key' in contains block")
+                    )
                 })?;
 
                 let end_span = self.tokens[self.pos - 1].span;
@@ -572,15 +613,21 @@ impl Parser {
                     span: merge_spans(start_span, end_span),
                 })
             }
-            Some(other) => bail!(
-                "{}: expected wait condition keyword, got {:?}",
-                fmt_span(self.span()),
-                other
-            ),
-            None => bail!(
-                "{}: expected wait condition, got end of input",
-                fmt_span(self.span())
-            ),
+            Some(other) => {
+                bail!(
+                    "{}",
+                    self.fmt_error(
+                        self.span(),
+                        &format!("expected wait condition keyword, got {:?}", other)
+                    )
+                )
+            }
+            None => {
+                bail!(
+                    "{}",
+                    self.fmt_error(self.span(), "expected wait condition, got end of input")
+                )
+            }
         }
     }
 
@@ -594,8 +641,8 @@ impl Parser {
         while !self.eat(&TokenKind::RBrace) {
             if self.at_end() {
                 bail!(
-                    "{}: unterminated condition options block",
-                    fmt_span(start_span)
+                    "{}",
+                    self.fmt_error(start_span, "unterminated condition options block")
                 );
             }
             let (field_name, field_span) = self.expect_ident()?;
@@ -606,9 +653,11 @@ impl Parser {
                 "poll" => options.poll = Some(self.parse_expr()?),
                 "retry" => options.retry = Some(self.parse_expr()?),
                 _ => bail!(
-                    "{}: unknown condition option '{}'",
-                    fmt_span(field_span),
-                    field_name
+                    "{}",
+                    self.fmt_error(
+                        field_span,
+                        &format!("unknown condition option '{}'", field_name)
+                    )
                 ),
             }
         }
@@ -629,7 +678,7 @@ impl Parser {
 
         while !self.eat(&TokenKind::RBrace) {
             if self.at_end() {
-                bail!("{}: unterminated watch block", fmt_span(start_span));
+                bail!("{}", self.fmt_error(start_span, "unterminated watch block"));
             }
             match self.peek() {
                 Some(TokenKind::Ident(name)) if name == "initial_delay" => {
@@ -650,11 +699,15 @@ impl Parser {
                 Some(TokenKind::OnFail) => {
                     on_fail = Some(self.parse_on_fail()?);
                 }
-                Some(other) => bail!(
-                    "{}: unexpected token in watch block: {:?}",
-                    fmt_span(self.span()),
-                    other
-                ),
+                Some(other) => {
+                    bail!(
+                        "{}",
+                        self.fmt_error(
+                            self.span(),
+                            &format!("unexpected token in watch block: {:?}", other)
+                        )
+                    )
+                }
                 None => unreachable!(),
             }
         }
@@ -692,10 +745,15 @@ impl Parser {
                 let (name, _) = self.expect_ident()?;
                 Ok(ast::OnFailAction::Spawn(name))
             }
-            _ => bail!(
-                "{}: expected 'shutdown', 'debug', 'log', or 'spawn' after 'on_fail'",
-                fmt_span(self.span())
-            ),
+            _ => {
+                bail!(
+                    "{}",
+                    self.fmt_error(
+                        self.span(),
+                        "expected 'shutdown', 'debug', 'log', or 'spawn' after 'on_fail'"
+                    )
+                )
+            }
         }
     }
 
@@ -711,7 +769,7 @@ impl Parser {
 
         while !self.eat(&TokenKind::RBrace) {
             if self.at_end() {
-                bail!("{}: unterminated for block", fmt_span(start_span));
+                bail!("{}", self.fmt_error(start_span, "unterminated for block"));
             }
             match self.peek() {
                 Some(TokenKind::Env) => {
@@ -721,17 +779,24 @@ impl Parser {
                     self.advance();
                     run = Some(self.parse_shell_block()?);
                 }
-                Some(other) => bail!(
-                    "{}: unexpected token in for block: {:?}",
-                    fmt_span(self.span()),
-                    other
-                ),
+                Some(other) => {
+                    bail!(
+                        "{}",
+                        self.fmt_error(
+                            self.span(),
+                            &format!("unexpected token in for block: {:?}", other)
+                        )
+                    )
+                }
                 None => unreachable!(),
             }
         }
 
         let run = run.ok_or_else(|| {
-            anyhow::anyhow!("{}: missing 'run' in for block", fmt_span(self.span()))
+            anyhow::anyhow!(
+                "{}",
+                self.fmt_error(self.span(), "missing 'run' in for block")
+            )
         })?;
         let end_span = self.tokens[self.pos - 1].span;
 
@@ -758,7 +823,10 @@ impl Parser {
                 let mut items = Vec::new();
                 while !self.eat(&TokenKind::RBracket) {
                     if self.at_end() {
-                        bail!("{}: unterminated array literal", fmt_span(self.span()));
+                        bail!(
+                            "{}",
+                            self.fmt_error(self.span(), "unterminated array literal")
+                        );
                     }
                     if !items.is_empty() {
                         self.expect(&TokenKind::Comma)?;
@@ -777,38 +845,25 @@ impl Parser {
                     Ok(ast::Iterable::RangeExclusive(start, end))
                 } else {
                     bail!(
-                        "{}: expected '..' or '..=' after range start",
-                        fmt_span(self.span())
+                        "{}",
+                        self.fmt_error(self.span(), "expected '..' or '..=' after range start")
                     );
                 }
             }
-            _ => bail!(
-                "{}: expected 'glob', '[', or number for iterable",
-                fmt_span(self.span())
-            ),
+            _ => {
+                bail!(
+                    "{}",
+                    self.fmt_error(self.span(), "expected 'glob', '[', or number for iterable")
+                )
+            }
         }
     }
 }
 
-pub fn parse(input: &str) -> Result<ast::File> {
+pub fn parse(input: &str, path: &str) -> Result<ast::File> {
     let tokens = lexer::lex(input, 1, 1)?;
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens, path);
     parser.parse_file()
-}
-
-fn expr_span(expr: &Expr) -> Span {
-    match expr {
-        Expr::StringLit(_, s)
-        | Expr::NumberLit(_, s)
-        | Expr::BoolLit(_, s)
-        | Expr::DurationLit(_, s)
-        | Expr::NoneLit(s)
-        | Expr::ArgsRef(_, s)
-        | Expr::JobOutputRef(_, _, s)
-        | Expr::LocalVar(_, s)
-        | Expr::BinOp(_, _, _, s)
-        | Expr::UnaryNot(_, s) => *s,
-    }
 }
 
 fn merge_spans(a: Span, b: Span) -> Span {
@@ -820,17 +875,13 @@ fn merge_spans(a: Span, b: Span) -> Span {
     }
 }
 
-fn fmt_span(span: Span) -> String {
-    format!("{}:{}", span.line, span.col)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn parse_empty_config() {
-        let file = parse("config {}").unwrap();
+        let file = parse("config {}", "test.pman").unwrap();
         let config = file.config.unwrap();
         assert!(config.logs.is_none());
         assert!(config.args.is_empty());
@@ -839,7 +890,7 @@ mod tests {
 
     #[test]
     fn parse_config_logs() {
-        let file = parse(r#"config { logs = "./my-logs" }"#).unwrap();
+        let file = parse(r#"config { logs = "./my-logs" }"#, "test.pman").unwrap();
         let config = file.config.unwrap();
         assert_eq!(config.logs.unwrap().value, "./my-logs");
     }
@@ -856,7 +907,7 @@ mod tests {
                 }
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         let config = file.config.unwrap();
         assert_eq!(config.args.len(), 1);
         let arg = &config.args[0];
@@ -877,7 +928,7 @@ mod tests {
                 }
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         let config = file.config.unwrap();
         assert_eq!(config.env.len(), 2);
         assert_eq!(config.env[0].key, "NODE_ENV");
@@ -890,7 +941,7 @@ mod tests {
 
     #[test]
     fn parse_simple_job() {
-        let file = parse(r#"job web { run "serve" }"#).unwrap();
+        let file = parse(r#"job web { run "serve" }"#, "test.pman").unwrap();
         assert_eq!(file.jobs.len(), 1);
         let job = &file.jobs[0];
         assert_eq!(job.name, "web");
@@ -902,7 +953,11 @@ mod tests {
 
     #[test]
     fn parse_job_with_condition() {
-        let file = parse(r#"job worker if args.enable_worker { run "worker start" }"#).unwrap();
+        let file = parse(
+            r#"job worker if args.enable_worker { run "worker start" }"#,
+            "test.pman",
+        )
+        .unwrap();
         let job = &file.jobs[0];
         assert_eq!(job.name, "worker");
         assert!(matches!(&job.condition, Some(Expr::ArgsRef(name, _)) if name == "enable_worker"));
@@ -910,14 +965,14 @@ mod tests {
 
     #[test]
     fn parse_job_once() {
-        let file = parse(r#"job migrate { once = true run "migrate" }"#).unwrap();
+        let file = parse(r#"job migrate { once = true run "migrate" }"#, "test.pman").unwrap();
         let job = &file.jobs[0];
         assert_eq!(job.body.once, Some(true));
     }
 
     #[test]
     fn parse_event() {
-        let file = parse(r#"event recovery { run "./recover.sh" }"#).unwrap();
+        let file = parse(r#"event recovery { run "./recover.sh" }"#, "test.pman").unwrap();
         assert_eq!(file.events.len(), 1);
         assert_eq!(file.events[0].name, "recovery");
         assert!(
@@ -936,7 +991,7 @@ mod tests {
                 run "serve"
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         let job = &file.jobs[0];
         assert_eq!(job.body.env.len(), 2);
         assert_eq!(job.body.env[0].key, "PORT");
@@ -946,7 +1001,7 @@ mod tests {
     #[test]
     fn parse_fenced_run() {
         let input = "job migrate { once = true run ```\n  ./run-migrations\n``` }";
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         let job = &file.jobs[0];
         assert!(
             matches!(&job.body.run_section, ast::RunSection::Direct(ast::ShellBlock::Fenced(s, _)) if s.contains("run-migrations"))
@@ -963,7 +1018,7 @@ mod tests {
                 run "serve"
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         let wait = file.jobs[0].body.wait.as_ref().unwrap();
         assert_eq!(wait.conditions.len(), 1);
         assert!(
@@ -986,7 +1041,7 @@ mod tests {
                 run "serve"
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         let cond = &file.jobs[0].body.wait.as_ref().unwrap().conditions[0];
         assert!(
             matches!(&cond.kind, ast::ConditionKind::Http { url } if url.value == "http://localhost:3000/health")
@@ -1004,7 +1059,7 @@ mod tests {
                 run "check"
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         let cond = &file.jobs[0].body.wait.as_ref().unwrap().conditions[0];
         assert!(cond.negated);
         assert!(
@@ -1024,7 +1079,7 @@ mod tests {
                 run "serve"
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         let cond = &file.jobs[0].body.wait.as_ref().unwrap().conditions[0];
         assert!(matches!(&cond.options.timeout, Some(Expr::NoneLit(_))));
     }
@@ -1041,7 +1096,7 @@ mod tests {
                 run "serve"
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         let cond = &file.jobs[0].body.wait.as_ref().unwrap().conditions[0];
         assert!(matches!(&cond.options.retry, Some(Expr::BoolLit(false, _))));
     }
@@ -1060,7 +1115,7 @@ mod tests {
                 run "serve"
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         let cond = &file.jobs[0].body.wait.as_ref().unwrap().conditions[0];
         match &cond.kind {
             ast::ConditionKind::Contains {
@@ -1096,7 +1151,7 @@ mod tests {
                 }
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         let job = &file.jobs[0];
         assert_eq!(job.body.watches.len(), 1);
         let w = &job.body.watches[0];
@@ -1121,7 +1176,7 @@ mod tests {
                 }
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         let w = &file.jobs[0].body.watches[0];
         assert_eq!(w.name, "disk");
         assert!(matches!(&w.on_fail, Some(ast::OnFailAction::Spawn(name)) if name == "recovery"));
@@ -1137,7 +1192,7 @@ mod tests {
                 }
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         match &file.jobs[0].body.run_section {
             ast::RunSection::ForLoop(fl) => {
                 assert_eq!(fl.var, "config_path");
@@ -1160,7 +1215,7 @@ mod tests {
                 }
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         match &file.jobs[0].body.run_section {
             ast::RunSection::ForLoop(fl) => {
                 assert_eq!(fl.var, "name");
@@ -1182,7 +1237,7 @@ mod tests {
                 }
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         match &file.jobs[0].body.run_section {
             ast::RunSection::ForLoop(fl) => {
                 assert_eq!(fl.var, "i");
@@ -1207,7 +1262,7 @@ mod tests {
                 }
             }
         "#;
-        let file = parse(input).unwrap();
+        let file = parse(input, "test.pman").unwrap();
         let config = file.config.unwrap();
         assert_eq!(config.args.len(), 1);
         let arg = &config.args[0];

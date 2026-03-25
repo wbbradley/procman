@@ -2,17 +2,24 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 
-use crate::pman::ast::{self, Expr, RunSection, ShellBlock};
+use crate::pman::{
+    ast::{self, Expr, RunSection, ShellBlock},
+    token::Span,
+};
 
-pub fn validate(file: &ast::File) -> Result<()> {
+pub fn validate(file: &ast::File, path: &str) -> Result<()> {
     let mut job_names: HashSet<&str> = HashSet::new();
     let mut event_names: HashSet<&str> = HashSet::new();
     let mut once_jobs: HashSet<&str> = HashSet::new();
+    let mut errors: Vec<String> = Vec::new();
 
     // Step 1: Collect names and check duplicates.
     for job in &file.jobs {
         if !job_names.insert(&job.name) {
-            bail!("duplicate job name '{}'", job.name);
+            errors.push(
+                job.span
+                    .fmt_error(path, &format!("duplicate job name '{}'", job.name)),
+            );
         }
         if job.body.once == Some(true) {
             once_jobs.insert(&job.name);
@@ -20,13 +27,26 @@ pub fn validate(file: &ast::File) -> Result<()> {
     }
     for event in &file.events {
         if !event_names.insert(&event.name) {
-            bail!("duplicate event name '{}'", event.name);
+            errors.push(
+                event
+                    .span
+                    .fmt_error(path, &format!("duplicate event name '{}'", event.name)),
+            );
         }
     }
     for name in &job_names {
         if event_names.contains(name) {
-            bail!("name '{}' is used as both a job and an event", name);
+            let event = file.events.iter().find(|e| e.name == *name).unwrap();
+            errors.push(event.span.fmt_error(
+                path,
+                &format!("name '{}' is used as both a job and an event", name),
+            ));
         }
+    }
+
+    // Early return if names are invalid — later steps depend on correct names.
+    if !errors.is_empty() {
+        bail!("{}", errors.join("\n"));
     }
 
     // Build after-edges for cycle detection and reachability.
@@ -34,107 +54,132 @@ pub fn validate(file: &ast::File) -> Result<()> {
 
     // Step 2: Validate after references + build edges.
     for job in &file.jobs {
-        let targets = collect_after_targets(&job.body);
-        for target in &targets {
-            if !job_names.contains(target) {
-                bail!(
-                    "job '{}': after @{} references unknown job",
-                    job.name,
-                    target
-                );
-            }
-            if !once_jobs.contains(target) {
-                bail!(
-                    "job '{}': after @{} target must be once = true",
-                    job.name,
-                    target
-                );
+        let mut targets = HashSet::new();
+        if let Some(wait) = &job.body.wait {
+            for cond in &wait.conditions {
+                if let ast::ConditionKind::After { job: target } = &cond.kind {
+                    if !job_names.contains(target.as_str()) {
+                        errors.push(cond.span.fmt_error(
+                            path,
+                            &format!(
+                                "job '{}': after @{} references unknown job",
+                                job.name, target
+                            ),
+                        ));
+                    } else if !once_jobs.contains(target.as_str()) {
+                        errors.push(cond.span.fmt_error(
+                            path,
+                            &format!(
+                                "job '{}': after @{} target must be once = true",
+                                job.name, target
+                            ),
+                        ));
+                    }
+                    targets.insert(target.as_str());
+                }
             }
         }
         after_edges.insert(job.name.as_str(), targets);
     }
     for event in &file.events {
-        let targets = collect_after_targets(&event.body);
-        for target in &targets {
-            if !job_names.contains(target) {
-                bail!(
-                    "event '{}': after @{} references unknown job",
-                    event.name,
-                    target
-                );
-            }
-            if !once_jobs.contains(target) {
-                bail!(
-                    "event '{}': after @{} target must be once = true",
-                    event.name,
-                    target
-                );
+        let mut targets = HashSet::new();
+        if let Some(wait) = &event.body.wait {
+            for cond in &wait.conditions {
+                if let ast::ConditionKind::After { job: target } = &cond.kind {
+                    if !job_names.contains(target.as_str()) {
+                        errors.push(cond.span.fmt_error(
+                            path,
+                            &format!(
+                                "event '{}': after @{} references unknown job",
+                                event.name, target
+                            ),
+                        ));
+                    } else if !once_jobs.contains(target.as_str()) {
+                        errors.push(cond.span.fmt_error(
+                            path,
+                            &format!(
+                                "event '{}': after @{} target must be once = true",
+                                event.name, target
+                            ),
+                        ));
+                    }
+                    targets.insert(target.as_str());
+                }
             }
         }
         after_edges.insert(event.name.as_str(), targets);
     }
 
-    // Step 3: Cycle detection.
+    // Early return if after-references are invalid.
+    if !errors.is_empty() {
+        bail!("{}", errors.join("\n"));
+    }
+
+    // Step 3: Cycle detection — fail-fast since reachability depends on acyclic graph.
     detect_cycles(&after_edges)?;
 
     // Step 4: Validate @job.KEY output references.
     for job in &file.jobs {
-        validate_output_refs(&job.name, &job.body, &once_jobs, &after_edges)?;
+        errors.extend(validate_output_refs(
+            &job.name,
+            &job.body,
+            &once_jobs,
+            &after_edges,
+            path,
+        ));
     }
     for event in &file.events {
-        validate_output_refs(&event.name, &event.body, &once_jobs, &after_edges)?;
+        errors.extend(validate_output_refs(
+            &event.name,
+            &event.body,
+            &once_jobs,
+            &after_edges,
+            path,
+        ));
     }
 
     // Step 5: Validate on_fail spawn references.
     for job in &file.jobs {
-        validate_spawns(&job.name, &job.body, &job_names, &event_names)?;
+        errors.extend(validate_spawns(&job.body, &job_names, &event_names, path));
     }
     for event in &file.events {
-        validate_spawns(&event.name, &event.body, &job_names, &event_names)?;
+        errors.extend(validate_spawns(&event.body, &job_names, &event_names, path));
     }
 
     // Step 6: Variable shadowing.
     for job in &file.jobs {
-        check_variable_shadowing(&job.name, &job.body)?;
+        errors.extend(check_variable_shadowing(&job.body, path));
     }
     for event in &file.events {
-        check_variable_shadowing(&event.name, &event.body)?;
+        errors.extend(check_variable_shadowing(&event.body, path));
     }
 
     // Step 7: Duplicate watch names.
     for job in &file.jobs {
-        check_duplicate_watches(&job.name, &job.body)?;
+        errors.extend(check_duplicate_watches(&job.body, path));
     }
     for event in &file.events {
-        check_duplicate_watches(&event.name, &event.body)?;
+        errors.extend(check_duplicate_watches(&event.body, path));
     }
 
     // Step 8: Empty run rejection.
     for job in &file.jobs {
-        check_empty_run(&job.name, &job.body)?;
+        errors.extend(check_empty_run(&job.body, path));
     }
     for event in &file.events {
-        check_empty_run(&event.name, &event.body)?;
+        errors.extend(check_empty_run(&event.body, path));
+    }
+
+    if !errors.is_empty() {
+        bail!("{}", errors.join("\n"));
     }
 
     Ok(())
 }
 
-fn collect_after_targets(body: &ast::JobBody) -> HashSet<&str> {
-    let mut targets = HashSet::new();
-    if let Some(wait) = &body.wait {
-        for cond in &wait.conditions {
-            if let ast::ConditionKind::After { job } = &cond.kind {
-                targets.insert(job.as_str());
-            }
-        }
-    }
-    targets
-}
-
-fn collect_output_refs(expr: &Expr) -> Vec<(&str, &str)> {
+fn collect_output_refs(expr: &Expr) -> Vec<(&str, &str, Span)> {
     match expr {
-        Expr::JobOutputRef(job, key, _) => vec![(job.as_str(), key.as_str())],
+        Expr::JobOutputRef(job, key, span) => vec![(job.as_str(), key.as_str(), *span)],
         Expr::BinOp(lhs, _, rhs, _) => {
             let mut refs = collect_output_refs(lhs);
             refs.extend(collect_output_refs(rhs));
@@ -168,7 +213,9 @@ fn validate_output_refs(
     body: &ast::JobBody,
     once_jobs: &HashSet<&str>,
     after_edges: &HashMap<&str, HashSet<&str>>,
-) -> Result<()> {
+    path: &str,
+) -> Vec<String> {
+    let mut errors = Vec::new();
     let mut all_refs = Vec::new();
     for env in &body.env {
         all_refs.extend(collect_output_refs(&env.value));
@@ -178,25 +225,26 @@ fn validate_output_refs(
             all_refs.extend(collect_output_refs(&env.value));
         }
     }
-    for (job, _key) in all_refs {
+    for (job, _key, span) in all_refs {
         if !once_jobs.contains(job) {
-            bail!(
-                "'{}': @{}.* reference requires '{}' to be once = true",
-                owner_name,
-                job,
-                job
-            );
-        }
-        if !is_reachable(owner_name, job, after_edges) {
-            bail!(
-                "'{}': @{}.* reference requires after @{} (direct or transitive)",
-                owner_name,
-                job,
-                job
-            );
+            errors.push(span.fmt_error(
+                path,
+                &format!(
+                    "'{}': @{}.* reference requires '{}' to be once = true",
+                    owner_name, job, job
+                ),
+            ));
+        } else if !is_reachable(owner_name, job, after_edges) {
+            errors.push(span.fmt_error(
+                path,
+                &format!(
+                    "'{}': @{}.* reference requires after @{} (direct or transitive)",
+                    owner_name, job, job
+                ),
+            ));
         }
     }
-    Ok(())
+    errors
 }
 
 fn detect_cycles(edges: &HashMap<&str, HashSet<&str>>) -> Result<()> {
@@ -255,43 +303,44 @@ fn dfs_find_cycle<'a>(
 }
 
 fn validate_spawns(
-    owner_name: &str,
     body: &ast::JobBody,
     job_names: &HashSet<&str>,
     event_names: &HashSet<&str>,
-) -> Result<()> {
+    path: &str,
+) -> Vec<String> {
+    let mut errors = Vec::new();
     for watch in &body.watches {
         if let Some(ast::OnFailAction::Spawn(target)) = &watch.on_fail {
             if !job_names.contains(target.as_str()) && !event_names.contains(target.as_str()) {
-                bail!(
-                    "'{}': on_fail spawn @{} references unknown target",
-                    owner_name,
-                    target
-                );
-            }
-            if job_names.contains(target.as_str()) {
-                bail!(
-                    "'{}': on_fail spawn @{} must reference an event, not a job",
-                    owner_name,
-                    target
-                );
+                errors.push(watch.span.fmt_error(
+                    path,
+                    &format!("on_fail spawn @{} references unknown target", target),
+                ));
+            } else if job_names.contains(target.as_str()) {
+                errors.push(watch.span.fmt_error(
+                    path,
+                    &format!(
+                        "on_fail spawn @{} must reference an event, not a job",
+                        target
+                    ),
+                ));
             }
         }
     }
-    Ok(())
+    errors
 }
 
-fn check_variable_shadowing(owner_name: &str, body: &ast::JobBody) -> Result<()> {
+fn check_variable_shadowing(body: &ast::JobBody, path: &str) -> Vec<String> {
+    let mut errors = Vec::new();
     let mut vars: HashSet<&str> = HashSet::new();
     if let Some(wait) = &body.wait {
         for cond in &wait.conditions {
             if let ast::ConditionKind::Contains { var: Some(v), .. } = &cond.kind
                 && !vars.insert(v.as_str())
             {
-                bail!(
-                    "'{}': variable '{}' shadows existing variable",
-                    owner_name,
-                    v
+                errors.push(
+                    cond.span
+                        .fmt_error(path, &format!("variable '{}' shadows existing variable", v)),
                 );
             }
         }
@@ -299,40 +348,50 @@ fn check_variable_shadowing(owner_name: &str, body: &ast::JobBody) -> Result<()>
     if let RunSection::ForLoop(fl) = &body.run_section
         && !vars.insert(fl.var.as_str())
     {
-        bail!(
-            "'{}': for-loop variable '{}' shadows existing variable",
-            owner_name,
-            fl.var
-        );
+        errors.push(fl.span.fmt_error(
+            path,
+            &format!("for-loop variable '{}' shadows existing variable", fl.var),
+        ));
     }
-    Ok(())
+    errors
 }
 
-fn check_duplicate_watches(owner_name: &str, body: &ast::JobBody) -> Result<()> {
+fn check_duplicate_watches(body: &ast::JobBody, path: &str) -> Vec<String> {
+    let mut errors = Vec::new();
     let mut names: HashSet<&str> = HashSet::new();
     for watch in &body.watches {
         if !names.insert(&watch.name) {
-            bail!("'{}': duplicate watch name '{}'", owner_name, watch.name);
+            errors.push(
+                watch
+                    .span
+                    .fmt_error(path, &format!("duplicate watch name '{}'", watch.name)),
+            );
         }
     }
-    Ok(())
+    errors
 }
 
-fn check_empty_run(owner_name: &str, body: &ast::JobBody) -> Result<()> {
+fn check_empty_run(body: &ast::JobBody, path: &str) -> Vec<String> {
+    let mut errors = Vec::new();
     match &body.run_section {
         RunSection::Direct(ShellBlock::Inline(s)) if s.value.is_empty() => {
-            bail!("'{}': run command must not be empty", owner_name);
+            errors.push(s.span.fmt_error(path, "run command must not be empty"));
         }
-        RunSection::ForLoop(fl) => {
-            if let ShellBlock::Inline(s) = &fl.run
-                && s.value.is_empty()
-            {
-                bail!("'{}': run command must not be empty", owner_name);
+        RunSection::Direct(ShellBlock::Fenced(s, span)) if s.is_empty() => {
+            errors.push(span.fmt_error(path, "run command must not be empty"));
+        }
+        RunSection::ForLoop(fl) => match &fl.run {
+            ShellBlock::Inline(s) if s.value.is_empty() => {
+                errors.push(s.span.fmt_error(path, "run command must not be empty"));
             }
-        }
+            ShellBlock::Fenced(s, span) if s.is_empty() => {
+                errors.push(span.fmt_error(path, "run command must not be empty"));
+            }
+            _ => {}
+        },
         _ => {}
     }
-    Ok(())
+    errors
 }
 
 #[cfg(test)]
@@ -341,8 +400,8 @@ mod tests {
     use crate::pman::parser::parse;
 
     fn parse_and_validate(input: &str) -> Result<()> {
-        let file = parse(input)?;
-        validate(&file)
+        let file = parse(input, "test.pman")?;
+        validate(&file, "test.pman")
     }
 
     #[test]
@@ -526,5 +585,18 @@ mod tests {
             }
         "#;
         parse_and_validate(input).unwrap();
+    }
+
+    #[test]
+    fn error_includes_file_location() {
+        let input = r#"job web { run "serve" }
+job web { run "other" }"#;
+        let err = parse_and_validate(input).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("test.pman:"),
+            "expected file location in error: {msg}"
+        );
+        assert!(msg.contains("duplicate job name"), "got: {msg}");
     }
 }
