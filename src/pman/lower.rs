@@ -557,20 +557,31 @@ fn lower_job_or_event(
             watches,
         }]),
         RunSection::ForLoop(fl) => match &fl.iterable {
-            ast::Iterable::Glob(glob_lit) => Ok(vec![ProcessConfig {
-                name: name.to_string(),
-                env: merged_env,
-                run: extract_shell(&fl.run),
-                condition: None,
-                depends,
-                once,
-                for_each: Some(ForEachConfig {
-                    glob: glob_lit.value.clone(),
-                    variable: fl.var.clone(),
-                }),
-                autostart,
-                watches,
-            }]),
+            ast::Iterable::Glob(glob_lit) => {
+                // Evaluate for-loop env with the loop var mapped to a
+                // placeholder so that expand_fan_out can substitute the
+                // real value at runtime.
+                let mut placeholder_vars = HashMap::new();
+                placeholder_vars.insert(fl.var.clone(), format!("${{{}}}", fl.var));
+                let for_env = eval_env_bindings(&fl.env, arg_values, &placeholder_vars, path)?;
+                let mut glob_env = merged_env;
+                glob_env.extend(for_env);
+
+                Ok(vec![ProcessConfig {
+                    name: name.to_string(),
+                    env: glob_env,
+                    run: extract_shell(&fl.run),
+                    condition: None,
+                    depends,
+                    once,
+                    for_each: Some(ForEachConfig {
+                        glob: glob_lit.value.clone(),
+                        variable: fl.var.clone(),
+                    }),
+                    autostart,
+                    watches,
+                }])
+            }
             ast::Iterable::Array(items) => {
                 let mut configs = Vec::new();
                 for (i, item_expr) in items.iter().enumerate() {

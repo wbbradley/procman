@@ -210,6 +210,16 @@ impl ProcessGroup {
 
             let mut env = config.env.clone();
             env.insert(fe.variable.clone(), matched_path.clone());
+            // Substitute loop variable in env values (e.g. env bindings
+            // that reference the loop variable via placeholder).
+            for val in env.values_mut() {
+                let replaced = val
+                    .replace(&format!("${}", fe.variable), matched_path)
+                    .replace(&format!("${{{}}}", fe.variable), matched_path);
+                if replaced != *val {
+                    *val = replaced;
+                }
+            }
 
             let run = config
                 .run
@@ -865,6 +875,61 @@ mod tests {
         for handle in std::mem::take(&mut group.reader_threads) {
             let _ = handle.join();
         }
+    }
+
+    /// Regression test: for-loop env bindings (e.g. `env NODE_CONFIG = config_path`)
+    /// must be applied to each glob-expanded instance. Previously, the lowering step
+    /// dropped these bindings for glob iterables, causing `$NODE_CONFIG` to be unbound.
+    #[test]
+    fn expand_fan_out_glob_env_binding_is_applied() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut group, logger) = make_test_group();
+        let (_dir, pattern) = make_temp_glob_files(2);
+
+        // Parse + lower a .pman snippet with `env NODE_CONFIG = config_path` inside
+        // a glob for-loop. This mirrors the real usage pattern.
+        let pman_input = format!(
+            r#"
+            job nodes {{
+                for config_path in glob("{pattern}") {{
+                    env NODE_CONFIG = config_path
+                    run "echo $NODE_CONFIG"
+                }}
+            }}
+            "#,
+        );
+        let (configs, _) =
+            crate::pman::parse(&pman_input, "test.pman", &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(
+            configs.len(),
+            1,
+            "glob for-loop should produce one template config"
+        );
+        let config = &configs[0];
+        assert!(config.for_each.is_some(), "should have for_each");
+
+        group.expand_fan_out(config, &logger).unwrap();
+        assert_eq!(group.children.len(), 2);
+
+        // Wait for children and collect exit statuses. If NODE_CONFIG is unbound,
+        // the shell (`sh -e -u`) exits with code 1 ("unbound variable").
+        let mut all_ok = true;
+        for (pid, name, _, _) in &group.children {
+            match waitpid(*pid, None) {
+                Ok(nix::sys::wait::WaitStatus::Exited(_, 0)) => {}
+                other => {
+                    eprintln!("{name}: unexpected exit status: {other:?}");
+                    all_ok = false;
+                }
+            }
+        }
+        for handle in std::mem::take(&mut group.reader_threads) {
+            let _ = handle.join();
+        }
+        assert!(
+            all_ok,
+            "all fan-out instances should exit 0 (NODE_CONFIG must be bound)"
+        );
     }
 
     #[test]
