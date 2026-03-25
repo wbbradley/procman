@@ -1,325 +1,352 @@
 # Configuration Reference
 
-Procman reads a single YAML file (passed as a positional argument) with two top-level keys:
-`config` (optional) and `jobs` (required).
+Procman reads a single `.pman` file (passed as a positional argument). The file contains
+top-level blocks in any order.
 
-## Top-level structure
+## Top-Level Structure
 
-```yaml
-config:
-  logs: ./my-logs
-  args:
-    rust_log:
-      type: string
-      default: "info"
-      env: RUST_LOG
+```
+config {
+  logs = "./my-logs"
 
-jobs:
-  web:
-    run: serve --port 8080
-  worker:
-    run: cargo run --bin worker
+  env {
+    RUST_LOG = args.log_level
+  }
+
+  arg port {
+    type = string
+    default = "3000"
+    short = "p"
+    description = "Port to listen on"
+  }
+}
+
+job migrate {
+  once = true
+  run "db-migrate up"
+}
+
+job web {
+  env PORT = args.port
+  run "serve --port $PORT"
+}
+
+job worker if args.enable_worker {
+  run "worker-service start"
+}
+
+event recovery {
+  run "./scripts/recover.sh"
+}
 ```
 
-- **`config`** (optional): global settings — custom log directory and user-defined CLI arguments.
-- **`jobs`** (required): map of job name to job definition. Job names become the labels used in
-  log output, dependency references, and template expressions.
+A `.pman` file may contain:
 
-## `config.logs`
+- **`config { }`** — global settings, CLI args, and shared environment variables
+- **`job name { }`** — an auto-started process (long-running or one-shot)
+- **`job name if expr { }`** — a conditionally evaluated job
+- **`event name { }`** — a dormant process, only started via `on_fail spawn`
 
-Optional custom log directory path. Defaults to `procman-logs`. The directory is recreated on
-each run.
+## Identifiers
 
-```yaml
-config:
-  logs: ./my-logs
+Job names, event names, arg names, and variable names are identifiers. Valid
+identifiers match `[a-zA-Z_][a-zA-Z0-9_-]*` — they start with a letter or
+underscore, followed by letters, digits, underscores, or hyphens.
+
+## String Literals
+
+String literals are double-quoted. Supported escape sequences: `\"` (literal
+quote), `\\` (literal backslash), `\n` (newline), `\t` (tab). No other
+backslash escapes are recognized.
+
+## Duration Literals
+
+Duration literals are a number followed by a unit suffix: `s` (seconds), `ms`
+(milliseconds), `m` (minutes). Fractional values are allowed (e.g., `1.5s`).
+
+## The `none` Literal
+
+`none` represents the absence of a value. It is valid only in specific
+positions: `timeout = none` (infinite wait), `default = none` (no default).
+Using `none` in env value positions or boolean contexts is a parse-time error.
+
+## `config { }` Block
+
+Global settings applied to all jobs.
+
+### `config.logs`
+
+Optional log directory path. Defaults to `procman-logs`. Recreated each run.
+
+```
+config {
+  logs = "./my-logs"
+}
 ```
 
-## `config.args`
+### `config.env`
 
-Define CLI arguments that users can pass after `--` on the command line. Each key is the
-argument name — underscores in YAML become dashes on the CLI (e.g. `rust_log` becomes
-`--rust-log`).
+Global environment variable bindings applied to all jobs. Overridable per-job.
 
-```yaml
-config:
-  args:
-    rust_log:
-      short: r
-      description: "RUST_LOG configuration"
-      type: string
-      default: "info"
-      env: RUST_LOG
-    enable_feature:
-      type: bool
-      default: false
-      env: FEATURE_ENABLED
+```
+config {
+  env {
+    RUST_LOG = args.log_level
+  }
+}
 ```
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `type` | string | no | `string` | `string` or `bool`. String args take a value (`--name VALUE`), bool args are flags (`--name` = true). |
-| `short` | string | no | — | Single character for `-s` shorthand. |
-| `description` | string | no | — | Help text shown with `-- --help`. |
-| `default` | any | no | — | Fallback value. Args without a default are **required**. |
-| `env` | string | no | — | Environment variable name to inject the arg value into. |
+### `config.arg`
 
-Arg values are available as `${{ args.var_name }}` templates in `run`, `env`, and `condition`
-fields:
+CLI arguments parsed after `--`. Underscores become dashes on the CLI
+(`log_level` → `--log-level`).
 
-```yaml
-config:
-  args:
-    port:
-      type: string
-      default: "3000"
+```
+config {
+  arg port {
+    type = string
+    default = "3000"
+    short = "p"
+    description = "Port to listen on"
+  }
 
-jobs:
-  web:
-    run: serve --port ${{ args.port }}
+  arg enable_feature {
+    type = bool
+    default = false
+  }
+}
 ```
 
-Running `procman myapp.yaml -- --help` prints generated usage based on the `config.args`
-definitions.
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `type` | no | `string` | `string` or `bool` |
+| `short` | no | — | Single character shorthand |
+| `description` | no | — | Help text for `-- --help` |
+| `default` | no | — | Fallback value. Args without a default are required. |
 
-**Environment variable precedence** (lowest to highest):
+Arg values are referenced in expressions as `args.name`. There is no `env`
+field on args — use `config { env { } }` to explicitly bind args to
+environment variables.
+
+Running `procman myapp.pman -- --help` prints generated usage based on the
+arg definitions.
+
+### Env Precedence
+
+Lowest to highest:
 
 | Source | Priority |
 |--------|----------|
-| System environment | lowest |
-| Arg defaults | |
-| CLI `--` args | |
-| `-e` flags | |
-| YAML `env:` blocks | highest |
+| System env (inherited) | lowest |
+| CLI `-e KEY=VALUE` flags | |
+| Global `config { env { } }` | |
+| Per-job `env` | |
+| Per-iteration `for` bindings | highest |
 
-## Fields
+Note: `var` bindings from `contains` conditions are procman expressions, not
+direct env injections. They enter the environment only when explicitly assigned
+via `env KEY = var_name`.
+
+## `job name { }` Block
+
+Each `job` block defines a process to run.
 
 ### `run` (required)
 
-The command to execute. All commands are passed to `sh -euo pipefail -c`, so shell features like
-pipes, redirects, `&&`, variable expansion, and multi-line scripts all work naturally. The strict
-flags mean unset variable references and mid-pipeline failures are treated as errors:
+The command to execute. All commands are passed to `sh -euo pipefail -c`, so
+shell features like pipes, redirects, `&&`, variable expansion, and multi-line
+scripts all work naturally.
 
-```yaml
-jobs:
-  api:
-    run: cargo run --release --bin api-server
+Inline form:
 
-  migrate:
-    run: |
-      ./run-migrations
-      echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
-
-  healthcheck:
-    run: curl -s http://localhost:8080/health && echo "OK"
+```
+run "echo hello"
 ```
 
-The `run` field also supports [template references](templates.md) (`${{ process.key }}`) and
-arg templates (`${{ args.name }}`).
+Multi-line fenced form:
+
+````
+run ```
+  ./run-migrations
+  echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
+```
+````
+
+Procman never interpolates inside shell strings. Values flow in exclusively
+via environment variables.
 
 An empty or whitespace-only `run` value is rejected at parse time.
 
 ### `env` (optional)
 
-A map of extra environment variables merged into the process's environment. The OS environment
-is inherited first, then these values are layered on top (overriding any collisions).
+Environment variables merged into the job's environment. Single-binding and
+block forms can coexist:
 
-```yaml
-jobs:
-  worker:
-    env:
-      RUST_LOG: debug
-      PORT: "3000"
-    run: my-server --port 3000
+```
+job api {
+  env DB_URL = @migrate.DATABASE_URL
+  env {
+    API_KEY = "secret"
+    LOG_DIR = args.log_dir
+  }
+  run "start-api --db $DB_URL"
+}
 ```
 
-Values may contain [template references](templates.md):
+### `once` (optional)
 
-```yaml
-jobs:
-  app:
-    env:
-      DB_URL: "${{ migrate.DATABASE_URL }}"
-    run: ./start-app
-    depends:
-      - process_exited: migrate
-```
-
-### `once` (optional, default `false`)
-
-When `true`, the process is expected to run to completion. An exit code of 0 is treated as
-success and does **not** trigger supervisor shutdown. A non-zero exit code still triggers
+`once = true` marks a job as one-shot. Exit code 0 is treated as success and
+does **not** trigger supervisor shutdown. A non-zero exit code still triggers
 shutdown.
 
-Processes with `once: true` can write key-value output to their `$PROCMAN_OUTPUT` file, which
-other processes can read via [template references](templates.md).
+One-shot jobs can write key-value output to `$PROCMAN_OUTPUT`, which other
+jobs reference via `@job.KEY` expressions (see [Process Output](templates.md)).
 
-```yaml
-jobs:
-  migrate:
-    run: ./run-migrations
-    once: true
+### `wait` (optional)
+
+A block of conditions that must all be satisfied before `run` executes. See
+the [Dependencies](dependencies.md) chapter for the full reference.
+
+```
+wait {
+  after @migrate
+  http "http://localhost:3000/health" {
+    status = 200
+    timeout = 30s
+    poll = 500ms
+  }
+}
 ```
 
-### `depends` (optional)
+### `if` (optional)
 
-A list of [dependency](dependencies.md) objects that must all be satisfied before the process
-is started. See the [Dependencies](dependencies.md) chapter for the full reference.
+An expression on the `job` line. If falsy, the job is not evaluated at all —
+no dependency waiting, no env resolution. Skipped `once = true` jobs still
+register as exited so `after` dependents can proceed.
 
-```yaml
-jobs:
-  api:
-    depends:
-      - url: http://localhost:8080/health
-        code: 200
-      - process_exited: migrate
-    run: ./start-api
 ```
-
-### `condition` (optional)
-
-A shell command evaluated before spawning the process. If it exits non-zero, the job is
-skipped entirely. The command runs via `sh -euo pipefail -c` in the process's resolved
-environment.
-
-```yaml
-jobs:
-  optional-worker:
-    condition: test -n "$WORKER_ENABLED"
-    run: worker-service start
-```
-
-Key behaviors:
-
-- Skipped `once: true` jobs are registered as exited, so `process_exited` dependents can
-  proceed normally.
-- The condition runs in the process's resolved environment (including `env:` overrides and
-  injected arg values).
-- Supports `${{ args.name }}` templates:
-
-```yaml
-config:
-  args:
-    enable_worker:
-      type: bool
-      default: false
-      env: WORKER_ENABLED
-
-jobs:
-  worker:
-    condition: test "$WORKER_ENABLED" = "true"
-    run: worker-service start
-```
-
-### `for_each` (optional)
-
-Fan-out configuration that spawns one instance of the process per glob match. Requires two
-sub-fields:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `glob` | string | Glob pattern to match files |
-| `as` | string | Environment variable name that receives the matched path |
-
-Each glob match spawns a separate process instance. The variable named by `as` is set in the
-instance's environment and substituted into the `run` string.
-
-```yaml
-jobs:
-  nodes:
-    for_each:
-      glob: "configs/node-*.yaml"
-      as: CONFIG_PATH
-    run: ./start-node --config $CONFIG_PATH
-    once: true
-```
-
-Fan-out group completion is tracked so that `process_exited` dependencies on the template
-process name work transparently — the dependency is satisfied only once **all** instances
-have exited.
-
-### `autostart` (optional, default `true`)
-
-When `false`, the process is dormant — it won't start until explicitly spawned via a watch
-`on_fail: spawn` action.
-
-```yaml
-jobs:
-  recovery:
-    run: ./scripts/recover.sh
-    autostart: false
+job worker if args.enable_worker {
+  run "worker-service start"
+}
 ```
 
 ### `watch` (optional)
 
-A list of runtime health checks that monitor the process after it starts. Each watch polls
-a check (same types as dependencies) and takes an action when consecutive failures exceed the
-threshold.
+Named runtime health check blocks that monitor a job after it starts. See the
+[Dependencies](dependencies.md) chapter for condition syntax.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `name` | string | auto | Human-readable name |
-| `check` | object | — | Same syntax as a dependency (HTTP, TCP, file exists, etc.) |
-| `initial_delay` | float | 0 | Seconds to wait before the first check |
-| `poll_interval` | float | 5 | Seconds between checks |
-| `failure_threshold` | integer | 3 | Consecutive failures before triggering the action |
-| `on_fail` | string/object | `shutdown` | Action: `shutdown`, `debug`, `log`, or `spawn: <process_name>` |
+```
+job web {
+  run "web-server --port 8080"
 
-```yaml
-jobs:
-  web:
-    run: web-server --port 8080
-    watch:
-      - name: health
-        check:
-          url: http://localhost:8080/health
-          code: 200
-        initial_delay: 5.0
-        poll_interval: 10.0
-        failure_threshold: 3
-        on_fail: shutdown
-      - name: disk
-        check:
-          path: /var/run/healthy
-        on_fail:
-          spawn: recovery
+  watch health {
+    http "http://localhost:8080/health" {
+      status = 200
+    }
+    initial_delay = 5s
+    poll = 10s
+    threshold = 3
+    on_fail shutdown
+  }
+}
 ```
 
-## Environment variable expansion
+### `for` (optional)
 
-Dependency fields (`url`, `tcp`, `path`, `file_contains.path`, `not_listening`,
-`not_exists`, `not_running`) support environment variable expansion at parse time:
+Iteration block that wraps `env` and `run`, spawning one instance per element.
+See the [Fan-out](fan-out.md) chapter for full details.
 
-| Syntax | Behavior |
-|--------|----------|
-| `$VAR` | Replaced with the value of `VAR` |
-| `${VAR}` | Replaced with the value of `VAR` (braced form) |
-| `$$` | Escaped literal `$` |
-
-If a referenced variable is not set, procman exits with an error identifying the
-undefined variable.
-
-```yaml
-jobs:
-  api:
-    depends:
-      - path: $HOME/.config/ready.flag
-      - url: http://localhost:${API_PORT}/health
-        code: 200
-    run: ./start-api
+```
+job nodes {
+  once = true
+  for config_path in glob("configs/node-*.yaml") {
+    env NODE_CONFIG = config_path
+    run "start-node --config $NODE_CONFIG"
+  }
+}
 ```
 
-## Parse-time validation
+## `event name { }` Block
 
-Procman validates the configuration at parse time and exits with an error if any of these
-checks fail:
+Event handlers are declared at the top level. They are never auto-started —
+they are spawned via `on_fail spawn @name` in a watch block.
 
-- **Non-empty `run`**: every process must have a non-empty run command. Shell syntax errors
-  are reported at runtime by `sh`.
-- **Dependency graph cycles**: `process_exited` dependencies are checked for circular
-  references using a DFS traversal. The error message shows the full cycle path
-  (e.g. `circular dependency: a -> b -> c -> a`).
-- **Unknown dependencies**: a `process_exited` dependency referencing a process name not
-  defined in the config is rejected.
-- **Template validation**: template references (`${{ process.key }}`) are checked against three
-  rules — see [Templates](templates.md) for details.
+```
+event recovery {
+  run "./scripts/recover.sh"
+}
+```
+
+`on_fail spawn @name` must reference an `event`, not a `job`.
+
+## Shell Blocks
+
+Procman never interpolates inside shell strings. Values flow into shell
+exclusively via environment variables set with `env` bindings.
+
+Inline:
+```
+run "echo hello"
+```
+
+Multi-line fenced:
+````
+run ```
+  ./run-migrations
+  echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
+```
+````
+
+## Expression Language
+
+Expressions appear in `if` conditions, `env` value positions, and `var`
+bindings. They are never evaluated inside shell strings.
+
+### Value References
+
+| Syntax | Description |
+|--------|-------------|
+| `args.name` | CLI arg value |
+| `@job.KEY` | Output from a `once = true` job's `PROCMAN_OUTPUT` |
+| `local_var` | Job-scoped variable (from `for` or `var` binding) |
+
+### Literals
+
+| Type | Examples |
+|------|---------|
+| String | `"hello"`, `"3000"` |
+| Number | `42`, `3.14` |
+| Bool | `true`, `false` |
+| Duration | `5s`, `500ms`, `2m` |
+| None | `none` |
+
+### Operators
+
+| Category | Operators |
+|----------|----------|
+| Comparison | `==`, `!=`, `>`, `<`, `>=`, `<=` |
+| Logical | `&&`, `\|\|`, `!` |
+| Grouping | `( )` |
+
+No arithmetic in v1.
+
+### Type Errors
+
+Type errors in expressions cause immediate procman runtime panic and shutdown.
+There is no silent coercion. A type error is a bug in the config.
+
+## Parse-Time Validation
+
+Procman validates the configuration at parse time and exits with an error
+(with `file:line:col` location) if any of these checks fail:
+
+- **Syntax errors** — malformed blocks, missing fields, invalid tokens
+- **Unknown identifiers** — referencing an arg or job that doesn't exist
+- **`after @job` targets** — must reference a `once = true` job
+- **`@job.KEY` references** — must point to a `once = true` job and require
+  `after @job` in the job's `wait` block (direct or transitive)
+- **Circular dependencies** — cycles in `after` references
+- **`on_fail spawn @name`** — must reference an `event`
+- **Variable shadowing** — reusing a name already bound by `for`, `var`, or
+  args
+- **Empty `run` commands** — rejected at parse time

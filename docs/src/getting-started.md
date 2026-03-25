@@ -2,26 +2,27 @@
 
 ## A Minimal Configuration
 
-Create a file called `procman.yaml` in your project root:
+Create a file called `procman.pman` in your project root:
 
-```yaml
-jobs:
-  web:
-    run: python3 -m http.server 8000
+```
+job web {
+  run "python3 -m http.server 8000"
+}
 
-  api:
-    run: node server.js
+job api {
+  run "node server.js"
+}
 ```
 
-Each key under `jobs` is a process name, and `run` is the command to execute.
-That's all you need.
+Each `job` block defines a process with a name and a `run` command. That's
+all you need.
 
 ## Running
 
 Start everything with:
 
 ```sh
-procman procman.yaml
+procman procman.pman
 ```
 
 The config file path is a required positional argument. procman spawns both
@@ -40,9 +41,9 @@ making it easy to scan which process produced each line.
 
 procman automatically writes logs to a `procman-logs/` directory:
 
-- `procman-logs/web.log` — output from the `web` process
-- `procman-logs/api.log` — output from the `api` process
-- `procman-logs/procman.log` — combined output from all processes
+- `procman-logs/web.log` — output from the `web` job
+- `procman-logs/api.log` — output from the `api` job
+- `procman-logs/procman.log` — combined output from all jobs
 
 These files are created fresh on each run.
 
@@ -54,38 +55,44 @@ running. procman exits with the exit code of the first process that terminated.
 
 ## A More Advanced Example
 
-Here's a configuration that uses `once` processes and dependencies:
+Here's a configuration that uses `once` jobs, dependencies, and environment
+variables:
 
-```yaml
-jobs:
-  migrate:
-    run: db-migrate up
-    once: true
+```
+job migrate {
+  once = true
+  run "db-migrate up"
+}
 
-  web:
-    env:
-      PORT: "3000"
-    run: serve --port $PORT
+job web {
+  env PORT = "3000"
+  run "serve --port $PORT"
+}
 
-  api:
-    depends:
-      - process_exited: migrate
-      - url: http://localhost:3000/health
-        code: 200
-        poll_interval: 0.5
-        timeout_seconds: 30
-    run: api-server start
+job api {
+  wait {
+    after @migrate
+    http "http://localhost:3000/health" {
+      status = 200
+      poll = 500ms
+      timeout = 30s
+    }
+  }
+  run "api-server start"
+}
 ```
 
 In this setup:
 
-- **migrate** runs the database migration and exits. The `once: true` flag means
-  its successful exit (code 0) won't trigger a shutdown of everything else.
-- **web** starts immediately and serves on port 3000.
-- **api** waits for two things before starting: the `migrate` process must have
-  exited successfully, and the web server's health endpoint must be returning
-  HTTP 200. Only then does `api-server start` run.
+- **migrate** runs the database migration and exits. The `once = true` field
+  means its successful exit (code 0) won't trigger a shutdown of everything
+  else.
+- **web** starts immediately and serves on port 3000, with the `PORT`
+  environment variable set via `env`.
+- **api** waits for two things before starting: the `migrate` job must have
+  exited successfully (`after @migrate`), and the web server's health endpoint
+  must be returning HTTP 200. Only then does `api-server start` run.
 
 This is the core pattern for dependency-aware startup — later chapters cover the
 full set of dependency types and more advanced features like fan-out and process
-output templates.
+output.

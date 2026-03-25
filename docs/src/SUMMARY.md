@@ -4,7 +4,7 @@
 - [Getting Started](./getting-started.md)
 - [Configuration Reference](./configuration.md)
 - [Dependencies](./dependencies.md)
-- [Process Output Templates](./templates.md)
+- [Process Output](./templates.md)
 - [Fan-out](./fan-out.md)
 - [CLI Reference](./cli.md)
 - [Logging & Output](./logging.md)
