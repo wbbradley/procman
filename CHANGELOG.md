@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.15.2] - 2026-03-24
+
+### Added
+- New `.pman` DSL config file format as an alternative to YAML. When the config file path ends with `.pman`, procman uses a purpose-built parser supporting `config {}`, `job {}`, `event {}` blocks with `env`, `wait`, `watch`, `for` loops, conditional jobs (`job name if expr {}`), and an expression language. The YAML format continues to work unchanged.
+- Source-location context (file, line, column) in `.pman` parser error messages.
+
+### Fixed
+- Stray child PIDs reaped by `waitpid` no longer influence the supervisor's exit code.
+- Tests no longer flake due to mutex poisoning from prior test panics.
+- A race condition in a dependency test was fixed by joining the spawned thread before asserting.
+
 ## [0.15.1] - 2026-03-24
 
 ### Fixed
