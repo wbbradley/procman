@@ -146,15 +146,10 @@ impl Parser {
                     file.config = Some(self.parse_config_block()?);
                 }
                 Some(TokenKind::Job) => {
-                    // Task 6
-                    bail!("{}: job parsing not yet implemented", fmt_span(self.span()));
+                    file.jobs.push(self.parse_job_def()?);
                 }
                 Some(TokenKind::Event) => {
-                    // Task 6
-                    bail!(
-                        "{}: event parsing not yet implemented",
-                        fmt_span(self.span())
-                    );
+                    file.events.push(self.parse_event_def()?);
                 }
                 Some(other) => {
                     bail!(
@@ -296,6 +291,503 @@ impl Parser {
             span: merge_spans(key_span, value_span),
         })
     }
+
+    fn parse_job_def(&mut self) -> Result<ast::JobDef> {
+        let start_span = self.expect(&TokenKind::Job)?.span;
+        let (name, _) = self.expect_ident()?;
+        let condition = if self.eat(&TokenKind::If) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        self.expect(&TokenKind::LBrace)?;
+        let body = self.parse_job_body()?;
+        let end_span = self.expect(&TokenKind::RBrace)?.span;
+        Ok(ast::JobDef {
+            name,
+            condition,
+            body,
+            span: merge_spans(start_span, end_span),
+        })
+    }
+
+    fn parse_event_def(&mut self) -> Result<ast::EventDef> {
+        let start_span = self.expect(&TokenKind::Event)?.span;
+        let (name, _) = self.expect_ident()?;
+        self.expect(&TokenKind::LBrace)?;
+        let body = self.parse_job_body()?;
+        let end_span = self.expect(&TokenKind::RBrace)?.span;
+        Ok(ast::EventDef {
+            name,
+            body,
+            span: merge_spans(start_span, end_span),
+        })
+    }
+
+    fn parse_job_body(&mut self) -> Result<ast::JobBody> {
+        let mut once = None;
+        let mut env = Vec::new();
+        let mut wait = None;
+        let mut watches = Vec::new();
+        let mut run_section: Option<ast::RunSection> = None;
+
+        while self.peek() != Some(&TokenKind::RBrace) {
+            if self.at_end() {
+                bail!("{}: unterminated job body", fmt_span(self.span()));
+            }
+            match self.peek() {
+                Some(TokenKind::Once) => {
+                    self.advance();
+                    self.expect(&TokenKind::Assign)?;
+                    match self.peek() {
+                        Some(TokenKind::True) => {
+                            self.advance();
+                            once = Some(true);
+                        }
+                        Some(TokenKind::False) => {
+                            self.advance();
+                            once = Some(false);
+                        }
+                        _ => bail!(
+                            "{}: expected 'true' or 'false' after 'once ='",
+                            fmt_span(self.span())
+                        ),
+                    }
+                }
+                Some(TokenKind::Env) => {
+                    self.parse_env_entry_or_block(&mut env)?;
+                }
+                Some(TokenKind::Wait) => {
+                    wait = Some(self.parse_wait_block()?);
+                }
+                Some(TokenKind::Watch) => {
+                    watches.push(self.parse_watch_def()?);
+                }
+                Some(TokenKind::Run) => {
+                    self.advance();
+                    let shell = self.parse_shell_block()?;
+                    run_section = Some(ast::RunSection::Direct(shell));
+                }
+                Some(TokenKind::For) => {
+                    let for_loop = self.parse_for_loop()?;
+                    run_section = Some(ast::RunSection::ForLoop(Box::new(for_loop)));
+                }
+                Some(other) => {
+                    bail!(
+                        "{}: unexpected token in job body: {:?}",
+                        fmt_span(self.span()),
+                        other
+                    );
+                }
+                None => unreachable!(),
+            }
+        }
+
+        let run_section = run_section.ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}: missing 'run' or 'for' in job body",
+                fmt_span(self.span())
+            )
+        })?;
+
+        Ok(ast::JobBody {
+            once,
+            env,
+            wait,
+            watches,
+            run_section,
+        })
+    }
+
+    fn parse_shell_block(&mut self) -> Result<ast::ShellBlock> {
+        match self.peek() {
+            Some(TokenKind::String(_)) => {
+                let tok = self.advance();
+                let span = tok.span;
+                let s = match &tok.kind {
+                    TokenKind::String(s) => s.clone(),
+                    _ => unreachable!(),
+                };
+                Ok(ast::ShellBlock::Inline(ast::StringLit { value: s, span }))
+            }
+            Some(TokenKind::FencedString(_)) => {
+                let tok = self.advance();
+                let span = tok.span;
+                let s = match &tok.kind {
+                    TokenKind::FencedString(s) => s.clone(),
+                    _ => unreachable!(),
+                };
+                Ok(ast::ShellBlock::Fenced(s, span))
+            }
+            _ => bail!(
+                "{}: expected string or fenced string after 'run'",
+                fmt_span(self.span())
+            ),
+        }
+    }
+
+    fn parse_wait_block(&mut self) -> Result<ast::WaitBlock> {
+        let start_span = self.expect(&TokenKind::Wait)?.span;
+        self.expect(&TokenKind::LBrace)?;
+        let mut conditions = Vec::new();
+        while !self.eat(&TokenKind::RBrace) {
+            if self.at_end() {
+                bail!("{}: unterminated wait block", fmt_span(start_span));
+            }
+            conditions.push(self.parse_wait_condition()?);
+        }
+        let end_span = self.tokens[self.pos - 1].span;
+        Ok(ast::WaitBlock {
+            conditions,
+            span: merge_spans(start_span, end_span),
+        })
+    }
+
+    fn parse_wait_condition(&mut self) -> Result<ast::WaitCondition> {
+        let start_span = self.span();
+        let negated = self.eat(&TokenKind::Not);
+
+        match self.peek() {
+            Some(TokenKind::After) => {
+                self.advance();
+                self.expect(&TokenKind::At)?;
+                let (job, _) = self.expect_ident()?;
+                let options = self.parse_condition_options()?;
+                let end_span = self.tokens[self.pos - 1].span;
+                Ok(ast::WaitCondition {
+                    negated,
+                    kind: ast::ConditionKind::After { job },
+                    options,
+                    span: merge_spans(start_span, end_span),
+                })
+            }
+            Some(TokenKind::Http) => {
+                self.advance();
+                let url = self.expect_string_lit()?;
+                let options = self.parse_condition_options()?;
+                let end_span = self.tokens[self.pos - 1].span;
+                Ok(ast::WaitCondition {
+                    negated,
+                    kind: ast::ConditionKind::Http { url },
+                    options,
+                    span: merge_spans(start_span, end_span),
+                })
+            }
+            Some(TokenKind::Connect) => {
+                self.advance();
+                let address = self.expect_string_lit()?;
+                let options = self.parse_condition_options()?;
+                let end_span = self.tokens[self.pos - 1].span;
+                Ok(ast::WaitCondition {
+                    negated,
+                    kind: ast::ConditionKind::Connect { address },
+                    options,
+                    span: merge_spans(start_span, end_span),
+                })
+            }
+            Some(TokenKind::Exists) => {
+                self.advance();
+                let path = self.expect_string_lit()?;
+                let options = self.parse_condition_options()?;
+                let end_span = self.tokens[self.pos - 1].span;
+                Ok(ast::WaitCondition {
+                    negated,
+                    kind: ast::ConditionKind::Exists { path },
+                    options,
+                    span: merge_spans(start_span, end_span),
+                })
+            }
+            Some(TokenKind::Running) => {
+                self.advance();
+                let pattern = self.expect_string_lit()?;
+                let options = self.parse_condition_options()?;
+                let end_span = self.tokens[self.pos - 1].span;
+                Ok(ast::WaitCondition {
+                    negated,
+                    kind: ast::ConditionKind::Running { pattern },
+                    options,
+                    span: merge_spans(start_span, end_span),
+                })
+            }
+            Some(TokenKind::Contains) => {
+                self.advance();
+                let path = self.expect_string_lit()?;
+                self.expect(&TokenKind::LBrace)?;
+
+                let mut format = None;
+                let mut key = None;
+                let mut var = None;
+                let mut options = ast::ConditionOptions::default();
+
+                while !self.eat(&TokenKind::RBrace) {
+                    if self.at_end() {
+                        bail!("{}: unterminated contains block", fmt_span(start_span));
+                    }
+                    let (field_name, field_span) = self.expect_ident()?;
+                    self.expect(&TokenKind::Assign)?;
+                    match field_name.as_str() {
+                        "format" => {
+                            let lit = self.expect_string_lit()?;
+                            format = Some(lit.value);
+                        }
+                        "key" => {
+                            key = Some(self.expect_string_lit()?);
+                        }
+                        "var" => {
+                            let (var_name, _) = self.expect_ident()?;
+                            var = Some(var_name);
+                        }
+                        "timeout" => options.timeout = Some(self.parse_expr()?),
+                        "poll" => options.poll = Some(self.parse_expr()?),
+                        "retry" => options.retry = Some(self.parse_expr()?),
+                        "status" => options.status = Some(self.parse_expr()?),
+                        _ => bail!(
+                            "{}: unknown field '{}' in contains block",
+                            fmt_span(field_span),
+                            field_name
+                        ),
+                    }
+                }
+
+                let format = format.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{}: missing 'format' in contains block",
+                        fmt_span(start_span)
+                    )
+                })?;
+                let key = key.ok_or_else(|| {
+                    anyhow::anyhow!("{}: missing 'key' in contains block", fmt_span(start_span))
+                })?;
+
+                let end_span = self.tokens[self.pos - 1].span;
+                Ok(ast::WaitCondition {
+                    negated,
+                    kind: ast::ConditionKind::Contains {
+                        path,
+                        format,
+                        key,
+                        var,
+                    },
+                    options,
+                    span: merge_spans(start_span, end_span),
+                })
+            }
+            Some(other) => bail!(
+                "{}: expected wait condition keyword, got {:?}",
+                fmt_span(self.span()),
+                other
+            ),
+            None => bail!(
+                "{}: expected wait condition, got end of input",
+                fmt_span(self.span())
+            ),
+        }
+    }
+
+    fn parse_condition_options(&mut self) -> Result<ast::ConditionOptions> {
+        let mut options = ast::ConditionOptions::default();
+        if self.peek() != Some(&TokenKind::LBrace) {
+            return Ok(options);
+        }
+        let start_span = self.span();
+        self.advance(); // consume LBrace
+        while !self.eat(&TokenKind::RBrace) {
+            if self.at_end() {
+                bail!(
+                    "{}: unterminated condition options block",
+                    fmt_span(start_span)
+                );
+            }
+            let (field_name, field_span) = self.expect_ident()?;
+            self.expect(&TokenKind::Assign)?;
+            match field_name.as_str() {
+                "status" => options.status = Some(self.parse_expr()?),
+                "timeout" => options.timeout = Some(self.parse_expr()?),
+                "poll" => options.poll = Some(self.parse_expr()?),
+                "retry" => options.retry = Some(self.parse_expr()?),
+                _ => bail!(
+                    "{}: unknown condition option '{}'",
+                    fmt_span(field_span),
+                    field_name
+                ),
+            }
+        }
+        Ok(options)
+    }
+
+    fn parse_watch_def(&mut self) -> Result<ast::WatchDef> {
+        let start_span = self.expect(&TokenKind::Watch)?.span;
+        let (name, _) = self.expect_ident()?;
+        self.expect(&TokenKind::LBrace)?;
+
+        let condition = self.parse_wait_condition()?;
+
+        let mut initial_delay = None;
+        let mut poll = None;
+        let mut threshold = None;
+        let mut on_fail = None;
+
+        while !self.eat(&TokenKind::RBrace) {
+            if self.at_end() {
+                bail!("{}: unterminated watch block", fmt_span(start_span));
+            }
+            match self.peek() {
+                Some(TokenKind::Ident(name)) if name == "initial_delay" => {
+                    self.advance();
+                    self.expect(&TokenKind::Assign)?;
+                    initial_delay = Some(self.parse_expr()?);
+                }
+                Some(TokenKind::Ident(name)) if name == "poll" => {
+                    self.advance();
+                    self.expect(&TokenKind::Assign)?;
+                    poll = Some(self.parse_expr()?);
+                }
+                Some(TokenKind::Ident(name)) if name == "threshold" => {
+                    self.advance();
+                    self.expect(&TokenKind::Assign)?;
+                    threshold = Some(self.parse_expr()?);
+                }
+                Some(TokenKind::OnFail) => {
+                    on_fail = Some(self.parse_on_fail()?);
+                }
+                Some(other) => bail!(
+                    "{}: unexpected token in watch block: {:?}",
+                    fmt_span(self.span()),
+                    other
+                ),
+                None => unreachable!(),
+            }
+        }
+
+        let end_span = self.tokens[self.pos - 1].span;
+        Ok(ast::WatchDef {
+            name,
+            condition,
+            initial_delay,
+            poll,
+            threshold,
+            on_fail,
+            span: merge_spans(start_span, end_span),
+        })
+    }
+
+    fn parse_on_fail(&mut self) -> Result<ast::OnFailAction> {
+        self.expect(&TokenKind::OnFail)?;
+        match self.peek() {
+            Some(TokenKind::Ident(name)) if name == "shutdown" => {
+                self.advance();
+                Ok(ast::OnFailAction::Shutdown)
+            }
+            Some(TokenKind::Ident(name)) if name == "debug" => {
+                self.advance();
+                Ok(ast::OnFailAction::Debug)
+            }
+            Some(TokenKind::Ident(name)) if name == "log" => {
+                self.advance();
+                Ok(ast::OnFailAction::Log)
+            }
+            Some(TokenKind::Spawn) => {
+                self.advance();
+                self.expect(&TokenKind::At)?;
+                let (name, _) = self.expect_ident()?;
+                Ok(ast::OnFailAction::Spawn(name))
+            }
+            _ => bail!(
+                "{}: expected 'shutdown', 'debug', 'log', or 'spawn' after 'on_fail'",
+                fmt_span(self.span())
+            ),
+        }
+    }
+
+    fn parse_for_loop(&mut self) -> Result<ast::ForLoop> {
+        let start_span = self.expect(&TokenKind::For)?.span;
+        let (var, _) = self.expect_ident()?;
+        self.expect(&TokenKind::In)?;
+        let iterable = self.parse_iterable()?;
+        self.expect(&TokenKind::LBrace)?;
+
+        let mut env = Vec::new();
+        let mut run = None;
+
+        while !self.eat(&TokenKind::RBrace) {
+            if self.at_end() {
+                bail!("{}: unterminated for block", fmt_span(start_span));
+            }
+            match self.peek() {
+                Some(TokenKind::Env) => {
+                    self.parse_env_entry_or_block(&mut env)?;
+                }
+                Some(TokenKind::Run) => {
+                    self.advance();
+                    run = Some(self.parse_shell_block()?);
+                }
+                Some(other) => bail!(
+                    "{}: unexpected token in for block: {:?}",
+                    fmt_span(self.span()),
+                    other
+                ),
+                None => unreachable!(),
+            }
+        }
+
+        let run = run.ok_or_else(|| {
+            anyhow::anyhow!("{}: missing 'run' in for block", fmt_span(self.span()))
+        })?;
+        let end_span = self.tokens[self.pos - 1].span;
+
+        Ok(ast::ForLoop {
+            var,
+            iterable,
+            env,
+            run,
+            span: merge_spans(start_span, end_span),
+        })
+    }
+
+    fn parse_iterable(&mut self) -> Result<ast::Iterable> {
+        match self.peek() {
+            Some(TokenKind::Glob) => {
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let pattern = self.expect_string_lit()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(ast::Iterable::Glob(pattern))
+            }
+            Some(TokenKind::LBracket) => {
+                self.advance();
+                let mut items = Vec::new();
+                while !self.eat(&TokenKind::RBracket) {
+                    if self.at_end() {
+                        bail!("{}: unterminated array literal", fmt_span(self.span()));
+                    }
+                    if !items.is_empty() {
+                        self.expect(&TokenKind::Comma)?;
+                    }
+                    items.push(self.parse_expr()?);
+                }
+                Ok(ast::Iterable::Array(items))
+            }
+            Some(TokenKind::Number(_)) => {
+                let start = self.parse_expr()?;
+                if self.eat(&TokenKind::DotDotEq) {
+                    let end = self.parse_expr()?;
+                    Ok(ast::Iterable::RangeInclusive(start, end))
+                } else if self.eat(&TokenKind::DotDot) {
+                    let end = self.parse_expr()?;
+                    Ok(ast::Iterable::RangeExclusive(start, end))
+                } else {
+                    bail!(
+                        "{}: expected '..' or '..=' after range start",
+                        fmt_span(self.span())
+                    );
+                }
+            }
+            _ => bail!(
+                "{}: expected 'glob', '[', or number for iterable",
+                fmt_span(self.span())
+            ),
+        }
+    }
 }
 
 pub fn parse(input: &str) -> Result<ast::File> {
@@ -392,6 +884,315 @@ mod tests {
         assert!(matches!(&config.env[0].value, Expr::StringLit(s, _) if s == "production"));
         assert_eq!(config.env[1].key, "PORT");
         assert!(matches!(&config.env[1].value, Expr::ArgsRef(name, _) if name == "port"));
+    }
+
+    // ── Job/event tests ──
+
+    #[test]
+    fn parse_simple_job() {
+        let file = parse(r#"job web { run "serve" }"#).unwrap();
+        assert_eq!(file.jobs.len(), 1);
+        let job = &file.jobs[0];
+        assert_eq!(job.name, "web");
+        assert!(job.condition.is_none());
+        assert!(
+            matches!(&job.body.run_section, ast::RunSection::Direct(ast::ShellBlock::Inline(s)) if s.value == "serve")
+        );
+    }
+
+    #[test]
+    fn parse_job_with_condition() {
+        let file = parse(r#"job worker if args.enable_worker { run "worker start" }"#).unwrap();
+        let job = &file.jobs[0];
+        assert_eq!(job.name, "worker");
+        assert!(matches!(&job.condition, Some(Expr::ArgsRef(name, _)) if name == "enable_worker"));
+    }
+
+    #[test]
+    fn parse_job_once() {
+        let file = parse(r#"job migrate { once = true run "migrate" }"#).unwrap();
+        let job = &file.jobs[0];
+        assert_eq!(job.body.once, Some(true));
+    }
+
+    #[test]
+    fn parse_event() {
+        let file = parse(r#"event recovery { run "./recover.sh" }"#).unwrap();
+        assert_eq!(file.events.len(), 1);
+        assert_eq!(file.events[0].name, "recovery");
+        assert!(
+            matches!(&file.events[0].body.run_section, ast::RunSection::Direct(ast::ShellBlock::Inline(s)) if s.value == "./recover.sh")
+        );
+    }
+
+    #[test]
+    fn parse_job_with_env() {
+        let input = r#"
+            job api {
+                env PORT = "3000"
+                env {
+                    HOST = "localhost"
+                }
+                run "serve"
+            }
+        "#;
+        let file = parse(input).unwrap();
+        let job = &file.jobs[0];
+        assert_eq!(job.body.env.len(), 2);
+        assert_eq!(job.body.env[0].key, "PORT");
+        assert_eq!(job.body.env[1].key, "HOST");
+    }
+
+    #[test]
+    fn parse_fenced_run() {
+        let input = "job migrate { once = true run ```\n  ./run-migrations\n``` }";
+        let file = parse(input).unwrap();
+        let job = &file.jobs[0];
+        assert!(
+            matches!(&job.body.run_section, ast::RunSection::Direct(ast::ShellBlock::Fenced(s, _)) if s.contains("run-migrations"))
+        );
+    }
+
+    // ── Wait tests ──
+
+    #[test]
+    fn parse_wait_after() {
+        let input = r#"
+            job api {
+                wait { after @migrate }
+                run "serve"
+            }
+        "#;
+        let file = parse(input).unwrap();
+        let wait = file.jobs[0].body.wait.as_ref().unwrap();
+        assert_eq!(wait.conditions.len(), 1);
+        assert!(
+            matches!(&wait.conditions[0].kind, ast::ConditionKind::After { job } if job == "migrate")
+        );
+        assert!(!wait.conditions[0].negated);
+    }
+
+    #[test]
+    fn parse_wait_http_with_options() {
+        let input = r#"
+            job api {
+                wait {
+                    http "http://localhost:3000/health" {
+                        status = 200
+                        timeout = 30s
+                        poll = 500ms
+                    }
+                }
+                run "serve"
+            }
+        "#;
+        let file = parse(input).unwrap();
+        let cond = &file.jobs[0].body.wait.as_ref().unwrap().conditions[0];
+        assert!(
+            matches!(&cond.kind, ast::ConditionKind::Http { url } if url.value == "http://localhost:3000/health")
+        );
+        assert!(matches!(&cond.options.status, Some(Expr::NumberLit(n, _)) if *n == 200.0));
+        assert!(matches!(&cond.options.timeout, Some(Expr::DurationLit(n, _)) if *n == 30.0));
+        assert!(matches!(&cond.options.poll, Some(Expr::DurationLit(n, _)) if *n == 0.5));
+    }
+
+    #[test]
+    fn parse_wait_negated() {
+        let input = r#"
+            job checker {
+                wait { !connect "127.0.0.1:8080" }
+                run "check"
+            }
+        "#;
+        let file = parse(input).unwrap();
+        let cond = &file.jobs[0].body.wait.as_ref().unwrap().conditions[0];
+        assert!(cond.negated);
+        assert!(
+            matches!(&cond.kind, ast::ConditionKind::Connect { address } if address.value == "127.0.0.1:8080")
+        );
+    }
+
+    #[test]
+    fn parse_wait_timeout_none() {
+        let input = r#"
+            job api {
+                wait {
+                    after @setup {
+                        timeout = none
+                    }
+                }
+                run "serve"
+            }
+        "#;
+        let file = parse(input).unwrap();
+        let cond = &file.jobs[0].body.wait.as_ref().unwrap().conditions[0];
+        assert!(matches!(&cond.options.timeout, Some(Expr::NoneLit(_))));
+    }
+
+    #[test]
+    fn parse_wait_retry_false() {
+        let input = r#"
+            job api {
+                wait {
+                    connect "127.0.0.1:5432" {
+                        retry = false
+                    }
+                }
+                run "serve"
+            }
+        "#;
+        let file = parse(input).unwrap();
+        let cond = &file.jobs[0].body.wait.as_ref().unwrap().conditions[0];
+        assert!(matches!(&cond.options.retry, Some(Expr::BoolLit(false, _))));
+    }
+
+    #[test]
+    fn parse_wait_contains_with_var() {
+        let input = r#"
+            job api {
+                wait {
+                    contains "/tmp/config.yaml" {
+                        format = "yaml"
+                        key = "$.database.url"
+                        var = database_url
+                    }
+                }
+                run "serve"
+            }
+        "#;
+        let file = parse(input).unwrap();
+        let cond = &file.jobs[0].body.wait.as_ref().unwrap().conditions[0];
+        match &cond.kind {
+            ast::ConditionKind::Contains {
+                path,
+                format,
+                key,
+                var,
+            } => {
+                assert_eq!(path.value, "/tmp/config.yaml");
+                assert_eq!(format, "yaml");
+                assert_eq!(key.value, "$.database.url");
+                assert_eq!(var.as_deref(), Some("database_url"));
+            }
+            _ => panic!("expected Contains condition"),
+        }
+    }
+
+    // ── Watch/for tests ──
+
+    #[test]
+    fn parse_watch() {
+        let input = r#"
+            job web {
+                run "web-server"
+                watch health {
+                    http "http://localhost:8080/health" {
+                        status = 200
+                    }
+                    initial_delay = 5s
+                    poll = 10s
+                    threshold = 3
+                    on_fail shutdown
+                }
+            }
+        "#;
+        let file = parse(input).unwrap();
+        let job = &file.jobs[0];
+        assert_eq!(job.body.watches.len(), 1);
+        let w = &job.body.watches[0];
+        assert_eq!(w.name, "health");
+        assert!(
+            matches!(&w.condition.kind, ast::ConditionKind::Http { url } if url.value == "http://localhost:8080/health")
+        );
+        assert!(matches!(&w.initial_delay, Some(Expr::DurationLit(n, _)) if *n == 5.0));
+        assert!(matches!(&w.poll, Some(Expr::DurationLit(n, _)) if *n == 10.0));
+        assert!(matches!(&w.threshold, Some(Expr::NumberLit(n, _)) if *n == 3.0));
+        assert!(matches!(&w.on_fail, Some(ast::OnFailAction::Shutdown)));
+    }
+
+    #[test]
+    fn parse_watch_spawn() {
+        let input = r#"
+            job web {
+                run "web-server"
+                watch disk {
+                    exists "/var/run/healthy"
+                    on_fail spawn @recovery
+                }
+            }
+        "#;
+        let file = parse(input).unwrap();
+        let w = &file.jobs[0].body.watches[0];
+        assert_eq!(w.name, "disk");
+        assert!(matches!(&w.on_fail, Some(ast::OnFailAction::Spawn(name)) if name == "recovery"));
+    }
+
+    #[test]
+    fn parse_for_glob() {
+        let input = r#"
+            job nodes {
+                for config_path in glob("configs/*.yaml") {
+                    env NODE_CONFIG = config_path
+                    run "start-node"
+                }
+            }
+        "#;
+        let file = parse(input).unwrap();
+        match &file.jobs[0].body.run_section {
+            ast::RunSection::ForLoop(fl) => {
+                assert_eq!(fl.var, "config_path");
+                assert!(
+                    matches!(&fl.iterable, ast::Iterable::Glob(s) if s.value == "configs/*.yaml")
+                );
+                assert_eq!(fl.env.len(), 1);
+                assert_eq!(fl.env[0].key, "NODE_CONFIG");
+            }
+            _ => panic!("expected ForLoop"),
+        }
+    }
+
+    #[test]
+    fn parse_for_array() {
+        let input = r#"
+            job multi {
+                for name in ["a", "b", "c"] {
+                    run "start"
+                }
+            }
+        "#;
+        let file = parse(input).unwrap();
+        match &file.jobs[0].body.run_section {
+            ast::RunSection::ForLoop(fl) => {
+                assert_eq!(fl.var, "name");
+                match &fl.iterable {
+                    ast::Iterable::Array(items) => assert_eq!(items.len(), 3),
+                    _ => panic!("expected Array"),
+                }
+            }
+            _ => panic!("expected ForLoop"),
+        }
+    }
+
+    #[test]
+    fn parse_for_range() {
+        let input = r#"
+            job shards {
+                for i in 0..3 {
+                    run "shard"
+                }
+            }
+        "#;
+        let file = parse(input).unwrap();
+        match &file.jobs[0].body.run_section {
+            ast::RunSection::ForLoop(fl) => {
+                assert_eq!(fl.var, "i");
+                assert!(matches!(&fl.iterable, ast::Iterable::RangeExclusive(
+                    Expr::NumberLit(start, _),
+                    Expr::NumberLit(end, _)
+                ) if *start == 0.0 && *end == 3.0));
+            }
+            _ => panic!("expected ForLoop"),
+        }
     }
 
     #[test]
