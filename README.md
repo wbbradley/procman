@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/procman.svg)](https://crates.io/crates/procman)
 [![docs](https://img.shields.io/badge/docs-mdbook-blue)](https://wbbradley.github.io/procman/)
 
-A foreman-like process supervisor written in Rust. Reads a YAML config file, spawns all listed jobs, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives. See the [full documentation](https://wbbradley.github.io/procman/) for detailed guides on configuration, dependencies, templates, and more.
+A foreman-like process supervisor written in Rust. Reads a `.pman` config file, spawns all listed jobs, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives. See the [full documentation](https://wbbradley.github.io/procman/) for detailed guides on configuration, dependencies, templates, and more.
 
 ## Usage
 
@@ -12,44 +12,48 @@ cargo install --path .
 ```
 
 ```bash
-procman myapp.yaml                             # run all jobs
-procman myapp.yaml -e PORT=3000 -e RUST_LOG=debug  # inject env vars
-procman myapp.yaml -- --rust-log debug --verbose   # pass config-defined args
-procman myapp.yaml --debug                     # pause before shutdown on failure
+procman myapp.pman                             # run all jobs
+procman myapp.pman -e PORT=3000 -e RUST_LOG=debug  # inject env vars
+procman myapp.pman -- --rust-log debug --verbose   # pass config-defined args
+procman myapp.pman --debug                     # pause before shutdown on failure
 ```
 
-The first positional argument is the path to the config file (required). Arguments after `--` are parsed according to `config.args` definitions (see below).
+The first positional argument is the path to the config file (required). Arguments after `--` are parsed according to `config { arg ... { } }` definitions (see below).
 
 ### Dependency graph
 
-Most service ordering is handled declaratively in the config file. Jobs with no `depends` list start immediately; jobs with dependencies are held until every condition is met. This forms a DAG — circular dependencies are detected at parse time.
+Most service ordering is handled declaratively in the config file. Jobs with no `wait` block start immediately; jobs with wait conditions are held until every condition is met. This forms a DAG — circular dependencies are detected at parse time.
 
-```yaml
-jobs:
-  migrate:
-    run: db-migrate up
-    once: true
+```
+job migrate {
+  once = true
+  run "db-migrate up"
+}
 
-  web:
-    run: serve --port 3000
+job web {
+  run "serve --port 3000"
+}
 
-  api:
-    depends:
-      - process_exited: migrate
-      - url: http://localhost:3000/health
-        code: 200
-        timeout_seconds: 30
-    run: api-server start
+job api {
+  wait {
+    after @migrate
+    http "http://localhost:3000/health" {
+      status = 200
+      timeout = 30s
+    }
+  }
+  run "api-server start"
+}
 ```
 
-Here `migrate` and `web` start immediately. `api` waits for `migrate` to exit successfully and for `web` to pass its health check — no scripting required. Available dependency types include HTTP health checks, TCP connect, file exists, file contains, process exited, and their negations. See the [Config Format](#config-format) section below and the [Dependencies chapter](https://wbbradley.github.io/procman/dependencies.html) for the complete reference.
+Here `migrate` and `web` start immediately. `api` waits for `migrate` to exit successfully and for `web` to pass its health check — no scripting required. Available wait condition types include HTTP health checks, TCP connect, file exists, file contains, process exited (`after`), and their negations. See the [Config Format](#config-format) section below and the [Dependencies chapter](https://wbbradley.github.io/procman/dependencies.html) for the complete reference.
 
 ### `-e` / `--env` — inject environment variables
 
-A repeatable `-e KEY=VALUE` flag for ad-hoc environment variable injection without modifying the config file. Precedence (lowest → highest): system env → CLI `-e` → YAML `env:` block.
+A repeatable `-e KEY=VALUE` flag for ad-hoc environment variable injection without modifying the config file. Precedence (lowest → highest): system env → CLI `-e` → global `config { env { } }` → per-job `env` → per-iteration `for` bindings.
 
 ```bash
-procman myapp.yaml -e PORT=3000 -e RUST_LOG=debug
+procman myapp.pman -e PORT=3000 -e RUST_LOG=debug
 ```
 
 ### `--debug` — pause before shutdown
@@ -57,136 +61,156 @@ procman myapp.yaml -e PORT=3000 -e RUST_LOG=debug
 When a child process fails, procman pauses before sending SIGTERM, prints which process triggered the shutdown and which processes are still running, and waits for ENTER or Ctrl+C to proceed. Requires an interactive terminal.
 
 ```bash
-procman myapp.yaml --debug
+procman myapp.pman --debug
 ```
 
 ## Config Format
 
-```yaml
-config:
-  logs: ./my-logs    # optional: custom log directory (default: procman-logs)
-  args:              # optional: user-defined CLI arguments (parsed after --)
-    rust_log:
-      short: r
-      description: "RUST_LOG configuration"
-      type: string
-      default: "info"
-      env: RUST_LOG
-    enable_feature:
-      type: bool
-      default: false
-      env: FEATURE_ENABLED
+```
+config {
+  logs = "./my-logs"
 
-jobs:
-  web:
-    env:
-      PORT: "3000"
-    run: serve --port $PORT
+  env {
+    RUST_LOG = args.log_level
+  }
 
-  migrate:
-    run: db-migrate up
-    once: true
+  arg port {
+    type = string
+    default = "3000"
+    short = "p"
+    description = "Port to listen on"
+  }
 
-  api:
-    depends:
-      - process_exited: migrate
-      - url: http://localhost:3000/health
-        code: 200
-        poll_interval: 0.5
-        timeout_seconds: 30
-    run: api-server start
+  arg log_level {
+    type = string
+    default = "info"
+    short = "r"
+    description = "RUST_LOG configuration"
+  }
 
-  setup:
-    depends:
-      - path: /tmp/ready.flag
-    run: post-setup-task
+  arg enable_worker {
+    type = bool
+    default = false
+  }
+}
 
-  db:
-    depends:
-      - tcp: "127.0.0.1:5432"
-    run: db-client start
+job migrate {
+  once = true
+  run ```
+    ./run-migrations
+    echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
+  ```
+}
 
-  healthcheck:
-    depends:
-      - not_listening: "127.0.0.1:8080"
-      - not_exists: /tmp/api.lock
-      - not_running: "old-api.*"
-    run: api-server --port 8080
+job web {
+  env PORT = args.port
+  run "serve --port $PORT"
+}
 
-  optional-worker:
-    condition: test -n "$WORKER_ENABLED"
-    run: worker-service start
+job api {
+  env DB_URL = @migrate.DATABASE_URL
 
-  nodes:
-    for_each:
-      glob: "/etc/nodes/*.yaml"
-      as: NODE_CONFIG
-    run: node-agent --config $NODE_CONFIG
-    once: true
+  wait {
+    after @migrate
+    http "http://localhost:3000/health" {
+      status = 200
+      timeout = 30s
+      poll = 500ms
+    }
+  }
 
-  recovery:
-    run: ./scripts/recover.sh
-    autostart: false
+  run "api-server start --db $DB_URL"
+}
 
-  web-watched:
-    run: web-server --port 8080
-    watch:
-      - name: health
-        check:
-          url: http://localhost:8080/health
-          code: 200
-        initial_delay: 5.0
-        poll_interval: 10.0
-        failure_threshold: 3
-        on_fail: shutdown
-      - name: disk
-        check:
-          path: /var/run/healthy
-        on_fail:
-          spawn: recovery
+job db {
+  wait {
+    connect "127.0.0.1:5432"
+  }
+  run "db-client start"
+}
+
+job healthcheck {
+  wait {
+    !connect "127.0.0.1:8080"
+    !exists "/tmp/api.lock"
+    !running "old-api.*"
+  }
+  run "api-server --port 8080"
+}
+
+job worker if args.enable_worker {
+  run "worker-service start"
+}
+
+job nodes {
+  once = true
+  for config_path in glob("/etc/nodes/*.yaml") {
+    env NODE_CONFIG = config_path
+    run "node-agent --config $NODE_CONFIG"
+  }
+}
+
+job web-watched {
+  run "web-server --port 8080"
+
+  watch health {
+    http "http://localhost:8080/health" {
+      status = 200
+    }
+    initial_delay = 5s
+    poll = 10s
+    threshold = 3
+    on_fail shutdown
+  }
+
+  watch disk {
+    exists "/var/run/healthy"
+    on_fail spawn @recovery
+  }
+}
+
+event recovery {
+  run "./scripts/recover.sh"
+}
 ```
 
-The config file has two top-level keys:
+The config file contains top-level blocks in any order:
 
-- `config` (optional): global settings.
-  - `logs` (optional): custom log directory path (default: `procman-logs`).
-  - `args` (optional): map of user-defined CLI arguments parsed from argv after `--`. Each key is the arg name (underscores in YAML become dashes on the CLI, e.g. `rust_log` → `--rust-log`). Fields:
+- `config { }` (optional): global settings.
+  - `logs` (optional): custom log directory path (default: `procman-logs`). Recreated each run.
+  - `env { }` (optional): global environment variable bindings applied to all jobs. Overridable per-job.
+  - `arg name { }` (optional): user-defined CLI arguments parsed from argv after `--`. Underscores in names become dashes on the CLI (e.g. `log_level` → `--log-level`). Fields:
     - `type` (optional, default `string`): `string` or `bool`. String args take a value (`--name VALUE`), bool args are flags (`--name` = true).
-    - `short` (optional): single-character or short string for `-s` shorthand.
+    - `short` (optional): single-character shorthand for `-s` form.
     - `description` (optional): help text shown with `-- --help`.
     - `default` (optional): fallback value. Args without a default are required.
-    - `env` (optional): environment variable name to inject the arg value into (e.g. `env: RUST_LOG`).
-  - Arg values are available as `${{ args.var_name }}` templates in `run` and `env` fields.
-  - Env precedence (lowest → highest): system env → arg defaults → CLI `--` args → `-e` flags → YAML `env:` blocks.
-- `jobs` (required): map of job name to job definition.
+  - Arg values are referenced in expressions as `args.name`. There is no `env` field on args — use `config { env { } }` to explicitly bind args to environment variables.
+  - Env precedence (lowest → highest): system env → CLI `-e` → global `config { env { } }` → per-job `env` → per-iteration `for` bindings.
+- `job name { }` / `job name if expr { }` — process definitions.
+- `event name { }` — dormant processes, only started via `on_fail spawn @name`.
 
 Each job definition supports:
 
-- `run` (required): the command to execute. All commands are passed to `sh -euo pipefail -c`, so shell features (pipes, redirects, `&&`, variable expansion) work in both single-line and multi-line commands. The strict flags mean unset variable references and pipeline failures are treated as errors. Supports `${{ process.KEY }}` templates to reference output values from `once` dependencies, and `${{ args.name }}` to reference user-defined arg values.
-- `env` (optional): per-process environment variables (also supports `${{ }}` templates).
-  - `${{ args.name }}` templates are supported in `run`, `env`, `condition`, `for_each.glob`, dependency fields, and watch check fields.
-- `once` (optional): if `true`, the process exits cleanly on success (code 0) without triggering supervisor shutdown. Processes can write key-value pairs to `$PROCMAN_OUTPUT` for downstream template resolution.
-- `for_each` (optional): fan-out a template process across glob matches. Requires `glob` (pattern) and `as` (variable name). Each match spawns an instance with the variable set in env and substituted in the run string.
-- `depends` (optional): list of dependencies that must be satisfied before the process starts. Circular dependencies are detected at config parse time. Dependency fields (`url`, `tcp`, `path`, `file_contains.path`, `not_listening`, `not_exists`, `not_running`) support `$VAR` and `${VAR}` environment variable expansion (including per-process `env` overrides); use `$$` for a literal `$`.
-  - **HTTP health check**: `url` + `code` (expected status), with optional `poll_interval` and `timeout_seconds`.
-  - **TCP connect**: `tcp` (address:port), with optional `poll_interval` and `timeout_seconds`.
-  - **File exists**: `path` to a file that must exist.
-  - **File contains key**: `file_contains` with `path`, `format` (json/yaml), `key` (JSONPath expression per RFC 9535, e.g. `$.database.url`), and optional `env` (variable name to extract the value into). With optional `poll_interval` and `timeout_seconds`.
-  - **Process exited**: `process_exited` names a `once: true` process that must complete successfully before this process starts. Supports an expanded form for timeout control: `process_exited: { name: ..., timeout_seconds: 30 }`. Use `timeout_seconds: null` to wait indefinitely (the simple string form defaults to 60 seconds).
-  - **TCP not listening**: `not_listening` (address:port), with optional `poll_interval` and `timeout_seconds`. Waits until no service is accepting connections.
-  - **File not exists**: `not_exists` path that must not exist.
-  - **Process not running**: `not_running` pattern (matched via `pgrep -f`). Waits until no matching process is found.
-
-  All dependency types accept an optional `retry` (default `true`). Set `retry: false` to fail immediately if the dependency is not satisfied on the first check — useful to catch stale state (leftover lock files, ports still bound, zombie processes).
-- `condition` (optional): a shell command evaluated before spawning. If it exits non-zero, the job is skipped entirely. Runs via `sh -euo pipefail -c` in the process's resolved environment. Skipped `once: true` jobs are registered as exited so `process_exited` dependents can proceed. Supports `${{ args.name }}` templates.
-- `autostart` (optional, default `true`): if `false`, the process is dormant — it won't start until explicitly spawned via a watch `on_fail: spawn` action.
-- `watch` (optional): list of runtime health checks that monitor the process after it starts. Each watch polls a check (same types as dependencies) and takes an action when consecutive failures exceed the threshold.
-  - `name` (optional): human-readable name; auto-generated if omitted.
-  - `check` (required): same syntax as a dependency (HTTP, TCP, file exists, etc.).
-  - `initial_delay` (optional, default 0): seconds to wait before the first check.
-  - `poll_interval` (optional, default 5): seconds between checks.
-  - `failure_threshold` (optional, default 3): consecutive failures before triggering the action.
-  - `on_fail` (optional, default `shutdown`): action to take — `shutdown`, `debug`, `log`, or `spawn: <process_name>` (starts a dormant process with `PROCMAN_WATCH_*` env vars).
+- `run` (required): the command to execute. Inline `"..."` or fenced triple-backtick block. All commands are passed to `sh -euo pipefail -c`, so shell features (pipes, redirects, `&&`, variable expansion) work. The strict flags mean unset variable references and pipeline failures are treated as errors.
+- `env` (optional): per-job environment variables. Single `env KEY = expr` or `env { }` block. Supports `args.name` references and `@job.KEY` output references.
+- `once` (optional): if `true`, the process exits cleanly on success (code 0) without triggering supervisor shutdown. Processes can write key-value pairs to `$PROCMAN_OUTPUT` for downstream resolution via `@job.KEY`.
+- `for VAR in iterable { }` (optional): fan-out a job across an iterable. Supported iterables: `glob("pattern")`, `["a", "b"]`, `0..3` (exclusive range), `0..=3` (inclusive range). Each iteration spawns an instance with the variable bound.
+- `wait { }` (optional): block of conditions that must all be satisfied before `run` executes. Circular dependencies are detected at parse time. Condition types:
+  - `after @job` — wait for a `once = true` job to exit successfully.
+  - `http "url" { status = N }` — HTTP GET returns expected status, with optional `timeout` and `poll`.
+  - `connect "host:port"` — TCP port accepts connections.
+  - `!connect "host:port"` — TCP port stops accepting connections.
+  - `exists "path"` — file exists on disk.
+  - `!exists "path"` — file does not exist.
+  - `!running "pattern"` — no process matches pattern (`pgrep -f`).
+  - `contains "path" { format, key, var }` — file contains a key; optionally binds to a local `var`.
+  - All conditions accept optional `timeout` (default `60s`), `poll` (default `1s`), and `retry` (default `true`; `false` = fail immediately on first check).
+- `if expr` (optional, on the `job` line): expression evaluated before spawning. If falsy, the job is skipped entirely. Skipped `once = true` jobs register as exited so `after @job` dependents can proceed.
+- `watch name { }` (optional): named runtime health checks that monitor the job after it starts. Each watch polls a condition (same types as `wait`) and takes an action when consecutive failures exceed the threshold.
+  - `initial_delay` (optional, default `0s`): time before the first check.
+  - `poll` (optional, default `5s`): time between checks.
+  - `threshold` (optional, default `3`): consecutive failures before triggering the action.
+  - `on_fail` (optional, default `shutdown`): action — `shutdown`, `debug`, `log`, or `spawn @event_name`.
 
 ## Behavior
 

@@ -4,15 +4,15 @@
 
 Spawn all processes defined in the config file and wait for exit or signal.
 
-- **CONFIG** is a required positional argument — the path to the YAML config file.
+- **CONFIG** is a required positional argument — the path to the `.pman` config file.
 - Acquires an exclusive advisory lock on the config file to prevent concurrent instances.
 - On SIGINT or SIGTERM, initiates [graceful shutdown](shutdown.md).
 
 ```sh
-procman myapp.yaml
-procman myapp.yaml -e PORT=3000 -e RUST_LOG=debug
-procman myapp.yaml --debug
-procman myapp.yaml -- --rust-log debug --verbose
+procman myapp.pman
+procman myapp.pman -e PORT=3000 -e RUST_LOG=debug
+procman myapp.pman --debug
+procman myapp.pman -- --rust-log debug --verbose
 ```
 
 ## `-e` / `--env` — Extra environment variables
@@ -21,7 +21,7 @@ A repeatable `-e KEY=VALUE` flag to inject environment variables without modifyi
 config file.
 
 ```sh
-procman myapp.yaml -e PORT=3000 -e RUST_LOG=debug
+procman myapp.pman -e PORT=3000 -e RUST_LOG=debug
 ```
 
 ## `-- [ARGS]` — User-defined arguments
@@ -30,13 +30,13 @@ Arguments after `--` are parsed according to the `config.args` definitions in th
 file. See the [Configuration](configuration.md#configargs) chapter for how to define args.
 
 ```sh
-procman myapp.yaml -- --rust-log debug --enable-feature
+procman myapp.pman -- --rust-log debug --enable-feature
 ```
 
 Running `-- --help` prints generated usage based on the `config.args` definitions:
 
 ```sh
-procman myapp.yaml -- --help
+procman myapp.pman -- --help
 ```
 
 This shows each defined argument's name, type, description, default value, and short form.
@@ -47,7 +47,7 @@ The `--debug` flag pauses the shutdown sequence when a child process fails or a 
 times out, giving you time to inspect remaining processes before they are terminated.
 
 ```sh
-procman myapp.yaml --debug
+procman myapp.pman --debug
 ```
 
 When triggered, procman prints:
@@ -65,13 +65,13 @@ a TTY, procman exits immediately with an error.
 | Source | Priority |
 |--------|----------|
 | System environment | lowest |
-| Arg defaults (`config.args` `default` values) | |
-| CLI `--` args (parsed from `config.args`) | |
 | CLI `-e` flags | |
-| YAML `env:` blocks | highest |
+| Global `config { env { } }` | |
+| Per-job `env` | |
+| Per-iteration `for` bindings | highest |
 
-YAML `env:` values always win over `-e` flags, which win over `--` arg values, which win
-over arg defaults, which win over inherited system environment variables.
+Per-iteration `for` bindings win over per-job `env`, which wins over global `config { env { } }`,
+which wins over CLI `-e` flags, which win over inherited system environment variables.
 
 ## File locking
 
