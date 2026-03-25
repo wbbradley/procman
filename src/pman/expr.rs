@@ -253,6 +253,7 @@ impl<'a> ExprParser<'a> {
     }
 }
 
+#[cfg(test)]
 /// Convenience wrapper: parse a complete token slice as a single expression.
 pub fn parse_expr(tokens: &[Token]) -> Result<Expr> {
     let mut parser = ExprParser::new(tokens);
