@@ -464,7 +464,7 @@ All fatal — immediate shutdown:
 
 ## Full Example
 
-```
+~~~
 config {
   logs = "./my-logs"
 
@@ -570,4 +570,4 @@ job web-watched {
 event recovery {
   run "./scripts/recover.sh"
 }
-```
+~~~

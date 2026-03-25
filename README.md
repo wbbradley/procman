@@ -66,7 +66,7 @@ procman myapp.pman --debug
 
 ## Config Format
 
-```
+~~~
 config {
   logs = "./my-logs"
 
@@ -172,7 +172,7 @@ job web-watched {
 event recovery {
   run "./scripts/recover.sh"
 }
-```
+~~~
 
 The config file contains top-level blocks in any order:
 

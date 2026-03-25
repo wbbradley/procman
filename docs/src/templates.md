@@ -34,7 +34,7 @@ Reference another job's output with `@job.KEY` in `env` bindings. Values flow
 into shell via environment variables — procman never interpolates inside shell
 strings.
 
-```
+~~~
 job migrate {
   once = true
   run ```
@@ -52,7 +52,7 @@ job api {
 
   run "api-server --db $DB_URL"
 }
-```
+~~~
 
 The sequence:
 
