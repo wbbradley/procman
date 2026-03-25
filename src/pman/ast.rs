@@ -37,6 +37,7 @@ pub struct JobDef {
     pub name: String,
     pub condition: Option<Expr>,
     pub body: JobBody,
+    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -44,6 +45,7 @@ pub struct JobDef {
 pub struct EventDef {
     pub name: String,
     pub body: JobBody,
+    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -69,6 +71,7 @@ pub struct ForLoop {
     pub iterable: Iterable,
     pub env: Vec<EnvBinding>,
     pub run: ShellBlock,
+    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -84,18 +87,20 @@ pub enum Iterable {
 pub struct EnvBinding {
     pub key: String,
     pub value: Expr,
+    #[allow(dead_code)]
     pub span: Span,
 }
 
 #[derive(Debug)]
 pub enum ShellBlock {
     Inline(StringLit),
-    Fenced(String, Span),
+    Fenced(String, #[allow(dead_code)] Span),
 }
 
 #[derive(Debug)]
 pub struct StringLit {
     pub value: String,
+    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -103,6 +108,7 @@ pub struct StringLit {
 #[derive(Debug)]
 pub struct WaitBlock {
     pub conditions: Vec<WaitCondition>,
+    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -111,6 +117,7 @@ pub struct WaitCondition {
     pub negated: bool,
     pub kind: ConditionKind,
     pub options: ConditionOptions,
+    #[allow(dead_code)]
     pub span: Span,
 }
 
@@ -155,6 +162,7 @@ pub struct WatchDef {
     pub poll: Option<Expr>,
     pub threshold: Option<Expr>,
     pub on_fail: Option<OnFailAction>,
+    #[allow(dead_code)]
     pub span: Span,
 }
 
