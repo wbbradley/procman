@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.16.0] - 2026-03-24
+
+### Fixed
+- Glob for-loop `env` bindings (e.g., `env NODE_CONFIG = config_path` inside a `for ... in glob(...)` block) were silently dropped during lowering, leaving the variables unbound at runtime. Array and range iterables were unaffected.
+
 ## [0.15.2] - 2026-03-24
 
 ### Added
