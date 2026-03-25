@@ -1,19 +1,14 @@
-# Process Output Templates
+# Process Output
 
-Templates let processes pass data to each other. A `once: true` process writes key-value
-output, and downstream processes reference those values in their `run` command or `env` map.
+Every job receives a `PROCMAN_OUTPUT` environment variable pointing to a per-job
+output file at `procman-logs/<name>.output`. One-shot (`once = true`) jobs write
+data here; downstream jobs reference it with `@job.KEY` expressions.
 
-## PROCMAN_OUTPUT
-
-Every process receives a `PROCMAN_OUTPUT` environment variable pointing to a per-process output
-file at `procman-logs/<name>.output`. Processes can write key-value data to this file, which
-other processes can then read via template references.
-
-## Output file format
+## Output File Format
 
 The output file supports two formats:
 
-**Simple key-value lines:**
+**Simple key-value lines** — one per line, first `=` splits key from value:
 
 ```
 DATABASE_URL=postgres://localhost:5432/mydb
@@ -30,133 +25,33 @@ MIIBxTCCAWugAwIBAgIJALP...
 EOF
 ```
 
-The heredoc delimiter is arbitrary — `key<<DELIM` starts a block and a line containing only
-`DELIM` ends it.
+The heredoc delimiter is arbitrary — `KEY<<DELIM` starts a block and a line
+containing only `DELIM` ends it.
 
-## Template syntax
+## Referencing Output
 
-Reference another process's output with `${{ process.key }}`:
+Reference another job's output with `@job.KEY` in `env` bindings. Values flow
+into shell via environment variables — procman never interpolates inside shell
+strings.
 
-```yaml
-migrate:
-  run: ./run-migrations
-  once: true
-
-api:
-  depends:
-    - process_exited: migrate
-  env:
-    DB_URL: "${{ migrate.DATABASE_URL }}"
-  run: ./start-api --db "${{ migrate.DATABASE_URL }}"
 ```
-
-Templates can appear in both `run` and `env` values. Multiple template references can appear
-in a single string and can be mixed with literal text.
-
-> **Tip:** In multi-line `run` scripts (executed via `sh -euo pipefail -c`), quote template references to
-> protect against whitespace or special characters in resolved values:
->
-> ```yaml
-> run: |
->   echo "Connecting to ${{ migrate.DATABASE_URL }}"
->   exec ./start-api --db "${{ migrate.DATABASE_URL }}"
-> ```
-
-## Resolution
-
-Template resolution happens **at spawn time**, after all dependencies for the process are
-satisfied. The resolver:
-
-1. Reads the referenced process's output file (`procman-logs/<process>.output`).
-2. Parses it into a key-value map.
-3. Substitutes each `${{ process.key }}` with the corresponding value.
-
-If a referenced key is not found in the output file, resolution fails and the process is not
-started.
-
-## Validation rules
-
-Procman enforces three rules at parse time to catch template errors before any process starts:
-
-### Rule 1: Referenced process must exist
-
-```yaml
-app:
-  run: echo ${{ nonexistent.KEY }}  # Error: process 'nonexistent' does not exist
-```
-
-### Rule 2: Referenced process must be `once: true`
-
-Only `once: true` processes produce output that is guaranteed to be available. Referencing a
-long-running process is rejected:
-
-```yaml
-server:
-  run: ./start-server  # not once: true
-
-app:
-  run: echo ${{ server.PORT }}  # Error: process 'server' is not once: true
-```
-
-### Rule 3: Referencing process must depend on the referenced process
-
-The referencing process must have a `process_exited` dependency (direct or transitive) on the
-referenced process. This guarantees the output file exists when templates are resolved:
-
-```yaml
-setup:
-  run: ./setup
-  once: true
-
-app:
-  run: echo ${{ setup.KEY }}  # Error: no process_exited dependency on 'setup'
-```
-
-Transitive dependencies are followed — if `app` depends on `middle` and `middle` depends on
-`setup`, then `app` can reference `setup`'s output.
-
-## file_contains with env
-
-The `file_contains` dependency type offers an alternative way to pass data between processes.
-When the `env` field is specified, the value at the given key is extracted and injected as an
-environment variable:
-
-```yaml
-setup:
-  run: ./generate-config
-  once: true
-
-api:
-  depends:
-    - process_exited: setup
-    - file_contains:
-        path: procman-logs/setup.output
-        format: yaml
-        key: "$.database.url"
-        env: DATABASE_URL
-  run: ./start-api
-```
-
-This approach does not require template syntax — the value is available as a regular
-environment variable (`$DATABASE_URL`).
-
-## End-to-end example
-
-A migration process writes a database URL, and the API server reads it via a template:
-
-```yaml
-migrate:
-  run: |
+job migrate {
+  once = true
+  run ```
     ./run-migrations
     echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
-  once: true
+  ```
+}
 
-api:
-  depends:
-    - process_exited: migrate
-  env:
-    DB_URL: "${{ migrate.DATABASE_URL }}"
-  run: ./start-api --db "${{ migrate.DATABASE_URL }}"
+job api {
+  env DB_URL = @migrate.DATABASE_URL
+
+  wait {
+    after @migrate
+  }
+
+  run "api-server --db $DB_URL"
+}
 ```
 
 The sequence:
@@ -164,7 +59,69 @@ The sequence:
 1. `migrate` starts and runs migrations.
 2. `migrate` writes `DATABASE_URL=postgres://...` to its `$PROCMAN_OUTPUT` file.
 3. `migrate` exits with code 0 — procman marks it as complete.
-4. `api`'s `process_exited: migrate` dependency is satisfied.
-5. Procman resolves `${{ migrate.DATABASE_URL }}` by reading `migrate`'s output file.
-6. `api` starts with `DB_URL` set in its environment and the URL substituted into its `run`
-   command.
+4. `api`'s `after @migrate` condition is satisfied.
+5. Procman resolves `@migrate.DATABASE_URL` by reading `migrate`'s output file.
+6. `api` starts with `DB_URL` set in its environment.
+
+## Resolution
+
+Output resolution happens **at spawn time**, after all `wait` conditions for the
+job are satisfied. The resolver:
+
+1. Reads the referenced job's output file (`procman-logs/<job>.output`).
+2. Parses it into a key-value map.
+3. Substitutes each `@job.KEY` reference with the corresponding value.
+
+If a referenced key is not found in the output file, resolution fails and the
+job is not started.
+
+## Validation Rules
+
+Procman enforces three rules at parse time to catch output reference errors
+before any job starts:
+
+### Rule 1: Referenced job must exist
+
+```
+job app {
+  env KEY = @nonexistent.KEY  # Error: job 'nonexistent' does not exist
+  run "echo $KEY"
+}
+```
+
+### Rule 2: Referenced job must be `once = true`
+
+Only `once = true` jobs produce output that is guaranteed to be available.
+Referencing a long-running job is rejected:
+
+```
+job server {
+  run "start-server"  # not once = true
+}
+
+job app {
+  env PORT = @server.PORT  # Error: job 'server' is not once = true
+  run "echo $PORT"
+}
+```
+
+### Rule 3: Referencing job must have `after @job` in its `wait` block
+
+The referencing job must have an `after` condition (direct or transitive) on the
+referenced job. This guarantees the output file exists when references are
+resolved:
+
+```
+job setup {
+  once = true
+  run "echo KEY=value > $PROCMAN_OUTPUT"
+}
+
+job app {
+  env KEY = @setup.KEY  # Error: no 'after @setup' in wait block
+  run "echo $KEY"
+}
+```
+
+Transitive dependencies are followed — if `app` waits on `middle` and `middle`
+waits on `setup`, then `app` can reference `setup`'s output.

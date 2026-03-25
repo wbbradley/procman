@@ -1,67 +1,127 @@
-# Fan-out (`for_each` glob)
+# Fan-out
 
-The `for_each` field lets you spawn one process instance per glob match. This is useful when the
-number of configuration files (or similar inputs) is not known at authoring time.
+The `for` block lives inside a job and wraps `env` and `run`. It iterates over a
+typed iterable, binding a local variable per iteration — one process instance is
+spawned for each element.
 
-## YAML syntax
+## Basic Example
 
-Add a `for_each` block to a process definition with two required sub-fields:
+```
+job nodes {
+  once = true
 
-| Field  | Description |
+  for config_path in glob("configs/node-*.yaml") {
+    env NODE_CONFIG = config_path
+    run "start-node --config $NODE_CONFIG"
+  }
+}
+```
+
+This spawns one instance per matching file, each with its own `NODE_CONFIG`
+environment variable.
+
+## Iterable Types
+
+| Syntax | Description |
 |--------|-------------|
-| `glob` | A glob pattern (e.g. `"/etc/nodes/*.yaml"`). |
-| `as`   | The name of the variable that receives each matched path. |
+| `glob("pattern")` | File glob, evaluated at runtime (after `wait` conditions are satisfied), sorted lexicographically. Zero matches is a runtime error. |
+| `["a", "b", "c"]` | Literal array of strings |
+| `0..3` | Exclusive range: 0, 1, 2 |
+| `0..=3` | Inclusive range: 0, 1, 2, 3 |
 
-```yaml
-nodes:
-  for_each:
-    glob: "/etc/nodes/*.yaml"
-    as: CONFIG_PATH
-  run: node-agent --config $CONFIG_PATH
-  once: true
+### `glob()`
+
+```
+job nodes {
+  once = true
+  for config_path in glob("configs/node-*.yaml") {
+    env NODE_CONFIG = config_path
+    run "start-node --config $NODE_CONFIG"
+  }
+}
 ```
 
-## Variable substitution
+### Literal array
 
-For each glob match the `as` variable is:
-
-1. Set in the instance's **environment** so the child process can read it directly.
-2. Substituted into the `run` string — both `$VAR` and `${VAR}` forms are replaced with the
-   matched path before the command is executed.
-
-## Instance naming
-
-Glob results are sorted lexicographically. Each instance is named
-`{template_name}-{index}` where the index is **0-based**. For the example above, three matches
-would produce processes named `nodes-0`, `nodes-1`, and `nodes-2`.
-
-## Group completion
-
-A `process_exited` dependency can reference the **template name** (e.g. `nodes`). The dependency
-is satisfied only when **all** instances have exited successfully (exit code 0). This lets you
-gate a downstream process on the entire fan-out group completing:
-
-```yaml
-nodes:
-  for_each:
-    glob: "/etc/nodes/*.yaml"
-    as: CONFIG_PATH
-  run: provision --config $CONFIG_PATH
-  once: true
-
-deploy:
-  depends:
-    - process_exited: nodes
-  run: deploy-cluster
-  once: true
+```
+job services {
+  once = true
+  for svc in ["auth", "billing", "notifications"] {
+    env SERVICE = svc
+    run "deploy-service $SERVICE"
+  }
+}
 ```
 
-Here `deploy` will not start until every `nodes-*` instance has completed successfully.
+### Range
 
-## Constraints
+```
+job workers {
+  for i in 0..4 {
+    env WORKER_ID = i
+    run "worker --id $WORKER_ID"
+  }
+}
+```
 
-- **Zero matches is an error.** If the glob pattern matches no files, procman exits with an
-  error rather than silently doing nothing.
-- **`once: true` is typical.** Fan-out processes usually represent one-shot tasks (provisioning,
-  migration, etc.). Without `once: true`, any instance exiting would trigger shutdown of the
-  entire process group.
+## Instance Naming
+
+Instances are named `{job_name}-{index}` where the index is **0-based**. For the
+`nodes` example with three glob matches, the instances are `nodes-0`, `nodes-1`,
+and `nodes-2`.
+
+## Group Completion
+
+An `after @nodes` condition in another job's `wait` block is satisfied only when
+**all** instances have exited successfully (exit code 0). This lets you gate a
+downstream job on the entire fan-out group completing:
+
+```
+job nodes {
+  once = true
+  for config_path in glob("configs/node-*.yaml") {
+    env NODE_CONFIG = config_path
+    run "provision --config $NODE_CONFIG"
+  }
+}
+
+job deploy {
+  once = true
+
+  wait {
+    after @nodes
+  }
+
+  run "deploy-cluster"
+}
+```
+
+Here `deploy` will not start until every `nodes-*` instance has completed
+successfully.
+
+## Env Inheritance
+
+`env` bindings outside the `for` block apply to all instances. Bindings inside
+are per-iteration:
+
+```
+job nodes {
+  env CLUSTER = "prod"
+
+  for config_path in glob("configs/*.yaml") {
+    env NODE_CONFIG = config_path
+    run "start-node --config $NODE_CONFIG --cluster $CLUSTER"
+  }
+}
+```
+
+All instances share `CLUSTER=prod`, but each gets its own `NODE_CONFIG`.
+
+## Scoping
+
+- The iteration variable is scoped to the `for` block
+- It shares the local variable namespace with `var` bindings from `contains`
+  conditions
+- `args.x` and `@job.KEY` have distinct syntactic prefixes and cannot collide
+  with bare local names
+- Shadowing any existing local variable name is a parse-time error
