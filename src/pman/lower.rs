@@ -378,7 +378,7 @@ fn lower_wait_condition(
                 "yaml" => FileFormat::Yaml,
                 other => bail!(
                     "{}",
-                    key.span
+                    cond.span
                         .fmt_error(path, &format!("unsupported format: {other:?}"))
                 ),
             };
