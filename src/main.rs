@@ -49,6 +49,9 @@ struct Cli {
     /// Pause shutdown on child failure for interactive debugging
     #[arg(long)]
     debug: bool,
+    /// Validate the config file and exit without starting processes
+    #[arg(long)]
+    check: bool,
     /// Arguments for config-defined args (passed after --)
     #[arg(last = true)]
     user_args: Vec<String>,
@@ -77,6 +80,7 @@ fn run_supervisor(
     extra_env: HashMap<String, String>,
     user_args: Vec<String>,
     debug: bool,
+    check: bool,
 ) -> Result<()> {
     if debug {
         anyhow::ensure!(
@@ -118,6 +122,11 @@ fn run_supervisor(
         config_parser::parse(&config_path, &merged_env, &arg_values)?
     };
 
+    if check {
+        println!("{config_path}: ok");
+        return Ok(());
+    }
+
     let (shutdown, signal_triggered) = signal::setup()?;
 
     let mut names: Vec<String> = configs.iter().map(|c| c.name.clone()).collect();
@@ -154,7 +163,7 @@ fn run_supervisor(
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let extra_env = parse_env_args(&cli.env)?;
-    run_supervisor(cli.file, extra_env, cli.user_args, cli.debug)
+    run_supervisor(cli.file, extra_env, cli.user_args, cli.debug, cli.check)
 }
 
 #[cfg(test)]
@@ -202,5 +211,25 @@ mod tests {
         assert!(is_pman_file("myapp.pman"));
         assert!(!is_pman_file("myapp.yaml"));
         assert!(!is_pman_file("myapp.yml"));
+    }
+
+    #[test]
+    fn check_flag_valid_pman() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.pman");
+        std::fs::write(&path, r#"job web { run "echo hello" }"#).unwrap();
+        let config_path = path.to_str().unwrap().to_string();
+        let result = run_supervisor(config_path, HashMap::new(), vec![], false, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn check_flag_invalid_pman() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.pman");
+        std::fs::write(&path, "this is not valid pman syntax !!!").unwrap();
+        let config_path = path.to_str().unwrap().to_string();
+        let result = run_supervisor(config_path, HashMap::new(), vec![], false, true);
+        assert!(result.is_err());
     }
 }
