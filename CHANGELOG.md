@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.16.1] - 2026-03-26
+
+### Added
+- `--check` flag: validates the config file (parsing, arg definitions, template resolution, dependency cycle detection, all static checks) and exits with `<path>: ok` on success, without starting any processes. Useful for CI linting and editor integration.
+
+### Changed
+- Error messages from the `.pman` parser and lexer now use a standardized `<file>:<line>:<col>: error: <description>` format, matching common compiler diagnostic conventions for editor gutter integration.
+
 ## [0.16.0] - 2026-03-24
 
 ### Fixed
