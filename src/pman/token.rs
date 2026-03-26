@@ -10,7 +10,7 @@ pub struct Span {
 impl Span {
     /// Format an error message with file location.
     pub fn fmt_error(&self, path: &str, msg: &str) -> String {
-        format!("{path}:{}:{}: {msg}", self.line, self.col)
+        format!("{path}:{}:{}: error: {msg}", self.line, self.col)
     }
 }
 
