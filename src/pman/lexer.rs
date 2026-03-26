@@ -7,15 +7,17 @@ struct Lexer<'a> {
     pos: usize,
     line: usize,
     col: usize,
+    path: &'a str,
 }
 
 impl<'a> Lexer<'a> {
-    fn new(input: &'a str, start_line: usize, start_col: usize) -> Self {
+    fn new(input: &'a str, start_line: usize, start_col: usize, path: &'a str) -> Self {
         Lexer {
             input: input.as_bytes(),
             pos: 0,
             line: start_line,
             col: start_col,
+            path,
         }
     }
 
@@ -75,7 +77,12 @@ impl<'a> Lexer<'a> {
         let content_start = self.pos;
         loop {
             if self.at_end() {
-                bail!("{}:{}: unterminated fenced string", start_line, start_col);
+                bail!(
+                    "{}:{}:{}: error: unterminated fenced string",
+                    self.path,
+                    start_line,
+                    start_col
+                );
             }
             if self.starts_with(b"```") {
                 let content =
@@ -110,7 +117,12 @@ impl<'a> Lexer<'a> {
         let mut value = String::new();
         loop {
             if self.at_end() {
-                bail!("{}:{}: unterminated string", start_line, start_col);
+                bail!(
+                    "{}:{}:{}: error: unterminated string",
+                    self.path,
+                    start_line,
+                    start_col
+                );
             }
             let ch = self.advance();
             match ch {
@@ -127,7 +139,12 @@ impl<'a> Lexer<'a> {
                 }
                 b'\\' => {
                     if self.at_end() {
-                        bail!("{}:{}: unterminated string", start_line, start_col);
+                        bail!(
+                            "{}:{}:{}: error: unterminated string",
+                            self.path,
+                            start_line,
+                            start_col
+                        );
                     }
                     let esc = self.advance();
                     match esc {
@@ -441,7 +458,8 @@ impl<'a> Lexer<'a> {
             b'.' => TokenKind::Dot,
             b'@' => TokenKind::At,
             _ => bail!(
-                "{}:{}: unexpected character '{}'",
+                "{}:{}:{}: error: unexpected character '{}'",
+                self.path,
                 start_line,
                 start_col,
                 ch as char
@@ -462,8 +480,8 @@ fn is_ident_char(ch: u8) -> bool {
 ///
 /// `start_line` and `start_col` are 1-based offsets applied to the first
 /// character — pass `(1, 1)` when lexing from the beginning of a file.
-pub fn lex(input: &str, start_line: usize, start_col: usize) -> Result<Vec<Token>> {
-    let mut lexer = Lexer::new(input, start_line, start_col);
+pub fn lex(input: &str, start_line: usize, start_col: usize, path: &str) -> Result<Vec<Token>> {
+    let mut lexer = Lexer::new(input, start_line, start_col, path);
     let mut tokens = Vec::new();
     while let Some(tok) = lexer.next_token()? {
         tokens.push(tok);
@@ -476,7 +494,7 @@ mod tests {
     use super::*;
 
     fn kinds(input: &str) -> Vec<TokenKind> {
-        lex(input, 1, 1)
+        lex(input, 1, 1, "test.pman")
             .unwrap()
             .into_iter()
             .map(|t| t.kind)
@@ -628,7 +646,7 @@ mod tests {
 
     #[test]
     fn lex_span_tracks_line_and_col() {
-        let tokens = lex("job\n  web", 1, 1).unwrap();
+        let tokens = lex("job\n  web", 1, 1, "test.pman").unwrap();
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].span.line, 1);
         assert_eq!(tokens[0].span.col, 1);
@@ -638,19 +656,22 @@ mod tests {
 
     #[test]
     fn lex_error_includes_line_col() {
-        let err = lex("job\n\"hello", 1, 1).unwrap_err();
+        let err = lex("job\n\"hello", 1, 1, "test.pman").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("2:"), "expected line 2 in error: {msg}");
+        assert!(
+            msg.contains("test.pman:2:1: error:"),
+            "expected full location in error: {msg}"
+        );
     }
 
     #[test]
     fn lex_unterminated_string_errors() {
-        assert!(lex(r#""hello"#, 1, 1).is_err());
+        assert!(lex(r#""hello"#, 1, 1, "test.pman").is_err());
     }
 
     #[test]
     fn lex_unterminated_fenced_errors() {
-        assert!(lex("```\nhello", 1, 1).is_err());
+        assert!(lex("```\nhello", 1, 1, "test.pman").is_err());
     }
 
     #[test]
@@ -660,7 +681,7 @@ mod tests {
 
     #[test]
     fn lex_start_offset() {
-        let tokens = lex("foo", 5, 10).unwrap();
+        let tokens = lex("foo", 5, 10, "test.pman").unwrap();
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].span.line, 5);
         assert_eq!(tokens[0].span.col, 10);

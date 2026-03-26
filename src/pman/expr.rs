@@ -8,11 +8,16 @@ use crate::pman::{
 pub struct ExprParser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    path: &'a str,
 }
 
 impl<'a> ExprParser<'a> {
-    pub fn new(tokens: &'a [Token]) -> Self {
-        Self { tokens, pos: 0 }
+    pub fn new(tokens: &'a [Token], path: &'a str) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            path,
+        }
     }
 
     pub fn parse(&mut self) -> Result<Expr> {
@@ -55,18 +60,21 @@ impl<'a> ExprParser<'a> {
     fn expect(&mut self, expected: &TokenKind) -> Result<&Token> {
         if self.at_end() {
             bail!(
-                "{}: expected {:?}, got end of input",
-                fmt_span(self.span()),
-                expected
+                "{}",
+                self.span().fmt_error(
+                    self.path,
+                    &format!("expected {:?}, got end of input", expected)
+                )
             );
         }
         let tok = &self.tokens[self.pos];
         if &tok.kind != expected {
             bail!(
-                "{}: expected {:?}, got {:?}",
-                fmt_span(tok.span),
-                expected,
-                tok.kind
+                "{}",
+                tok.span.fmt_error(
+                    self.path,
+                    &format!("expected {:?}, got {:?}", expected, tok.kind)
+                )
             );
         }
         self.pos += 1;
@@ -134,8 +142,9 @@ impl<'a> ExprParser<'a> {
     fn parse_atom(&mut self) -> Result<Expr> {
         if self.at_end() {
             bail!(
-                "{}: expected expression, got end of input",
-                fmt_span(self.span())
+                "{}",
+                self.span()
+                    .fmt_error(self.path, "expected expression, got end of input")
             );
         }
 
@@ -170,8 +179,8 @@ impl<'a> ExprParser<'a> {
                 self.expect(&TokenKind::Dot)?;
                 if self.at_end() {
                     bail!(
-                        "{}: expected identifier after 'args.'",
-                        fmt_span(start_span)
+                        "{}",
+                        start_span.fmt_error(self.path, "expected identifier after 'args.'")
                     );
                 }
                 match self.peek().unwrap().clone() {
@@ -182,9 +191,11 @@ impl<'a> ExprParser<'a> {
                     }
                     other => {
                         bail!(
-                            "{}: expected identifier after 'args.', got {:?}",
-                            fmt_span(self.span()),
-                            other
+                            "{}",
+                            self.span().fmt_error(
+                                self.path,
+                                &format!("expected identifier after 'args.', got {:?}", other)
+                            )
                         );
                     }
                 }
@@ -193,7 +204,10 @@ impl<'a> ExprParser<'a> {
             TokenKind::At => {
                 let start_span = self.advance().span;
                 if self.at_end() {
-                    bail!("{}: expected identifier after '@'", fmt_span(start_span));
+                    bail!(
+                        "{}",
+                        start_span.fmt_error(self.path, "expected identifier after '@'")
+                    );
                 }
                 let job_name = match self.peek().unwrap().clone() {
                     TokenKind::Ident(name) => {
@@ -202,17 +216,20 @@ impl<'a> ExprParser<'a> {
                     }
                     other => {
                         bail!(
-                            "{}: expected job name after '@', got {:?}",
-                            fmt_span(self.span()),
-                            other
+                            "{}",
+                            self.span().fmt_error(
+                                self.path,
+                                &format!("expected job name after '@', got {:?}", other)
+                            )
                         );
                     }
                 };
                 self.expect(&TokenKind::Dot)?;
                 if self.at_end() {
                     bail!(
-                        "{}: expected key after '@{job_name}.'",
-                        fmt_span(self.span())
+                        "{}",
+                        self.span()
+                            .fmt_error(self.path, &format!("expected key after '@{job_name}.'"))
                     );
                 }
                 match self.peek().unwrap().clone() {
@@ -223,9 +240,11 @@ impl<'a> ExprParser<'a> {
                     }
                     other => {
                         bail!(
-                            "{}: expected key after '@{job_name}.', got {:?}",
-                            fmt_span(self.span()),
-                            other
+                            "{}",
+                            self.span().fmt_error(
+                                self.path,
+                                &format!("expected key after '@{job_name}.', got {:?}", other)
+                            )
                         );
                     }
                 }
@@ -244,9 +263,11 @@ impl<'a> ExprParser<'a> {
             }
             other => {
                 bail!(
-                    "{}: unexpected token in expression: {:?}",
-                    fmt_span(self.span()),
-                    other
+                    "{}",
+                    self.span().fmt_error(
+                        self.path,
+                        &format!("unexpected token in expression: {:?}", other)
+                    )
                 );
             }
         }
@@ -255,14 +276,19 @@ impl<'a> ExprParser<'a> {
 
 #[cfg(test)]
 /// Convenience wrapper: parse a complete token slice as a single expression.
-pub fn parse_expr(tokens: &[Token]) -> Result<Expr> {
-    let mut parser = ExprParser::new(tokens);
+pub fn parse_expr(tokens: &[Token], path: &str) -> Result<Expr> {
+    let mut parser = ExprParser::new(tokens, path);
     let expr = parser.parse()?;
     if !parser.at_end() {
         bail!(
-            "{}: unexpected token after expression: {:?}",
-            fmt_span(parser.span()),
-            parser.peek().unwrap()
+            "{}",
+            parser.span().fmt_error(
+                path,
+                &format!(
+                    "unexpected token after expression: {:?}",
+                    parser.peek().unwrap()
+                )
+            )
         );
     }
     Ok(expr)
@@ -292,18 +318,14 @@ fn merge_spans(a: Span, b: Span) -> Span {
     }
 }
 
-fn fmt_span(span: Span) -> String {
-    format!("{}:{}", span.line, span.col)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pman::lexer::lex;
 
     fn parse(input: &str) -> Expr {
-        let tokens = lex(input, 1, 1).unwrap();
-        parse_expr(&tokens).unwrap()
+        let tokens = lex(input, 1, 1, "test.pman").unwrap();
+        parse_expr(&tokens, "test.pman").unwrap()
     }
 
     #[test]

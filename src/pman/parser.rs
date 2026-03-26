@@ -89,7 +89,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr> {
-        let mut ep = ExprParser::new(&self.tokens[self.pos..]);
+        let mut ep = ExprParser::new(&self.tokens[self.pos..], self.path);
         let expr = ep.parse()?;
         self.pos += ep.pos();
         Ok(expr)
@@ -861,7 +861,7 @@ impl<'a> Parser<'a> {
 }
 
 pub fn parse(input: &str, path: &str) -> Result<ast::File> {
-    let tokens = lexer::lex(input, 1, 1)?;
+    let tokens = lexer::lex(input, 1, 1, path)?;
     let mut parser = Parser::new(tokens, path);
     parser.parse_file()
 }

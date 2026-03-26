@@ -597,6 +597,6 @@ job web { run "other" }"#;
             msg.contains("test.pman:"),
             "expected file location in error: {msg}"
         );
-        assert!(msg.contains("duplicate job name"), "got: {msg}");
+        assert!(msg.contains("error: duplicate job name"), "got: {msg}");
     }
 }
