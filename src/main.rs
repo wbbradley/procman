@@ -21,20 +21,23 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(
     version,
-    about = "A process supervisor driven by a YAML config file",
+    about = "A process supervisor driven by a .pman config file",
     after_help = "\
 EXAMPLES:
     # Run all jobs defined in a config file
-    procman procman.yaml
+    procman myapp.pman
 
     # Pass extra environment variables
-    procman myfile.yaml -e PORT=3000 -e DEBUG=1
+    procman myapp.pman -e PORT=3000 -e DEBUG=1
 
     # Pass user-defined args (defined in config args: section)
-    procman myfile.yaml -- --rust-log debug --enable-feature
+    procman myapp.pman -- --rust-log debug --enable-feature
 
     # Pause shutdown on child failure for interactive debugging
-    procman procman.yaml --debug
+    procman myapp.pman --debug
+
+    # Validate the config file and exit without starting processes
+    procman myapp.pman --check
 
 SIGNALS:
     On SIGINT or SIGTERM, all children receive SIGTERM. After a 2-second
