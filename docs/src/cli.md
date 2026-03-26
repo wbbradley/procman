@@ -12,6 +12,7 @@ Spawn all processes defined in the config file and wait for exit or signal.
 procman myapp.pman
 procman myapp.pman -e PORT=3000 -e RUST_LOG=debug
 procman myapp.pman --debug
+procman myapp.pman --check                     # validate config and exit
 procman myapp.pman -- --rust-log debug --verbose
 ```
 
@@ -40,6 +41,26 @@ procman myapp.pman -- --help
 ```
 
 This shows each defined argument's name, type, description, default value, and short form.
+
+## `--check` — Validate config and exit
+
+The `--check` flag runs the full config parse and validation pipeline — arg definitions,
+template resolution, dependency graph cycle detection, output reference validation, watch
+uniqueness, and all other static checks — then prints a success message and exits without
+starting any processes.
+
+```sh
+procman myapp.pman --check
+```
+
+On success, prints `<path>: ok` and exits with code 0. On failure, prints the error and exits
+non-zero. This is useful for:
+
+- **Editor integration** — run `--check` on save for instant feedback.
+- **CI pipelines** — catch config errors before deployment.
+- **Quick validation** — verify a config without spawning anything.
+
+No signal handlers, loggers, or processes are created.
 
 ## `--debug` — Pause before shutdown
 

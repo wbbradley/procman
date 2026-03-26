@@ -16,6 +16,7 @@ procman myapp.pman                             # run all jobs
 procman myapp.pman -e PORT=3000 -e RUST_LOG=debug  # inject env vars
 procman myapp.pman -- --rust-log debug --verbose   # pass config-defined args
 procman myapp.pman --debug                     # pause before shutdown on failure
+procman myapp.pman --check                     # validate config and exit
 ```
 
 The first positional argument is the path to the config file (required). Arguments after `--` are parsed according to `config { arg ... { } }` definitions (see below).
@@ -54,6 +55,16 @@ A repeatable `-e KEY=VALUE` flag for ad-hoc environment variable injection witho
 
 ```bash
 procman myapp.pman -e PORT=3000 -e RUST_LOG=debug
+```
+
+### `--check` — validate config and exit
+
+Runs the full parse and validation pipeline (arg definitions, template resolution, dependency
+cycle detection, and all static checks) then prints `<path>: ok` and exits 0. No processes are
+started. Useful for editor integration and CI linting.
+
+```bash
+procman myapp.pman --check
 ```
 
 ### `--debug` — pause before shutdown
