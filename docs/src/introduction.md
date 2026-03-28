@@ -12,7 +12,7 @@ exits or a signal arrives, procman tears everything down cleanly.
   job before starting.
 - **Multiplexed output** — every line is prefixed with the originating job
   name, right-aligned for easy scanning.
-- **Per-process log files** — each job gets its own log in `logs/`,
+- **Per-process log files** — each job gets its own log in `logs/procman`,
   plus a combined `procman.log`.
 - **Process output** — a `once = true` job can write `KEY=VALUE` pairs to
   `$PROCMAN_OUTPUT`; downstream jobs reference them with `@job.KEY` syntax.

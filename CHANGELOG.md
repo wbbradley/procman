@@ -57,7 +57,7 @@
 - Config file path is now a required positional argument (no default).
 
 ### Added
-- `config.logs` option to customize the log directory path (default: `procman-logs`).
+- `config.logs` option to customize the log directory path (default: `logs/procman`).
 
 ### Removed
 - `fifo.rs`, `fifo_path.rs`, FIFO-based IPC, advisory flock, `shell-words` dependency.
@@ -187,7 +187,7 @@
 ## [0.5.1] - 2026-03-18
 
 ### Added
-- Combined log file: all formatted log output (the `"name | line"` view shown on stdout) is now also written to `procman-logs/procman.log`, providing a single file with interleaved output from all processes.
+- Combined log file: all formatted log output (the `"name | line"` view shown on stdout) is now also written to `logs/procman/procman.log`, providing a single file with interleaved output from all processes.
 
 ### Changed
 - The internal "procman" pseudo-process no longer produces a redundant per-process log file; its output is captured in the combined `procman.log` instead.

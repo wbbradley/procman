@@ -18,17 +18,17 @@ The name column width adjusts to the longest process name so that all `|` separa
 
 ## Log directory
 
-At startup, procman creates (or recreates) a `procman-logs/` directory in the current working
-directory. Any existing `procman-logs/` directory is removed first to ensure a clean state.
+At startup, procman creates (or recreates) a `logs/procman/` directory in the current working
+directory. Any existing `logs/procman/` directory is removed first to ensure a clean state.
 
 ## Combined log
 
-`procman-logs/procman.log` contains every line from every process, in the same right-aligned
+`logs/procman/procman.log` contains every line from every process, in the same right-aligned
 format as the terminal output. This is a complete record of the session.
 
 ## Per-process logs
 
-Each process gets its own log file at `procman-logs/<name>.log`. These files contain only that
+Each process gets its own log file at `logs/procman/<name>.log`. These files contain only that
 process's output lines with **no name prefix** — just the raw output. This makes them easy to
 feed into other tools or search with `grep`.
 

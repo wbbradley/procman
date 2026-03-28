@@ -1,7 +1,7 @@
 # Process Output
 
 Every job receives a `PROCMAN_OUTPUT` environment variable pointing to a per-job
-output file at `procman-logs/<name>.output`. One-shot (`once = true`) jobs write
+output file at `logs/procman/<name>.output`. One-shot (`once = true`) jobs write
 data here; downstream jobs reference it with `@job.KEY` expressions.
 
 ## Output File Format
@@ -68,7 +68,7 @@ The sequence:
 Output resolution happens **at spawn time**, after all `wait` conditions for the
 job are satisfied. The resolver:
 
-1. Reads the referenced job's output file (`procman-logs/<job>.output`).
+1. Reads the referenced job's output file (`logs/procman/<job>.output`).
 2. Parses it into a key-value map.
 3. Substitutes each `@job.KEY` reference with the corresponding value.
 
