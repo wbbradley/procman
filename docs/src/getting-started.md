@@ -39,11 +39,11 @@ making it easy to scan which process produced each line.
 
 ## Log Files
 
-procman automatically writes logs to a `procman-logs/` directory:
+procman automatically writes logs to a `logs/` directory:
 
-- `procman-logs/web.log` — output from the `web` job
-- `procman-logs/api.log` — output from the `api` job
-- `procman-logs/procman.log` — combined output from all jobs
+- `logs/web.log` — output from the `web` job
+- `logs/api.log` — output from the `api` job
+- `logs/procman.log` — combined output from all jobs
 
 These files are created fresh on each run.
 

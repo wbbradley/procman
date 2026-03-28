@@ -177,7 +177,7 @@ event recovery {
 The config file contains top-level blocks in any order:
 
 - `config { }` (optional): global settings.
-  - `logs` (optional): custom log directory path (default: `procman-logs`). Recreated each run.
+  - `logs` (optional): custom log directory path (default: `logs`). Recreated each run.
   - `env { }` (optional): global environment variable bindings applied to all jobs. Overridable per-job.
   - `arg name { }` (optional): user-defined CLI arguments parsed from argv after `--`. Underscores in names become dashes on the CLI (e.g. `log_level` → `--log-level`). Fields:
     - `type` (optional, default `string`): `string` or `bool`. String args take a value (`--name VALUE`), bool args are flags (`--name` = true).
@@ -217,7 +217,7 @@ Each job definition supports:
 - Each child runs in its own process group; shutdown signals reach all descendants.
 - stderr is merged into stdout per-process.
 - Output is prefixed with the process name, right-aligned and padded.
-- Per-process logs are written to `<log_dir>/<name>.log` (directory is recreated each run; default `./procman-logs/`).
+- Per-process logs are written to `<log_dir>/<name>.log` (directory is recreated each run; default `./logs/`).
 - A combined `<log_dir>/procman.log` contains the full interleaved formatted output (same as stdout).
 - On SIGINT or SIGTERM, all children receive SIGTERM. After a 2-second grace period, remaining processes are sent SIGKILL.
 - procman exits with the first child's exit code.

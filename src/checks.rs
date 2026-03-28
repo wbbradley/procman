@@ -118,8 +118,6 @@ pub fn poll_interval(dep: &Dependency) -> Duration {
     }
 }
 
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
-
 pub fn timeout(dep: &Dependency) -> Option<Duration> {
     match dep {
         Dependency::HttpHealthCheck { timeout, .. } => *timeout,
@@ -161,7 +159,7 @@ pub fn description(dep: &Dependency) -> String {
             format!("file exists: {path}")
         }
         Dependency::ProcessExited { name, .. } => {
-            format!("process exited: {name}")
+            format!("after @{name}")
         }
         Dependency::TcpNotListening { address, .. } => {
             format!("tcp not listening: {address}")

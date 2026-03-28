@@ -76,7 +76,7 @@ Global settings applied to all jobs.
 
 ### `config.logs`
 
-Optional log directory path. Defaults to `procman-logs`. Recreated each run.
+Optional log directory path. Defaults to `logs`. Recreated each run.
 
 ```
 config {
