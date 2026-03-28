@@ -253,6 +253,7 @@ impl<'a> Lexer<'a> {
         let kind = match word {
             "config" => TokenKind::Config,
             "job" => TokenKind::Job,
+            "service" => TokenKind::Service,
             "event" => TokenKind::Event,
             "if" => TokenKind::If,
             "for" => TokenKind::For,
@@ -262,7 +263,6 @@ impl<'a> Lexer<'a> {
             "wait" => TokenKind::Wait,
             "watch" => TokenKind::Watch,
             "after" => TokenKind::After,
-            "once" => TokenKind::Once,
             "on_fail" => TokenKind::OnFail,
             "spawn" => TokenKind::Spawn,
             "http" => TokenKind::Http,
@@ -486,8 +486,13 @@ mod tests {
     #[test]
     fn lex_keywords() {
         assert_eq!(
-            kinds("job event config"),
-            vec![TokenKind::Job, TokenKind::Event, TokenKind::Config]
+            kinds("job event service config"),
+            vec![
+                TokenKind::Job,
+                TokenKind::Event,
+                TokenKind::Service,
+                TokenKind::Config,
+            ]
         );
     }
 

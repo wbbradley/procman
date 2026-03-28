@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/procman.svg)](https://crates.io/crates/procman)
 [![docs](https://img.shields.io/badge/docs-mdbook-blue)](https://wbbradley.github.io/procman/)
 
-A foreman-like process supervisor written in Rust. Reads a `.pman` config file, spawns all listed jobs, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives. See the [full documentation](https://wbbradley.github.io/procman/) for detailed guides on configuration, dependencies, templates, and more.
+A foreman-like process supervisor written in Rust. Reads a `.pman` config file, spawns all listed jobs and services, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives. See the [full documentation](https://wbbradley.github.io/procman/) for detailed guides on configuration, dependencies, templates, and more.
 
 ## Usage
 
@@ -26,15 +26,14 @@ Most service ordering is handled declaratively in the config file. Jobs with no 
 
 ```
 job migrate {
-  once = true
   run "db-migrate up"
 }
 
-job web {
+service web {
   run "serve --port 3000"
 }
 
-job api {
+service api {
   wait {
     after @migrate
     http "http://localhost:3000/health" {
@@ -47,6 +46,8 @@ job api {
 ```
 
 Here `migrate` and `web` start immediately. `api` waits for `migrate` to exit successfully and for `web` to pass its health check — no scripting required. Available wait condition types include HTTP health checks, TCP connect, file exists, file contains, process exited (`after`), and their negations. See the [Config Format](#config-format) section below and the [Dependencies chapter](https://wbbradley.github.io/procman/dependencies.html) for the complete reference.
+
+> **`job` vs `service`:** A `job` runs to completion (build steps, migrations, setup tasks) — it defaults to one-shot behavior where exit code 0 is success. A `service` is a long-running daemon (web servers, API servers, workers) that is expected to run for the lifetime of the supervisor.
 
 ### `-e` / `--env` — inject environment variables
 
@@ -95,19 +96,18 @@ config {
 }
 
 job migrate {
-  once = true
   run ```
     ./run-migrations
     echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
   ```
 }
 
-job web {
+service web {
   env PORT = args.port
   run "serve --port $PORT"
 }
 
-job api {
+service api {
   env DB_URL = @migrate.DATABASE_URL
 
   wait {
@@ -122,14 +122,14 @@ job api {
   run "api-server start --db $DB_URL"
 }
 
-job db {
+service db {
   wait {
     connect "127.0.0.1:5432"
   }
   run "db-client start"
 }
 
-job healthcheck {
+service healthcheck {
   wait {
     !connect "127.0.0.1:8080"
     !exists "/tmp/api.lock"
@@ -138,19 +138,18 @@ job healthcheck {
   run "api-server --port 8080"
 }
 
-job worker if args.enable_worker {
+service worker if args.enable_worker {
   run "worker-service start"
 }
 
 job nodes {
-  once = true
   for config_path in glob("/etc/nodes/*.yaml") {
     env NODE_CONFIG = config_path
     run "node-agent --config $NODE_CONFIG"
   }
 }
 
-job web-watched {
+service web-watched {
   run "web-server --port 8080"
 
   watch health {
@@ -178,7 +177,7 @@ The config file contains top-level blocks in any order:
 
 - `config { }` (optional): global settings.
   - `logs` (optional): custom log directory path (default: `logs/procman`). Recreated each run.
-  - `env { }` (optional): global environment variable bindings applied to all jobs. Overridable per-job.
+  - `env { }` (optional): global environment variable bindings applied to all jobs and services. Overridable per-job/service.
   - `arg name { }` (optional): user-defined CLI arguments parsed from argv after `--`. Underscores in names become dashes on the CLI (e.g. `log_level` → `--log-level`). Fields:
     - `type` (optional, default `string`): `string` or `bool`. String args take a value (`--name VALUE`), bool args are flags (`--name` = true).
     - `short` (optional): single-character shorthand for `-s` form.
@@ -186,17 +185,17 @@ The config file contains top-level blocks in any order:
     - `default` (optional): fallback value. Args without a default are required.
   - Arg values are referenced in expressions as `args.name`. There is no `env` field on args — use `config { env { } }` to explicitly bind args to environment variables.
   - Env precedence (lowest → highest): system env → CLI `-e` → global `config { env { } }` → per-job `env` → per-iteration `for` bindings.
-- `job name { }` / `job name if expr { }` — process definitions.
+- `job name { }` / `job name if expr { }` — one-shot process definitions (run to completion).
+- `service name { }` / `service name if expr { }` — long-running process definitions (daemons).
 - `event name { }` — dormant processes, only started via `on_fail spawn @name`.
 
-Each job definition supports:
+Each job/service definition supports:
 
 - `run` (required): the command to execute. Inline `"..."` or fenced triple-backtick block. All commands are passed to `sh -euo pipefail -c`, so shell features (pipes, redirects, `&&`, variable expansion) work. The strict flags mean unset variable references and pipeline failures are treated as errors.
 - `env` (optional): per-job environment variables. Single `env KEY = expr` or `env { }` block. Supports `args.name` references and `@job.KEY` output references.
-- `once` (optional): if `true`, the process exits cleanly on success (code 0) without triggering supervisor shutdown. Processes can write key-value pairs to `$PROCMAN_OUTPUT` for downstream resolution via `@job.KEY`.
-- `for VAR in iterable { }` (optional): fan-out a job across an iterable. Supported iterables: `glob("pattern")`, `["a", "b"]`, `0..3` (exclusive range), `0..=3` (inclusive range). Each iteration spawns an instance with the variable bound.
+- `for VAR in iterable { }` (optional): fan-out across an iterable. Supported iterables: `glob("pattern")`, `["a", "b"]`, `0..3` (exclusive range), `0..=3` (inclusive range). Each iteration spawns an instance with the variable bound.
 - `wait { }` (optional): block of conditions that must all be satisfied before `run` executes. Circular dependencies are detected at parse time. Condition types:
-  - `after @job` — wait for a `once = true` job to exit successfully.
+  - `after @job` — wait for a job to exit successfully.
   - `http "url" { status = N }` — HTTP GET returns expected status, with optional `timeout` and `poll`.
   - `connect "host:port"` — TCP port accepts connections.
   - `!connect "host:port"` — TCP port stops accepting connections.
@@ -205,12 +204,18 @@ Each job definition supports:
   - `!running "pattern"` — no process matches pattern (`pgrep -f`).
   - `contains "path" { format, key, var }` — file contains a key; optionally binds to a local `var`.
   - All conditions accept optional `timeout` (default `60s`), `poll` (default `1s`), and `retry` (default `true`; `false` = fail immediately on first check).
-- `if expr` (optional, on the `job` line): expression evaluated before spawning. If falsy, the job is skipped entirely. Skipped `once = true` jobs register as exited so `after @job` dependents can proceed.
-- `watch name { }` (optional): named runtime health checks that monitor the job after it starts. Each watch polls a condition (same types as `wait`) and takes an action when consecutive failures exceed the threshold.
+- `if expr` (optional, on the `job`/`service` line): expression evaluated before spawning. If falsy, the job/service is skipped entirely. Skipped jobs register as exited so `after @job` dependents can proceed.
+- `watch name { }` (optional, services only): named runtime health checks that monitor the service after it starts. Each watch polls a condition (same types as `wait`) and takes an action when consecutive failures exceed the threshold.
+
+Jobs can write key-value pairs to `$PROCMAN_OUTPUT` for downstream resolution via `@job.KEY`.
   - `initial_delay` (optional, default `0s`): time before the first check.
   - `poll` (optional, default `5s`): time between checks.
   - `threshold` (optional, default `3`): consecutive failures before triggering the action.
   - `on_fail` (optional, default `shutdown`): action — `shutdown`, `debug`, `log`, or `spawn @event_name`.
+
+**Key difference between `job` and `service`:**
+- A `job` exits cleanly on success (code 0) without triggering supervisor shutdown. Jobs can write output to `$PROCMAN_OUTPUT` for downstream jobs to reference.
+- A `service` runs for the lifetime of the supervisor. If a service exits, it triggers shutdown.
 
 ## Behavior
 

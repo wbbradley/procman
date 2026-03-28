@@ -7,7 +7,7 @@ starts immediately.
 ## Full Example
 
 ```
-job api {
+service api {
   env DB_URL = @migrate.DATABASE_URL
 
   wait {
@@ -32,7 +32,7 @@ for a TCP port, then checks for a file — all in order — before starting.
 
 ### `after @job`
 
-Wait for a `once = true` job to exit successfully (exit code 0).
+Wait for a job to exit successfully (exit code 0).
 
 ```
 wait {
@@ -41,7 +41,8 @@ wait {
 ```
 
 A non-zero exit triggers supervisor shutdown and the condition is never satisfied.
-Parse-time error if the target job is not `once = true`.
+Parse-time error if the target is not a `job` (services do not exit, so `after`
+cannot reference them).
 
 For `for` jobs, `after @nodes` is satisfied only when **all** fan-out instances
 have exited successfully.
@@ -216,7 +217,7 @@ The `contains` condition can extract a value into a job-scoped variable,
 referenced in `env` bindings. The two-step pattern:
 
 ```
-job api {
+service api {
   wait {
     contains "/tmp/config.yaml" {
       format = "yaml"

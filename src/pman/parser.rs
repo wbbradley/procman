@@ -147,6 +147,7 @@ impl<'a> Parser<'a> {
         let mut file = ast::File {
             config: None,
             jobs: Vec::new(),
+            services: Vec::new(),
             events: Vec::new(),
         };
 
@@ -161,6 +162,9 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::Job) => {
                     file.jobs.push(self.parse_job_def()?);
                 }
+                Some(TokenKind::Service) => {
+                    file.services.push(self.parse_service_def()?);
+                }
                 Some(TokenKind::Event) => {
                     file.events.push(self.parse_event_def()?);
                 }
@@ -169,7 +173,10 @@ impl<'a> Parser<'a> {
                         "{}",
                         self.fmt_error(
                             self.span(),
-                            &format!("expected 'config', 'job', or 'event', got {:?}", other)
+                            &format!(
+                                "expected 'config', 'job', 'service', or 'event', got {:?}",
+                                other
+                            )
                         )
                     );
                 }
@@ -335,6 +342,25 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_service_def(&mut self) -> Result<ast::ServiceDef> {
+        let start_span = self.expect(&TokenKind::Service)?.span;
+        let (name, _) = self.expect_ident()?;
+        let condition = if self.eat(&TokenKind::If) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        self.expect(&TokenKind::LBrace)?;
+        let body = self.parse_job_body()?;
+        let end_span = self.expect(&TokenKind::RBrace)?.span;
+        Ok(ast::ServiceDef {
+            name,
+            condition,
+            body,
+            span: merge_spans(start_span, end_span),
+        })
+    }
+
     fn parse_event_def(&mut self) -> Result<ast::EventDef> {
         let start_span = self.expect(&TokenKind::Event)?.span;
         let (name, _) = self.expect_ident()?;
@@ -349,7 +375,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_job_body(&mut self) -> Result<ast::JobBody> {
-        let mut once = None;
         let mut env = Vec::new();
         let mut wait = None;
         let mut watches = Vec::new();
@@ -360,29 +385,6 @@ impl<'a> Parser<'a> {
                 bail!("{}", self.fmt_error(self.span(), "unterminated job body"));
             }
             match self.peek() {
-                Some(TokenKind::Once) => {
-                    self.advance();
-                    self.expect(&TokenKind::Assign)?;
-                    match self.peek() {
-                        Some(TokenKind::True) => {
-                            self.advance();
-                            once = Some(true);
-                        }
-                        Some(TokenKind::False) => {
-                            self.advance();
-                            once = Some(false);
-                        }
-                        _ => {
-                            bail!(
-                                "{}",
-                                self.fmt_error(
-                                    self.span(),
-                                    "expected 'true' or 'false' after 'once ='"
-                                )
-                            )
-                        }
-                    }
-                }
                 Some(TokenKind::Env) => {
                     self.parse_env_entry_or_block(&mut env)?;
                 }
@@ -422,7 +424,6 @@ impl<'a> Parser<'a> {
         })?;
 
         Ok(ast::JobBody {
-            once,
             env,
             wait,
             watches,
@@ -964,10 +965,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_job_once() {
-        let file = parse(r#"job migrate { once = true run "migrate" }"#, "test.pman").unwrap();
-        let job = &file.jobs[0];
-        assert_eq!(job.body.once, Some(true));
+    fn parse_service() {
+        let file = parse(r#"service web { run "serve" }"#, "test.pman").unwrap();
+        assert_eq!(file.services.len(), 1);
+        assert_eq!(file.services[0].name, "web");
+    }
+
+    #[test]
+    fn once_in_job_body_is_error() {
+        assert!(parse(r#"job migrate { once = true run "migrate" }"#, "test.pman").is_err());
     }
 
     #[test]
@@ -1000,7 +1006,7 @@ mod tests {
 
     #[test]
     fn parse_fenced_run() {
-        let input = "job migrate { once = true run ```\n  ./run-migrations\n``` }";
+        let input = "job migrate { run ```\n  ./run-migrations\n``` }";
         let file = parse(input, "test.pman").unwrap();
         let job = &file.jobs[0];
         assert!(

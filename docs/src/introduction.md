@@ -14,8 +14,8 @@ exits or a signal arrives, procman tears everything down cleanly.
   name, right-aligned for easy scanning.
 - **Per-process log files** — each job gets its own log in `logs/procman`,
   plus a combined `procman.log`.
-- **Process output** — a `once = true` job can write `KEY=VALUE` pairs to
-  `$PROCMAN_OUTPUT`; downstream jobs reference them with `@job.KEY` syntax.
+- **Process output** — a job can write `KEY=VALUE` pairs to
+  `$PROCMAN_OUTPUT`; downstream jobs and services reference them with `@job.KEY` syntax.
 - **Fan-out** — use `for` blocks with globs, literal arrays, or ranges to
   spawn multiple instances of a job.
 - **User-defined CLI arguments** — define typed arguments in a `config { }`

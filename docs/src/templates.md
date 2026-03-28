@@ -1,8 +1,9 @@
 # Process Output
 
-Every job receives a `PROCMAN_OUTPUT` environment variable pointing to a per-job
-output file at `logs/procman/<name>.output`. One-shot (`once = true`) jobs write
-data here; downstream jobs reference it with `@job.KEY` expressions.
+Every job and service receives a `PROCMAN_OUTPUT` environment variable pointing
+to a per-process output file at `logs/procman/<name>.output`. Jobs (one-shot
+processes) write data here; downstream jobs and services reference it with
+`@job.KEY` expressions.
 
 ## Output File Format
 
@@ -36,14 +37,13 @@ strings.
 
 ~~~
 job migrate {
-  once = true
   run ```
     ./run-migrations
     echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
   ```
 }
 
-job api {
+service api {
   env DB_URL = @migrate.DATABASE_URL
 
   wait {
@@ -80,44 +80,43 @@ job is not started.
 Procman enforces three rules at parse time to catch output reference errors
 before any job starts:
 
-### Rule 1: Referenced job must exist
+### Rule 1: Referenced process must exist
 
 ```
 job app {
-  env KEY = @nonexistent.KEY  # Error: job 'nonexistent' does not exist
+  env KEY = @nonexistent.KEY  # Error: process 'nonexistent' does not exist
   run "echo $KEY"
 }
 ```
 
-### Rule 2: Referenced job must be `once = true`
+### Rule 2: Referenced process must be a `job`
 
-Only `once = true` jobs produce output that is guaranteed to be available.
-Referencing a long-running job is rejected:
+Only jobs (one-shot processes) produce output that is guaranteed to be available.
+Referencing a service is rejected:
 
 ```
-job server {
-  run "start-server"  # not once = true
+service server {
+  run "start-server"
 }
 
 job app {
-  env PORT = @server.PORT  # Error: job 'server' is not once = true
+  env PORT = @server.PORT  # Error: 'server' is not a job
   run "echo $PORT"
 }
 ```
 
-### Rule 3: Referencing job must have `after @job` in its `wait` block
+### Rule 3: Referencing process must have `after @job` in its `wait` block
 
-The referencing job must have an `after` condition (direct or transitive) on the
-referenced job. This guarantees the output file exists when references are
-resolved:
+The referencing job or service must have an `after` condition (direct or
+transitive) on the referenced job. This guarantees the output file exists when
+references are resolved:
 
 ```
 job setup {
-  once = true
   run "echo KEY=value > $PROCMAN_OUTPUT"
 }
 
-job app {
+service app {
   env KEY = @setup.KEY  # Error: no 'after @setup' in wait block
   run "echo $KEY"
 }

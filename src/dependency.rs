@@ -52,14 +52,15 @@ fn wait_for_dependencies(
             if check(dep, &agent, exit_registry) {
                 if let crate::config::Dependency::ProcessExited { name, .. } = dep
                     && let Some(&code) = exit_registry.lock().unwrap().get(name)
-                        && code != 0 {
-                            let desc = description(dep);
-                            logger.lock().unwrap().log_line(
-                                &config.name,
-                                &format!("dependency failed: {desc} (exit code {code})"),
-                            );
-                            return false;
-                        }
+                    && code != 0
+                {
+                    let desc = description(dep);
+                    logger.lock().unwrap().log_line(
+                        &config.name,
+                        &format!("dependency failed: {desc} (exit code {code})"),
+                    );
+                    return false;
+                }
                 let desc = description(dep);
                 let remaining_count = total - i - 1;
                 if remaining_count == 0 {

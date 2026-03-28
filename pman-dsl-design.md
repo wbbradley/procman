@@ -42,8 +42,10 @@ Duration literals are a number followed by a unit suffix: `s` (seconds), `ms` (m
 A `.pman` file contains top-level blocks in any order:
 
 - `config { }` — global settings, args, global env
-- `job name { }` — auto-started process (long-running or one-shot)
-- `job name if expr { }` — conditionally evaluated job
+- `job name { }` — one-shot process (runs to completion)
+- `job name if expr { }` — conditionally evaluated one-shot job
+- `service name { }` — long-running daemon process
+- `service name if expr { }` — conditionally evaluated service
 - `event name { }` — dormant process, only started via `on_fail spawn`
 
 ## Config Block
@@ -110,12 +112,21 @@ Lowest to highest:
 
 Note: `var` bindings from `contains` conditions are procman expressions, not direct env injections. They enter the environment only when explicitly assigned via `env KEY = var_name`.
 
-## Job Definition
+## Job and Service Definitions
+
+A `job` is a one-shot process that runs to completion. Exit code 0 is treated as success without triggering supervisor shutdown. Jobs can write key-value output to `$PROCMAN_OUTPUT` for downstream references via `@job.KEY`.
+
+A `service` is a long-running daemon process that runs for the lifetime of the supervisor. If a service exits, it triggers shutdown.
 
 ```
-job api {
-  once = true
+job migrate {
+  run ```
+    ./run-migrations
+    echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
+  ```
+}
 
+service api {
   env DB_URL = @migrate.DATABASE_URL
   env {
     API_KEY = "secret"
@@ -142,9 +153,8 @@ job api {
 | `run` | yes | Shell command — inline `"..."` or fenced triple-backtick block |
 | `env` | no | Single `env KEY = expr` or `env { }` block. Both styles can coexist. |
 | `wait` | no | Block of conditions, all must pass before `run` |
-| `once` | no | `once = true` — exit code 0 is success, not shutdown trigger |
-| `if` | no | Expression on the `job` line: `job name if expr { }` |
-| `watch` | no | Named runtime health check blocks |
+| `if` | no | Expression on the `job`/`service` line: `job name if expr { }` |
+| `watch` | no | Named runtime health check blocks (services only) |
 | `for` | no | Iteration block wrapping `env`/`run` |
 
 ### Shell Blocks
@@ -164,24 +174,22 @@ run ```
 
 Procman never interpolates inside shell strings. Values flow in exclusively via environment variables.
 
-### Conditional Jobs
+### Conditional Jobs and Services
 
 ```
-job worker if args.enable_worker {
+service worker if args.enable_worker {
   run "worker-service start"
 }
 ```
 
-If the expression is falsy, the job is not evaluated at all — no dependency waiting, no env resolution. Skipped `once = true` jobs still register as exited so `after @worker` dependents can proceed.
+If the expression is falsy, the job/service is not evaluated at all — no dependency waiting, no env resolution. Skipped jobs still register as exited so `after @job` dependents can proceed.
 
 ## Fan-Out (`for`)
 
-The `for` block lives inside a job and wraps `env` and `run`. It iterates over a typed iterable, binding a local variable per iteration:
+The `for` block lives inside a job or service and wraps `env` and `run`. It iterates over a typed iterable, binding a local variable per iteration:
 
 ```
 job nodes {
-  once = true
-
   wait {
     after @setup
   }
@@ -262,7 +270,7 @@ wait {
 
 | Syntax | Description |
 |--------|-------------|
-| `after @job` | Wait for a `once = true` job to exit successfully. Parse-time error if the target is not `once = true`. |
+| `after @job` | Wait for a job to exit successfully. Parse-time error if the target is not a `job`. |
 | `http "url" { status = N }` | HTTP GET returns expected status |
 | `connect "host:port"` | TCP port accepts connections |
 | `!connect "host:port"` | TCP port stops accepting connections |
@@ -318,10 +326,10 @@ The variable is scoped to the enclosing job (not to the `wait` block), so it can
 
 ### Watch Blocks
 
-Named runtime health checks that monitor a job after it starts:
+Named runtime health checks that monitor a service after it starts:
 
 ```
-job web {
+service web {
   run "web-server --port 8080"
 
   watch health {
@@ -370,7 +378,7 @@ event recovery {
 }
 ```
 
-`on_fail spawn @name` must reference an `event`, not a `job`. The `@` sigil is a general "named entity" prefix used for both jobs and events throughout the DSL; the parser validates the target type based on context (`after` requires a `once = true` job, `spawn` requires an event). When spawned, the event handler receives `PROCMAN_WATCH_*` environment variables with failure context.
+`on_fail spawn @name` must reference an `event`, not a `job` or `service`. The `@` sigil is a general "named entity" prefix used for jobs, services, and events throughout the DSL; the parser validates the target type based on context (`after` requires a `job`, `spawn` requires an event). When spawned, the event handler receives `PROCMAN_WATCH_*` environment variables with failure context.
 
 ## Expression Language
 
@@ -381,7 +389,7 @@ Expressions appear in `if` conditions, `env` value positions, and `var` bindings
 | Syntax | Description |
 |--------|-------------|
 | `args.name` | CLI arg value |
-| `@job.KEY` | Output from a `once = true` job's `PROCMAN_OUTPUT` |
+| `@job.KEY` | Output from a job's `PROCMAN_OUTPUT` |
 | `local_var` | Job-scoped variable (from `for` or `var` binding) |
 
 ### Literals
@@ -406,7 +414,7 @@ No arithmetic in v1.
 
 ### PROCMAN_OUTPUT Format
 
-Every job receives a `PROCMAN_OUTPUT` environment variable pointing to a per-job output file. Jobs write key-value data to this file, which other jobs reference via `@job.KEY` expressions.
+Every job and service receives a `PROCMAN_OUTPUT` environment variable pointing to a per-process output file. Jobs write key-value data to this file, which other jobs and services reference via `@job.KEY` expressions.
 
 **Simple key-value lines:** `KEY=VALUE` (one per line, first `=` splits key from value).
 
@@ -435,9 +443,9 @@ All parse-time and runtime errors include the source file path, line number, and
 
 - Syntax errors
 - Unknown identifiers (referencing an arg or job that doesn't exist)
-- `after @job` must target a `once = true` job
-- `@job.KEY` references must point to a `once = true` job
-- `@job.KEY` references require `after @job` in the job's `wait` block (direct or transitive)
+- `after @name` must target a `job` (not a `service`)
+- `@job.KEY` references must point to a `job` (not a `service`)
+- `@job.KEY` references require `after @job` in the referencing process's `wait` block (direct or transitive)
 - Circular dependencies in `after` references
 - `on_fail spawn @name` must reference an `event`
 - Variable shadowing
@@ -451,7 +459,7 @@ All fatal — immediate shutdown:
 - Missing key in `@job.KEY` resolution
 - `glob()` pattern matching zero files
 - Dependency timeout exceeded
-- Non-zero exit from a `once = true` job
+- Non-zero exit from a job
 
 **General principle:** All expressions in `.pman` files are evaluated at runtime, not parse time. The parser validates syntax, identifiers, and structural rules. Value resolution (including `glob()`, `@job.KEY`, and `args.*` references) happens at the point of use — after upstream dependencies are satisfied.
 
@@ -493,19 +501,18 @@ config {
 }
 
 job migrate {
-  once = true
   run ```
     ./run-migrations
     echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
   ```
 }
 
-job web {
+service web {
   env PORT = args.port
   run "serve --port $PORT"
 }
 
-job api {
+service api {
   env DB_URL = @migrate.DATABASE_URL
 
   wait {
@@ -520,14 +527,14 @@ job api {
   run "api-server start --db $DB_URL"
 }
 
-job db {
+service db {
   wait {
     connect "127.0.0.1:5432"
   }
   run "db-client start"
 }
 
-job healthcheck {
+service healthcheck {
   wait {
     !connect "127.0.0.1:8080"
     !exists "/tmp/api.lock"
@@ -536,19 +543,18 @@ job healthcheck {
   run "api-server --port 8080"
 }
 
-job worker if args.enable_worker {
+service worker if args.enable_worker {
   run "worker-service start"
 }
 
 job nodes {
-  once = true
   for config_path in glob("/etc/nodes/*.yaml") {
     env NODE_CONFIG = config_path
     run "node-agent --config $NODE_CONFIG"
   }
 }
 
-job web-watched {
+service web-watched {
   run "web-server --port 8080"
 
   watch health {

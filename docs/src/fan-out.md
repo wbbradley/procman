@@ -1,6 +1,6 @@
 # Fan-out
 
-The `for` block lives inside a job and wraps `env` and `run`. It iterates over a
+The `for` block lives inside a job or service and wraps `env` and `run`. It iterates over a
 typed iterable, binding a local variable per iteration — one process instance is
 spawned for each element.
 
@@ -8,8 +8,6 @@ spawned for each element.
 
 ```
 job nodes {
-  once = true
-
   for config_path in glob("configs/node-*.yaml") {
     env NODE_CONFIG = config_path
     run "start-node --config $NODE_CONFIG"
@@ -33,7 +31,6 @@ environment variable.
 
 ```
 job nodes {
-  once = true
   for config_path in glob("configs/node-*.yaml") {
     env NODE_CONFIG = config_path
     run "start-node --config $NODE_CONFIG"
@@ -45,7 +42,6 @@ job nodes {
 
 ```
 job services {
-  once = true
   for svc in ["auth", "billing", "notifications"] {
     env SERVICE = svc
     run "deploy-service $SERVICE"
@@ -56,7 +52,7 @@ job services {
 ### Range
 
 ```
-job workers {
+service workers {
   for i in 0..4 {
     env WORKER_ID = i
     run "worker --id $WORKER_ID"
@@ -78,7 +74,6 @@ downstream job on the entire fan-out group completing:
 
 ```
 job nodes {
-  once = true
   for config_path in glob("configs/node-*.yaml") {
     env NODE_CONFIG = config_path
     run "provision --config $NODE_CONFIG"
@@ -86,8 +81,6 @@ job nodes {
 }
 
 job deploy {
-  once = true
-
   wait {
     after @nodes
   }

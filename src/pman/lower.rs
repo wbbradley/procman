@@ -39,13 +39,20 @@ pub fn lower(
         None => HashMap::new(),
     };
 
-    // Determine skipped jobs.
+    // Determine skipped jobs/services (those with false conditions).
     let mut skipped_jobs: HashSet<String> = HashSet::new();
     for job in &file.jobs {
         if let Some(cond_expr) = &job.condition
             && !eval_condition_expr(cond_expr, arg_values, path)?
         {
             skipped_jobs.insert(job.name.clone());
+        }
+    }
+    for service in &file.services {
+        if let Some(cond_expr) = &service.condition
+            && !eval_condition_expr(cond_expr, arg_values, path)?
+        {
+            skipped_jobs.insert(service.name.clone());
         }
     }
 
@@ -59,6 +66,7 @@ pub fn lower(
             &job.name,
             &job.body,
             true,
+            true, // jobs default to once=true
             &base_env,
             &global_env,
             arg_values,
@@ -68,11 +76,30 @@ pub fn lower(
         configs.append(&mut job_configs);
     }
 
+    for service in &file.services {
+        if skipped_jobs.contains(&service.name) {
+            continue;
+        }
+        let mut service_configs = lower_job_or_event(
+            &service.name,
+            &service.body,
+            true,
+            false, // services default to once=false
+            &base_env,
+            &global_env,
+            arg_values,
+            &skipped_jobs,
+            path,
+        )?;
+        configs.append(&mut service_configs);
+    }
+
     for event in &file.events {
         let mut event_configs = lower_job_or_event(
             &event.name,
             &event.body,
             false,
+            false, // events default to once=false
             &base_env,
             &global_env,
             arg_values,
@@ -472,13 +499,14 @@ fn lower_job_or_event(
     name: &str,
     body: &ast::JobBody,
     autostart: bool,
+    once_default: bool,
     base_env: &HashMap<String, String>,
     global_env: &HashMap<String, String>,
     arg_values: &HashMap<String, String>,
     skipped_jobs: &HashSet<String>,
     path: &str,
 ) -> Result<Vec<ProcessConfig>> {
-    let once = body.once.unwrap_or(false);
+    let once = once_default;
 
     // Track var bindings from contains conditions.
     // Maps var_name -> index in depends vec (to be patched with env key).
@@ -710,9 +738,15 @@ mod tests {
     }
 
     #[test]
-    fn lower_once() {
-        let (configs, _) = lower_str(r#"job migrate { once = true run "migrate" }"#);
+    fn lower_job_is_once() {
+        let (configs, _) = lower_str(r#"job migrate { run "migrate" }"#);
         assert!(configs[0].once);
+    }
+
+    #[test]
+    fn lower_service_is_not_once() {
+        let (configs, _) = lower_str(r#"service web { run "serve" }"#);
+        assert!(!configs[0].once);
     }
 
     #[test]
@@ -731,7 +765,7 @@ mod tests {
     fn lower_env_with_job_output_ref() {
         let (configs, _) = lower_str(
             r#"
-            job setup { once = true run "setup" }
+            job setup { run "setup" }
             job api { wait { after @setup } env DB = @setup.URL run "start" }
         "#,
         );
@@ -743,8 +777,8 @@ mod tests {
     fn lower_wait_after() {
         let (configs, _) = lower_str(
             r#"
-            job setup { once = true run "setup" }
-            job api { wait { after @setup } run "start" }
+            job setup { run "setup" }
+            service api { wait { after @setup } run "start" }
         "#,
         );
         let api = configs.iter().find(|c| c.name == "api").unwrap();
@@ -786,8 +820,8 @@ mod tests {
     fn lower_timeout_none_is_infinite() {
         let (configs, _) = lower_str(
             r#"
-            job setup { once = true run "setup" }
-            job api { wait { after @setup { timeout = none } } run "start" }
+            job setup { run "setup" }
+            service api { wait { after @setup { timeout = none } } run "start" }
         "#,
         );
         let api = configs.iter().find(|c| c.name == "api").unwrap();
@@ -876,12 +910,12 @@ mod tests {
     }
 
     #[test]
-    fn lower_skipped_once_job_still_allows_after() {
+    fn lower_skipped_job_still_allows_after() {
         let (configs, _) = lower_with_args(
             r#"
             config { arg enabled { type = bool default = false } }
-            job setup if args.enabled { once = true run "setup" }
-            job api { wait { after @setup } run "start" }
+            job setup if args.enabled { run "setup" }
+            service api { wait { after @setup } run "start" }
             "#,
             &[("enabled", "false")],
         );
@@ -893,7 +927,6 @@ mod tests {
         let (configs, _) = lower_str(
             r#"
             job multi {
-                once = true
                 for item in ["a", "b", "c"] {
                     env ITEM = item
                     run "echo $ITEM"
@@ -916,7 +949,6 @@ mod tests {
         let (configs, _) = lower_str(
             r#"
             job workers {
-                once = true
                 for i in 0..3 {
                     env WORKER_ID = i
                     run "echo $WORKER_ID"
@@ -936,7 +968,6 @@ mod tests {
         let (configs, _) = lower_str(
             r#"
             job nodes {
-                once = true
                 env CLUSTER = "prod"
                 for item in ["a", "b"] {
                     env NODE = item
@@ -1040,16 +1071,15 @@ config {
 }
 
 job migrate {
-    once = true
     run "echo done"
 }
 
-job web {
+service web {
     env PORT = args.port
     run "serve --port $PORT"
 }
 
-job api {
+service api {
     env DB_URL = @migrate.DATABASE_URL
 
     wait {
@@ -1064,14 +1094,14 @@ job api {
     run "api-server start --db $DB_URL"
 }
 
-job db {
+service db {
     wait {
         connect "127.0.0.1:5432"
     }
     run "db-client start"
 }
 
-job healthcheck {
+service healthcheck {
     wait {
         !connect "127.0.0.1:8080"
         !exists "/tmp/api.lock"
@@ -1084,7 +1114,7 @@ job worker if args.enable_worker {
     run "worker-service start"
 }
 
-job web_watched {
+service web_watched {
     run "web-server --port 8080"
 
     watch health {

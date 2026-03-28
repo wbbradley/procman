@@ -96,10 +96,10 @@ pub fn validate_config_templates(configs: &[ProcessConfig]) -> Result<()> {
                 )
             })?;
 
-            // Rule 2: referenced process must be once: true
+            // Rule 2: referenced process must be a job (once: true)
             if !referenced.once {
                 bail!(
-                    "process '{}' references output '${{{{ {proc_name}.{key} }}}}' but process '{proc_name}' is not once: true",
+                    "process '{}' references output '${{{{ {proc_name}.{key} }}}}' but '{proc_name}' is not a job (only jobs produce output)",
                     config.name
                 );
             }
@@ -310,7 +310,7 @@ mod tests {
             ),
         ];
         let err = validate_config_templates(&configs).unwrap_err();
-        assert!(err.to_string().contains("not once: true"), "{err}");
+        assert!(err.to_string().contains("not a job"), "{err}");
     }
 
     #[test]
