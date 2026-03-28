@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{
         Arc,
         Mutex,
@@ -28,7 +28,7 @@ pub fn spawn_watcher(
     tx: mpsc::Sender<SupervisorCommand>,
     shutdown: Arc<AtomicBool>,
     logger: Arc<Mutex<Logger>>,
-    exit_registry: Arc<Mutex<HashSet<String>>>,
+    exit_registry: Arc<Mutex<HashMap<String, i32>>>,
 ) -> thread::JoinHandle<()> {
     thread::Builder::new()
         .name(format!("watch:{process_name}"))
@@ -48,9 +48,9 @@ pub fn spawn_watcher(
 fn should_stop(
     process_name: &str,
     shutdown: &AtomicBool,
-    exit_registry: &Arc<Mutex<HashSet<String>>>,
+    exit_registry: &Arc<Mutex<HashMap<String, i32>>>,
 ) -> bool {
-    shutdown.load(Ordering::Relaxed) || exit_registry.lock().unwrap().contains(process_name)
+    shutdown.load(Ordering::Relaxed) || exit_registry.lock().unwrap().contains_key(process_name)
 }
 
 fn sleep_interruptible(duration: Duration, shutdown: &AtomicBool) {
@@ -148,7 +148,7 @@ fn watcher_loop(
     tx: &mpsc::Sender<SupervisorCommand>,
     shutdown: &Arc<AtomicBool>,
     logger: &Arc<Mutex<Logger>>,
-    exit_registry: &Arc<Mutex<HashSet<String>>>,
+    exit_registry: &Arc<Mutex<HashMap<String, i32>>>,
 ) {
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
@@ -259,8 +259,8 @@ mod tests {
         ))
     }
 
-    fn make_exit_registry() -> Arc<Mutex<HashSet<String>>> {
-        Arc::new(Mutex::new(HashSet::new()))
+    fn make_exit_registry() -> Arc<Mutex<HashMap<String, i32>>> {
+        Arc::new(Mutex::new(HashMap::new()))
     }
 
     fn make_watch(name: &str, check: Dependency, on_fail: OnFailAction) -> Watch {
@@ -417,7 +417,7 @@ mod tests {
         let exit_registry = make_exit_registry();
 
         // Pre-add process to exit registry
-        exit_registry.lock().unwrap().insert("web".to_string());
+        exit_registry.lock().unwrap().insert("web".to_string(), 0);
 
         let handle = spawn_watcher(
             "web".to_string(),

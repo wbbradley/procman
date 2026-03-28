@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     sync::{
         Arc,
         Mutex,
@@ -20,7 +20,7 @@ fn wait_for_dependencies(
     config: &ProcessConfig,
     shutdown: &AtomicBool,
     logger: &Arc<Mutex<Logger>>,
-    exit_registry: &Arc<Mutex<HashSet<String>>>,
+    exit_registry: &Arc<Mutex<HashMap<String, i32>>>,
 ) -> bool {
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
@@ -50,6 +50,16 @@ fn wait_for_dependencies(
             }
 
             if check(dep, &agent, exit_registry) {
+                if let crate::config::Dependency::ProcessExited { name, .. } = dep
+                    && let Some(&code) = exit_registry.lock().unwrap().get(name)
+                        && code != 0 {
+                            let desc = description(dep);
+                            logger.lock().unwrap().log_line(
+                                &config.name,
+                                &format!("dependency failed: {desc} (exit code {code})"),
+                            );
+                            return false;
+                        }
                 let desc = description(dep);
                 let remaining_count = total - i - 1;
                 if remaining_count == 0 {
@@ -101,7 +111,7 @@ pub fn spawn_waiter(
     shutdown: Arc<AtomicBool>,
     logger: Arc<Mutex<Logger>>,
     pending: Arc<AtomicUsize>,
-    exit_registry: Arc<Mutex<HashSet<String>>>,
+    exit_registry: Arc<Mutex<HashMap<String, i32>>>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let name = config.name.clone();
@@ -153,8 +163,8 @@ mod tests {
     use super::*;
     use crate::config::Dependency;
 
-    fn make_exit_registry() -> Arc<Mutex<HashSet<String>>> {
-        Arc::new(Mutex::new(HashSet::new()))
+    fn make_exit_registry() -> Arc<Mutex<HashMap<String, i32>>> {
+        Arc::new(Mutex::new(HashMap::new()))
     }
 
     static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -361,7 +371,10 @@ mod tests {
 
         // Insert after short delay
         thread::sleep(Duration::from_millis(100));
-        exit_registry.lock().unwrap().insert("migrate".to_string());
+        exit_registry
+            .lock()
+            .unwrap()
+            .insert("migrate".to_string(), 0);
 
         let received = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         match received {
@@ -427,7 +440,7 @@ mod tests {
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
 
         // Now satisfy the first dep
-        exit_registry.lock().unwrap().insert("setup".to_string());
+        exit_registry.lock().unwrap().insert("setup".to_string(), 0);
 
         let received = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         match received {
@@ -474,7 +487,7 @@ mod tests {
 
         // Satisfy dep 0 after 100ms — dep 1's timeout starts fresh from that point
         thread::sleep(Duration::from_millis(100));
-        exit_registry.lock().unwrap().insert("setup".to_string());
+        exit_registry.lock().unwrap().insert("setup".to_string(), 0);
 
         // Should succeed because the file already exists (dep 1 timeout is 60s from now)
         let received = rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -617,5 +630,46 @@ mod tests {
             Dependency::FileExists { retry, .. } => assert!(retry),
             _ => panic!("expected FileExists"),
         }
+    }
+
+    #[test]
+    fn failed_process_exited_triggers_shutdown() {
+        let config = make_config(
+            "api",
+            vec![Dependency::ProcessExited {
+                name: "migrate".to_string(),
+                timeout: Some(Duration::from_secs(60)),
+                retry: true,
+            }],
+        );
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let logger = make_logger(&["api"]);
+        let pending = Arc::new(AtomicUsize::new(1));
+        let exit_registry = make_exit_registry();
+
+        let handle = spawn_waiter(
+            config,
+            tx,
+            Arc::clone(&shutdown),
+            logger,
+            Arc::clone(&pending),
+            Arc::clone(&exit_registry),
+        );
+
+        // Simulate failed exit
+        thread::sleep(Duration::from_millis(100));
+        exit_registry
+            .lock()
+            .unwrap()
+            .insert("migrate".to_string(), 1);
+
+        handle.join().unwrap();
+
+        // Should NOT receive a Spawn command
+        assert!(rx.try_recv().is_err());
+        // Should have triggered shutdown
+        assert!(shutdown.load(Ordering::Relaxed));
+        assert_eq!(pending.load(Ordering::Relaxed), 0);
     }
 }

@@ -235,8 +235,7 @@ fn eval_env_bindings(
 
 fn eval_option_timeout(opt: &Option<Expr>, path: &str) -> Result<Option<Duration>> {
     match opt {
-        None => Ok(Some(Duration::from_secs(60))),
-        Some(Expr::NoneLit(_)) => Ok(None),
+        None | Some(Expr::NoneLit(_)) => Ok(None),
         Some(Expr::DurationLit(d, _)) => Ok(Some(Duration::from_secs_f64(*d))),
         Some(other) => bail!(
             "{}",

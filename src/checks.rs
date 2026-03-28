@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -52,7 +52,7 @@ pub fn collect_dependency_env(deps: &[Dependency]) -> Result<HashMap<String, Str
 pub fn check(
     dep: &Dependency,
     agent: &ureq::Agent,
-    exit_registry: &Arc<Mutex<HashSet<String>>>,
+    exit_registry: &Arc<Mutex<HashMap<String, i32>>>,
 ) -> bool {
     match dep {
         Dependency::HttpHealthCheck { url, code, .. } => match agent.get(url).call() {
@@ -74,7 +74,7 @@ pub fn check(
             path, format, key, ..
         } => read_file_value(path, format, key).is_some(),
         Dependency::FileExists { path, .. } => Path::new(path).exists(),
-        Dependency::ProcessExited { name, .. } => exit_registry.lock().unwrap().contains(name),
+        Dependency::ProcessExited { name, .. } => exit_registry.lock().unwrap().contains_key(name),
         Dependency::TcpNotListening { address, .. } => {
             use std::net::ToSocketAddrs;
             !address
@@ -118,22 +118,18 @@ pub fn poll_interval(dep: &Dependency) -> Duration {
     }
 }
 
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
+
 pub fn timeout(dep: &Dependency) -> Option<Duration> {
     match dep {
-        Dependency::HttpHealthCheck { timeout, .. } => {
-            Some(timeout.unwrap_or(Duration::from_secs(60)))
-        }
-        Dependency::TcpConnect { timeout, .. } => Some(timeout.unwrap_or(Duration::from_secs(60))),
-        Dependency::FileContainsKey { timeout, .. } => {
-            Some(timeout.unwrap_or(Duration::from_secs(60)))
-        }
-        Dependency::FileExists { .. } => Some(Duration::from_secs(60)),
+        Dependency::HttpHealthCheck { timeout, .. } => *timeout,
+        Dependency::TcpConnect { timeout, .. } => *timeout,
+        Dependency::FileContainsKey { timeout, .. } => *timeout,
+        Dependency::FileExists { .. } => None,
         Dependency::ProcessExited { timeout, .. } => *timeout,
-        Dependency::TcpNotListening { timeout, .. } => {
-            Some(timeout.unwrap_or(Duration::from_secs(60)))
-        }
-        Dependency::FileNotExists { .. } => Some(Duration::from_secs(60)),
-        Dependency::ProcessNotRunning { .. } => Some(Duration::from_secs(60)),
+        Dependency::TcpNotListening { timeout, .. } => *timeout,
+        Dependency::FileNotExists { .. } => None,
+        Dependency::ProcessNotRunning { .. } => None,
     }
 }
 
@@ -186,8 +182,8 @@ mod tests {
     use super::*;
     use crate::config::FileFormat;
 
-    fn make_exit_registry() -> Arc<Mutex<HashSet<String>>> {
-        Arc::new(Mutex::new(HashSet::new()))
+    fn make_exit_registry() -> Arc<Mutex<HashMap<String, i32>>> {
+        Arc::new(Mutex::new(HashMap::new()))
     }
 
     static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -239,7 +235,10 @@ mod tests {
         let exit_registry = make_exit_registry();
 
         assert!(!check(&dep, &agent, &exit_registry));
-        exit_registry.lock().unwrap().insert("migrate".to_string());
+        exit_registry
+            .lock()
+            .unwrap()
+            .insert("migrate".to_string(), 0);
         assert!(check(&dep, &agent, &exit_registry));
     }
 

@@ -38,7 +38,7 @@ pub struct ProcessGroup {
     waiter_threads: Vec<thread::JoinHandle<()>>,
     watcher_threads: Vec<thread::JoinHandle<()>>,
     pending_deps: Arc<AtomicUsize>,
-    exit_registry: Arc<Mutex<HashSet<String>>>,
+    exit_registry: Arc<Mutex<HashMap<String, i32>>>,
     log_dir: PathBuf,
     fan_out_groups: HashMap<String, HashSet<String>>,
     debug_mode: bool,
@@ -279,7 +279,7 @@ impl ProcessGroup {
             waiter_threads: Vec::new(),
             watcher_threads: Vec::new(),
             pending_deps: Arc::new(AtomicUsize::new(0)),
-            exit_registry: Arc::new(Mutex::new(HashSet::new())),
+            exit_registry: Arc::new(Mutex::new(HashMap::new())),
             log_dir,
             fan_out_groups: HashMap::new(),
             debug_mode: debug,
@@ -297,7 +297,11 @@ impl ProcessGroup {
                 && !evaluate_condition(condition, &cmd.env, &cmd.name, &logger)?
             {
                 if cmd.once {
-                    group.exit_registry.lock().unwrap().insert(cmd.name.clone());
+                    group
+                        .exit_registry
+                        .lock()
+                        .unwrap()
+                        .insert(cmd.name.clone(), 0);
                 }
                 continue;
             }
@@ -363,7 +367,7 @@ impl ProcessGroup {
                                     self.exit_registry
                                         .lock()
                                         .unwrap()
-                                        .insert(config.name.clone());
+                                        .insert(config.name.clone(), 0);
                                 }
                                 continue;
                             }
@@ -446,16 +450,22 @@ impl ProcessGroup {
                     );
                     self.children.retain(|(p, _, _, _)| *p != pid);
                     if let Some((name, elapsed, once)) = child_info {
-                        if once && code == 0 {
+                        if once {
                             let mut completed_group = None;
                             {
                                 let mut registry = self.exit_registry.lock().unwrap();
-                                registry.insert(name.clone());
+                                registry.insert(name.clone(), code);
                                 for (template_name, instance_names) in &self.fan_out_groups {
                                     if instance_names.contains(&name)
-                                        && instance_names.iter().all(|n| registry.contains(n))
+                                        && instance_names.iter().all(|n| registry.contains_key(n))
                                     {
-                                        registry.insert(template_name.clone());
+                                        let max_code = instance_names
+                                            .iter()
+                                            .filter_map(|n| registry.get(n))
+                                            .copied()
+                                            .max()
+                                            .unwrap_or(0);
+                                        registry.insert(template_name.clone(), max_code);
                                         completed_group = Some(template_name.clone());
                                         break;
                                     }
@@ -467,17 +477,19 @@ impl ProcessGroup {
                                     .unwrap()
                                     .log_line(&template_name, "all fan-out instances completed");
                             }
-                            logger
-                                .lock()
-                                .unwrap()
-                                .log_line(&name, &format!("[{pid}] completed after {elapsed:.1}s"));
-                            if remaining.is_empty()
-                                && self.pending_deps.load(Ordering::Relaxed) == 0
-                            {
-                                first_exit_code = Some(0);
-                                break;
+                            if code == 0 {
+                                logger.lock().unwrap().log_line(
+                                    &name,
+                                    &format!("[{pid}] completed after {elapsed:.1}s"),
+                                );
+                                if remaining.is_empty()
+                                    && self.pending_deps.load(Ordering::Relaxed) == 0
+                                {
+                                    first_exit_code = Some(0);
+                                    break;
+                                }
+                                continue;
                             }
-                            continue;
                         }
                         logger.lock().unwrap().log_line(
                             &name,
@@ -537,6 +549,9 @@ impl ProcessGroup {
                 }
             }
         }
+
+        // Signal waiter/watcher threads to stop
+        shutdown.store(true, Ordering::Relaxed);
 
         // Drain any already-exited children so "remaining" is accurate
         loop {
@@ -677,7 +692,7 @@ mod tests {
             waiter_threads: Vec::new(),
             watcher_threads: Vec::new(),
             pending_deps: Arc::new(AtomicUsize::new(0)),
-            exit_registry: Arc::new(Mutex::new(HashSet::new())),
+            exit_registry: Arc::new(Mutex::new(HashMap::new())),
             log_dir,
             fan_out_groups: HashMap::new(),
             debug_mode: false,
@@ -946,24 +961,24 @@ mod tests {
         let registry = group.exit_registry.clone();
 
         // Insert first two — group not yet complete
-        registry.lock().unwrap().insert("nodes-0".to_string());
-        registry.lock().unwrap().insert("nodes-1".to_string());
-        assert!(!registry.lock().unwrap().contains("nodes"));
+        registry.lock().unwrap().insert("nodes-0".to_string(), 0);
+        registry.lock().unwrap().insert("nodes-1".to_string(), 0);
+        assert!(!registry.lock().unwrap().contains_key("nodes"));
 
         // Insert third — now manually simulate what the exit handler does
         {
             let mut reg = registry.lock().unwrap();
-            reg.insert("nodes-2".to_string());
+            reg.insert("nodes-2".to_string(), 0);
             for (template_name, instance_names) in &group.fan_out_groups {
                 if instance_names.contains("nodes-2")
-                    && instance_names.iter().all(|n| reg.contains(n))
+                    && instance_names.iter().all(|n| reg.contains_key(n))
                 {
-                    reg.insert(template_name.clone());
+                    reg.insert(template_name.clone(), 0);
                     break;
                 }
             }
         }
-        assert!(registry.lock().unwrap().contains("nodes"));
+        assert!(registry.lock().unwrap().contains_key("nodes"));
     }
 
     #[test]
@@ -1400,7 +1415,7 @@ mod tests {
         )
         .unwrap();
         assert!(group.children.is_empty());
-        assert!(group.exit_registry.lock().unwrap().contains("skipped"));
+        assert!(group.exit_registry.lock().unwrap().contains_key("skipped"));
     }
 
     #[test]
@@ -1462,6 +1477,6 @@ mod tests {
         )
         .unwrap();
         assert!(group.children.is_empty());
-        assert!(!group.exit_registry.lock().unwrap().contains("skipped"));
+        assert!(!group.exit_registry.lock().unwrap().contains_key("skipped"));
     }
 }
