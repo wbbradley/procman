@@ -5,17 +5,17 @@
 Create a file called `procman.pman` in your project root:
 
 ```
-job web {
+service web {
   run "python3 -m http.server 8000"
 }
 
-job api {
+service api {
   run "node server.js"
 }
 ```
 
-Each `job` block defines a process with a name and a `run` command. That's
-all you need.
+Each `service` block defines a long-running process with a name and a `run`
+command. That's all you need.
 
 ## Running
 
@@ -41,9 +41,9 @@ making it easy to scan which process produced each line.
 
 procman automatically writes logs to a `logs/procman/` directory:
 
-- `logs/procman/web.log` — output from the `web` job
-- `logs/procman/api.log` — output from the `api` job
-- `logs/procman/procman.log` — combined output from all jobs
+- `logs/procman/web.log` — output from the `web` service
+- `logs/procman/api.log` — output from the `api` service
+- `logs/procman/procman.log` — combined output from all processes
 
 These files are created fresh on each run.
 
@@ -55,21 +55,20 @@ running. procman exits with the exit code of the first process that terminated.
 
 ## A More Advanced Example
 
-Here's a configuration that uses `once` jobs, dependencies, and environment
+Here's a configuration that uses jobs, services, dependencies, and environment
 variables:
 
 ```
 job migrate {
-  once = true
   run "db-migrate up"
 }
 
-job web {
+service web {
   env PORT = "3000"
   run "serve --port $PORT"
 }
 
-job api {
+service api {
   wait {
     after @migrate
     http "http://localhost:3000/health" {
@@ -84,14 +83,15 @@ job api {
 
 In this setup:
 
-- **migrate** runs the database migration and exits. The `once = true` field
-  means its successful exit (code 0) won't trigger a shutdown of everything
-  else.
-- **web** starts immediately and serves on port 3000, with the `PORT`
-  environment variable set via `env`.
-- **api** waits for two things before starting: the `migrate` job must have
-  exited successfully (`after @migrate`), and the web server's health endpoint
-  must be returning HTTP 200. Only then does `api-server start` run.
+- **migrate** is a `job` that runs the database migration and exits. Jobs run
+  to completion — a successful exit (code 0) won't trigger a shutdown of
+  everything else.
+- **web** is a `service` that starts immediately and serves on port 3000, with
+  the `PORT` environment variable set via `env`.
+- **api** is a `service` that waits for two things before starting: the
+  `migrate` job must have exited successfully (`after @migrate`), and the web
+  server's health endpoint must be returning HTTP 200. Only then does
+  `api-server start` run.
 
 This is the core pattern for dependency-aware startup — later chapters cover the
 full set of dependency types and more advanced features like fan-out and process

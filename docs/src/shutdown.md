@@ -7,7 +7,7 @@ a termination signal and is cleaned up.
 
 Shutdown begins when either:
 
-- A child process exits (unless it is `once: true` and exits with code 0).
+- A child process exits (unless it is a `job` and exits with code 0).
 - The user sends Ctrl-C (SIGINT) or SIGTERM to procman.
 
 ## Process groups

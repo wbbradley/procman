@@ -19,6 +19,7 @@ pub enum TokenKind {
     // Keywords
     Config,   // config
     Job,      // job
+    Service,  // service
     Event,    // event
     If,       // if
     For,      // for
@@ -28,7 +29,6 @@ pub enum TokenKind {
     Wait,     // wait
     Watch,    // watch
     After,    // after
-    Once,     // once
     OnFail,   // on_fail
     Spawn,    // spawn
     Http,     // http

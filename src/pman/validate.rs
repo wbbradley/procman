@@ -9,7 +9,9 @@ use crate::pman::{
 
 pub fn validate(file: &ast::File, path: &str) -> Result<()> {
     let mut job_names: HashSet<&str> = HashSet::new();
+    let mut service_names: HashSet<&str> = HashSet::new();
     let mut event_names: HashSet<&str> = HashSet::new();
+    // Jobs are once=true by default; collect all job names as once jobs.
     let mut once_jobs: HashSet<&str> = HashSet::new();
     let mut errors: Vec<String> = Vec::new();
 
@@ -21,8 +23,24 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
                     .fmt_error(path, &format!("duplicate job name '{}'", job.name)),
             );
         }
-        if job.body.once == Some(true) {
-            once_jobs.insert(&job.name);
+        // Jobs default to once=true.
+        once_jobs.insert(&job.name);
+    }
+    for service in &file.services {
+        if !service_names.insert(&service.name) {
+            errors.push(
+                service
+                    .span
+                    .fmt_error(path, &format!("duplicate service name '{}'", service.name)),
+            );
+        }
+        // Also register service names in job_names so after-references can find them.
+        if !job_names.insert(&service.name) {
+            errors.push(
+                service
+                    .span
+                    .fmt_error(path, &format!("duplicate name '{}'", service.name)),
+            );
         }
     }
     for event in &file.events {
@@ -69,10 +87,7 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
                     } else if !once_jobs.contains(target.as_str()) {
                         errors.push(cond.span.fmt_error(
                             path,
-                            &format!(
-                                "job '{}': after @{} target must be once = true",
-                                job.name, target
-                            ),
+                            &format!("job '{}': after @{} target must be a job", job.name, target),
                         ));
                     }
                     targets.insert(target.as_str());
@@ -80,6 +95,34 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
             }
         }
         after_edges.insert(job.name.as_str(), targets);
+    }
+    for service in &file.services {
+        let mut targets = HashSet::new();
+        if let Some(wait) = &service.body.wait {
+            for cond in &wait.conditions {
+                if let ast::ConditionKind::After { job: target } = &cond.kind {
+                    if !job_names.contains(target.as_str()) {
+                        errors.push(cond.span.fmt_error(
+                            path,
+                            &format!(
+                                "service '{}': after @{} references unknown job",
+                                service.name, target
+                            ),
+                        ));
+                    } else if !once_jobs.contains(target.as_str()) {
+                        errors.push(cond.span.fmt_error(
+                            path,
+                            &format!(
+                                "service '{}': after @{} target must be a job",
+                                service.name, target
+                            ),
+                        ));
+                    }
+                    targets.insert(target.as_str());
+                }
+            }
+        }
+        after_edges.insert(service.name.as_str(), targets);
     }
     for event in &file.events {
         let mut targets = HashSet::new();
@@ -98,7 +141,7 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
                         errors.push(cond.span.fmt_error(
                             path,
                             &format!(
-                                "event '{}': after @{} target must be once = true",
+                                "event '{}': after @{} target must be a job",
                                 event.name, target
                             ),
                         ));
@@ -128,6 +171,15 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
             path,
         ));
     }
+    for service in &file.services {
+        errors.extend(validate_output_refs(
+            &service.name,
+            &service.body,
+            &once_jobs,
+            &after_edges,
+            path,
+        ));
+    }
     for event in &file.events {
         errors.extend(validate_output_refs(
             &event.name,
@@ -140,15 +192,39 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
 
     // Step 5: Validate on_fail spawn references.
     for job in &file.jobs {
-        errors.extend(validate_spawns(&job.body, &job_names, &event_names, path));
+        errors.extend(validate_spawns(
+            &job.body,
+            &job_names,
+            &service_names,
+            &event_names,
+            path,
+        ));
+    }
+    for service in &file.services {
+        errors.extend(validate_spawns(
+            &service.body,
+            &job_names,
+            &service_names,
+            &event_names,
+            path,
+        ));
     }
     for event in &file.events {
-        errors.extend(validate_spawns(&event.body, &job_names, &event_names, path));
+        errors.extend(validate_spawns(
+            &event.body,
+            &job_names,
+            &service_names,
+            &event_names,
+            path,
+        ));
     }
 
     // Step 6: Variable shadowing.
     for job in &file.jobs {
         errors.extend(check_variable_shadowing(&job.body, path));
+    }
+    for service in &file.services {
+        errors.extend(check_variable_shadowing(&service.body, path));
     }
     for event in &file.events {
         errors.extend(check_variable_shadowing(&event.body, path));
@@ -158,6 +234,9 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
     for job in &file.jobs {
         errors.extend(check_duplicate_watches(&job.body, path));
     }
+    for service in &file.services {
+        errors.extend(check_duplicate_watches(&service.body, path));
+    }
     for event in &file.events {
         errors.extend(check_duplicate_watches(&event.body, path));
     }
@@ -165,6 +244,9 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
     // Step 8: Empty run rejection.
     for job in &file.jobs {
         errors.extend(check_empty_run(&job.body, path));
+    }
+    for service in &file.services {
+        errors.extend(check_empty_run(&service.body, path));
     }
     for event in &file.events {
         errors.extend(check_empty_run(&event.body, path));
@@ -230,7 +312,7 @@ fn validate_output_refs(
             errors.push(span.fmt_error(
                 path,
                 &format!(
-                    "'{}': @{}.* reference requires '{}' to be once = true",
+                    "'{}': @{}.* reference requires '{}' to be a job",
                     owner_name, job, job
                 ),
             ));
@@ -305,24 +387,30 @@ fn dfs_find_cycle<'a>(
 fn validate_spawns(
     body: &ast::JobBody,
     job_names: &HashSet<&str>,
+    service_names: &HashSet<&str>,
     event_names: &HashSet<&str>,
     path: &str,
 ) -> Vec<String> {
     let mut errors = Vec::new();
     for watch in &body.watches {
         if let Some(ast::OnFailAction::Spawn(target)) = &watch.on_fail {
-            if !job_names.contains(target.as_str()) && !event_names.contains(target.as_str()) {
+            let t = target.as_str();
+            if event_names.contains(t) {
+                // OK — events are valid spawn targets
+            } else if job_names.contains(t) {
                 errors.push(watch.span.fmt_error(
                     path,
-                    &format!("on_fail spawn @{} references unknown target", target),
+                    &format!("on_fail spawn @{target} must reference an event, not a job"),
                 ));
-            } else if job_names.contains(target.as_str()) {
+            } else if service_names.contains(t) {
                 errors.push(watch.span.fmt_error(
                     path,
-                    &format!(
-                        "on_fail spawn @{} must reference an event, not a job",
-                        target
-                    ),
+                    &format!("on_fail spawn @{target} must reference an event, not a service"),
+                ));
+            } else {
+                errors.push(watch.span.fmt_error(
+                    path,
+                    &format!("on_fail spawn @{target} references unknown target"),
                 ));
             }
         }
@@ -410,20 +498,16 @@ mod tests {
     }
 
     #[test]
-    fn after_must_target_once_job() {
+    fn after_must_target_job() {
         let input = r#"
-            job web { run "serve" }
+            service web { run "serve" }
             job worker {
                 wait { after @web }
                 run "work"
             }
         "#;
         let err = parse_and_validate(input).unwrap_err();
-        assert!(
-            err.to_string().contains("must be once = true"),
-            "got: {}",
-            err
-        );
+        assert!(err.to_string().contains("must be a job"), "got: {}", err);
     }
 
     #[test]
@@ -441,7 +525,7 @@ mod tests {
     #[test]
     fn job_output_ref_requires_after() {
         let input = r#"
-            job setup { once = true run "setup" }
+            job setup { run "setup" }
             job web {
                 env { URL = @setup.URL }
                 run "serve"
@@ -452,25 +536,25 @@ mod tests {
     }
 
     #[test]
-    fn job_output_ref_requires_once() {
+    fn job_output_ref_requires_job_target() {
         let input = r#"
-            job web { run "serve" }
+            service web { run "serve" }
             job worker {
                 wait { after @web }
                 env { URL = @web.URL }
                 run "work"
             }
         "#;
-        // web is not once = true, so after @web itself should fail first.
+        // web is a service (not a job), so after @web should fail.
         let err = parse_and_validate(input).unwrap_err();
-        assert!(err.to_string().contains("once = true"), "got: {}", err);
+        assert!(err.to_string().contains("must be a job"), "got: {}", err);
     }
 
     #[test]
     fn circular_dependency_detected() {
         let input = r#"
-            job a { once = true wait { after @b } run "a" }
-            job b { once = true wait { after @a } run "b" }
+            job a { wait { after @b } run "a" }
+            job b { wait { after @a } run "b" }
         "#;
         let err = parse_and_validate(input).unwrap_err();
         assert!(
@@ -576,8 +660,8 @@ mod tests {
     #[test]
     fn transitive_after_satisfies_output_ref() {
         let input = r#"
-            job setup { once = true run "setup" }
-            job middle { once = true wait { after @setup } run "middle" }
+            job setup { run "setup" }
+            job middle { wait { after @setup } run "middle" }
             job web {
                 wait { after @middle }
                 env { URL = @setup.URL }

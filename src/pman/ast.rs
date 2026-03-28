@@ -5,6 +5,7 @@ use crate::pman::token::Span;
 pub struct File {
     pub config: Option<ConfigBlock>,
     pub jobs: Vec<JobDef>,
+    pub services: Vec<ServiceDef>,
     pub events: Vec<EventDef>,
 }
 
@@ -41,6 +42,14 @@ pub struct JobDef {
 }
 
 #[derive(Debug)]
+pub struct ServiceDef {
+    pub name: String,
+    pub condition: Option<Expr>,
+    pub body: JobBody,
+    pub span: Span,
+}
+
+#[derive(Debug)]
 pub struct EventDef {
     pub name: String,
     pub body: JobBody,
@@ -49,7 +58,6 @@ pub struct EventDef {
 
 #[derive(Debug)]
 pub struct JobBody {
-    pub once: Option<bool>,
     pub env: Vec<EnvBinding>,
     pub wait: Option<WaitBlock>,
     pub watches: Vec<WatchDef>,

@@ -22,16 +22,15 @@ config {
 }
 
 job migrate {
-  once = true
   run "db-migrate up"
 }
 
-job web {
+service web {
   env PORT = args.port
   run "serve --port $PORT"
 }
 
-job worker if args.enable_worker {
+service worker if args.enable_worker {
   run "worker-service start"
 }
 
@@ -43,8 +42,10 @@ event recovery {
 A `.pman` file may contain:
 
 - **`config { }`** — global settings, CLI args, and shared environment variables
-- **`job name { }`** — an auto-started process (long-running or one-shot)
-- **`job name if expr { }`** — a conditionally evaluated job
+- **`job name { }`** — a one-shot process that runs to completion
+- **`job name if expr { }`** — a conditionally evaluated one-shot job
+- **`service name { }`** — a long-running daemon process
+- **`service name if expr { }`** — a conditionally evaluated service
 - **`event name { }`** — a dormant process, only started via `on_fail spawn`
 
 ## Identifiers
@@ -147,9 +148,10 @@ Note: `var` bindings from `contains` conditions are procman expressions, not
 direct env injections. They enter the environment only when explicitly assigned
 via `env KEY = var_name`.
 
-## `job name { }` Block
+## `job` and `service` Blocks
 
-Each `job` block defines a process to run.
+Each `job` block defines a one-shot process (runs to completion). Each `service`
+block defines a long-running daemon process. Both share the same fields.
 
 ### `run` (required)
 
@@ -183,7 +185,7 @@ Environment variables merged into the job's environment. Single-binding and
 block forms can coexist:
 
 ```
-job api {
+service api {
   env DB_URL = @migrate.DATABASE_URL
   env {
     API_KEY = "secret"
@@ -193,14 +195,16 @@ job api {
 }
 ```
 
-### `once` (optional)
+### `job` vs `service`
 
-`once = true` marks a job as one-shot. Exit code 0 is treated as success and
-does **not** trigger supervisor shutdown. A non-zero exit code still triggers
-shutdown.
+A `job` is a one-shot process that runs to completion. Exit code 0 is treated
+as success and does **not** trigger supervisor shutdown. A non-zero exit code
+still triggers shutdown. Jobs can write key-value output to `$PROCMAN_OUTPUT`,
+which other processes reference via `@job.KEY` expressions (see
+[Process Output](templates.md)).
 
-One-shot jobs can write key-value output to `$PROCMAN_OUTPUT`, which other
-jobs reference via `@job.KEY` expressions (see [Process Output](templates.md)).
+A `service` is a long-running daemon process. If a service exits, it triggers
+supervisor shutdown.
 
 ### `wait` (optional)
 
@@ -220,23 +224,23 @@ wait {
 
 ### `if` (optional)
 
-An expression on the `job` line. If falsy, the job is not evaluated at all —
-no dependency waiting, no env resolution. Skipped `once = true` jobs still
+An expression on the `job` or `service` line. If falsy, the job/service is not
+evaluated at all — no dependency waiting, no env resolution. Skipped jobs still
 register as exited so `after` dependents can proceed.
 
 ```
-job worker if args.enable_worker {
+service worker if args.enable_worker {
   run "worker-service start"
 }
 ```
 
 ### `watch` (optional)
 
-Named runtime health check blocks that monitor a job after it starts. See the
+Named runtime health check blocks that monitor a service after it starts. See the
 [Dependencies](dependencies.md) chapter for condition syntax.
 
 ```
-job web {
+service web {
   run "web-server --port 8080"
 
   watch health {
@@ -258,7 +262,6 @@ See the [Fan-out](fan-out.md) chapter for full details.
 
 ```
 job nodes {
-  once = true
   for config_path in glob("configs/node-*.yaml") {
     env NODE_CONFIG = config_path
     run "start-node --config $NODE_CONFIG"
@@ -307,7 +310,7 @@ bindings. They are never evaluated inside shell strings.
 | Syntax | Description |
 |--------|-------------|
 | `args.name` | CLI arg value |
-| `@job.KEY` | Output from a `once = true` job's `PROCMAN_OUTPUT` |
+| `@job.KEY` | Output from a job's `PROCMAN_OUTPUT` |
 | `local_var` | Job-scoped variable (from `for` or `var` binding) |
 
 ### Literals
@@ -342,9 +345,9 @@ Procman validates the configuration at parse time and exits with an error
 
 - **Syntax errors** — malformed blocks, missing fields, invalid tokens
 - **Unknown identifiers** — referencing an arg or job that doesn't exist
-- **`after @job` targets** — must reference a `once = true` job
-- **`@job.KEY` references** — must point to a `once = true` job and require
-  `after @job` in the job's `wait` block (direct or transitive)
+- **`after @job` targets** — must reference a `job` (not a `service`)
+- **`@job.KEY` references** — must point to a `job` (not a `service`) and
+  require `after @job` in the process's `wait` block (direct or transitive)
 - **Circular dependencies** — cycles in `after` references
 - **`on_fail spawn @name`** — must reference an `event`
 - **Variable shadowing** — reusing a name already bound by `for`, `var`, or
