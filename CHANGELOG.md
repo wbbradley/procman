@@ -1,12 +1,23 @@
 # Changelog
 
-## [0.16.1] - 2026-03-26
+## [0.17.0] - 2026-03-28
+
+### Breaking Changes
+- **`once` keyword removed:** The `once = true`/`once = false` property in job bodies is no longer valid syntax. Jobs are now inherently one-shot (run to completion). Remove all `once` lines from config files.
+- **New `service` keyword for long-running processes:** The `job` keyword now means "run to completion" (one-shot). Long-running daemons must use the new `service` keyword. Both `service name { }` and `service name if expr { }` are supported with the same body fields as `job`.
+- **Default log directory changed** from `procman-logs` to `logs/procman`.
+- Dependency timeout defaults changed: wait conditions now default to no timeout (infinite wait) instead of 60 seconds when no explicit `timeout` is specified. Use `timeout = 60s` to restore the old behavior.
 
 ### Added
-- `--check` flag: validates the config file (parsing, arg definitions, template resolution, dependency cycle detection, all static checks) and exits with `<path>: ok` on success, without starting any processes. Useful for CI linting and editor integration.
+- `--check` CLI flag: validates the config file (parsing, arg definitions, template resolution, dependency cycle detection, all static checks) and exits with `<path>: ok` on success, without starting any processes. Useful for CI linting and editor integration.
+- `service` keyword in the `.pman` DSL for declaring long-running daemon processes, with full support for `if` conditions, `env`, `wait`, `watch`, and `for` blocks.
 
 ### Changed
 - Error messages from the `.pman` parser and lexer now use a standardized `<file>:<line>:<col>: error: <description>` format, matching common compiler diagnostic conventions for editor gutter integration.
+- Validation messages updated to reflect the new `job`/`service` distinction.
+
+### Fixed
+- A process waiting on `after @job` where the job exits with a non-zero code now correctly triggers shutdown instead of hanging indefinitely.
 
 ## [0.16.0] - 2026-03-24
 
