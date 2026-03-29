@@ -1,6 +1,6 @@
 [package]
 name = "procman"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 description = "A process supervisor with a dependency DAG and a custom .pman DSL"
 license = "MIT"
