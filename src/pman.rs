@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::config_parser;
+use crate::config;
 
 pub fn parse(
     input: &str,
@@ -21,7 +21,7 @@ pub fn parse(
     lower::lower(input, path, extra_env, arg_values)
 }
 
-pub fn parse_header(input: &str, path: &str) -> Result<config_parser::ConfigHeader> {
+pub fn parse_header(input: &str, path: &str) -> Result<config::ConfigHeader> {
     let file = parser::parse(input, path)?;
     let log_dir = file
         .config
@@ -40,7 +40,7 @@ pub fn parse_header(input: &str, path: &str) -> Result<config_parser::ConfigHead
             .collect::<Result<_>>()?,
         None => Vec::new(),
     };
-    Ok(config_parser::ConfigHeader {
+    Ok(config::ConfigHeader {
         log_dir,
         log_time,
         arg_defs,

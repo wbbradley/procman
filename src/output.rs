@@ -2,8 +2,6 @@ use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context, Result, bail};
 
-use crate::config::{Dependency, ProcessConfig};
-
 pub fn parse_output_file(path: &Path) -> Result<HashMap<String, String>> {
     let content =
         std::fs::read_to_string(path).with_context(|| format!("reading output file {path:?}"))?;
@@ -29,24 +27,6 @@ pub fn parse_output_file(path: &Path) -> Result<HashMap<String, String>> {
         }
     }
     Ok(map)
-}
-
-pub fn extract_template_refs(s: &str) -> Vec<(String, String)> {
-    let mut refs = Vec::new();
-    let mut remaining = s;
-    while let Some(start) = remaining.find("${{") {
-        let after_open = &remaining[start + 3..];
-        if let Some(end) = after_open.find("}}") {
-            let inner = after_open[..end].trim();
-            if let Some((proc_name, key)) = inner.split_once('.') {
-                refs.push((proc_name.trim().to_string(), key.trim().to_string()));
-            }
-            remaining = &after_open[end + 2..];
-        } else {
-            break;
-        }
-    }
-    refs
 }
 
 pub fn resolve_templates(
@@ -76,73 +56,89 @@ pub fn resolve_templates(
     Ok(result)
 }
 
-pub fn validate_config_templates(configs: &[ProcessConfig]) -> Result<()> {
-    let config_map: HashMap<&str, &ProcessConfig> =
-        configs.iter().map(|c| (c.name.as_str(), c)).collect();
-
-    for config in configs {
-        let mut all_refs = Vec::new();
-        for value in config.env.values() {
-            all_refs.extend(extract_template_refs(value));
-        }
-        all_refs.extend(extract_template_refs(&config.run));
-
-        for (proc_name, key) in &all_refs {
-            // Rule 1: referenced process must exist
-            let referenced = config_map.get(proc_name.as_str()).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "process '{}' references output '${{{{ {proc_name}.{key} }}}}' but process '{proc_name}' does not exist",
-                    config.name
-                )
-            })?;
-
-            // Rule 2: referenced process must be a job (once: true)
-            if !referenced.once {
-                bail!(
-                    "process '{}' references output '${{{{ {proc_name}.{key} }}}}' but '{proc_name}' is not a job (only jobs produce output)",
-                    config.name
-                );
-            }
-
-            // Rule 3: referencing process must have a (transitive) process_exited dep on the referenced process
-            if !has_transitive_process_exited_dep(&config.depends, proc_name, &config_map) {
-                bail!(
-                    "process '{}' references output '${{{{ {proc_name}.{key} }}}}' but does not have a process_exited dependency (direct or transitive) on '{proc_name}'",
-                    config.name
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn has_transitive_process_exited_dep(
-    depends: &[Dependency],
-    target: &str,
-    config_map: &HashMap<&str, &ProcessConfig>,
-) -> bool {
-    for dep in depends {
-        if let Dependency::ProcessExited { name, .. } = dep {
-            if name == target {
-                return true;
-            }
-            // Walk transitively
-            if let Some(intermediate) = config_map.get(name.as_str())
-                && has_transitive_process_exited_dep(&intermediate.depends, target, config_map)
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, time::Duration};
 
-    use std::time::Duration;
+    use anyhow::{Result, bail};
 
     use super::*;
+    use crate::config::{Dependency, ProcessConfig};
+
+    fn extract_template_refs(s: &str) -> Vec<(String, String)> {
+        let mut refs = Vec::new();
+        let mut remaining = s;
+        while let Some(start) = remaining.find("${{") {
+            let after_open = &remaining[start + 3..];
+            if let Some(end) = after_open.find("}}") {
+                let inner = after_open[..end].trim();
+                if let Some((proc_name, key)) = inner.split_once('.') {
+                    refs.push((proc_name.trim().to_string(), key.trim().to_string()));
+                }
+                remaining = &after_open[end + 2..];
+            } else {
+                break;
+            }
+        }
+        refs
+    }
+
+    fn validate_config_templates(configs: &[ProcessConfig]) -> Result<()> {
+        let config_map: HashMap<&str, &ProcessConfig> =
+            configs.iter().map(|c| (c.name.as_str(), c)).collect();
+
+        for config in configs {
+            let mut all_refs = Vec::new();
+            for value in config.env.values() {
+                all_refs.extend(extract_template_refs(value));
+            }
+            all_refs.extend(extract_template_refs(&config.run));
+
+            for (proc_name, key) in &all_refs {
+                let referenced = config_map.get(proc_name.as_str()).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "process '{}' references output '${{{{ {proc_name}.{key} }}}}' but process '{proc_name}' does not exist",
+                        config.name
+                    )
+                })?;
+
+                if !referenced.once {
+                    bail!(
+                        "process '{}' references output '${{{{ {proc_name}.{key} }}}}' but '{proc_name}' is not a job (only jobs produce output)",
+                        config.name
+                    );
+                }
+
+                if !has_transitive_process_exited_dep(&config.depends, proc_name, &config_map) {
+                    bail!(
+                        "process '{}' references output '${{{{ {proc_name}.{key} }}}}' but does not have a process_exited dependency (direct or transitive) on '{proc_name}'",
+                        config.name
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn has_transitive_process_exited_dep(
+        depends: &[Dependency],
+        target: &str,
+        config_map: &HashMap<&str, &ProcessConfig>,
+    ) -> bool {
+        for dep in depends {
+            if let Dependency::ProcessExited { name, .. } = dep {
+                if name == target {
+                    return true;
+                }
+                if let Some(intermediate) = config_map.get(name.as_str())
+                    && has_transitive_process_exited_dep(&intermediate.depends, target, config_map)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 
     fn write_temp_file(content: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("procman_output_test_{}", std::process::id()));

@@ -386,24 +386,6 @@ mod tests {
     }
 
     #[test]
-    fn file_contains_rejects_invalid_jsonpath() {
-        use crate::config::DependencyDef;
-        let def = DependencyDef::FileContainsKey {
-            file_contains: crate::config::FileContainsDef {
-                path: "/tmp/test.yaml".to_string(),
-                format: "yaml".to_string(),
-                key: "$[invalid".to_string(),
-                env: None,
-                poll_interval: None,
-                timeout_seconds: None,
-                retry: None,
-            },
-        };
-        let err = def.into_dependency().unwrap_err();
-        assert!(err.to_string().contains("invalid JSONPath"), "{err}");
-    }
-
-    #[test]
     fn sequential_deps_block_on_first() {
         let path = temp_path("seq_block");
         std::fs::write(&path, "").unwrap();
@@ -615,22 +597,6 @@ mod tests {
         }
 
         std::fs::remove_file(&path).unwrap();
-    }
-
-    #[test]
-    fn retry_default_is_true() {
-        let yaml = "api:\n  depends:\n    - path: /tmp/retry_default_test\n  run: echo hi\n";
-        let def: std::collections::HashMap<String, serde_yaml::Value> =
-            serde_yaml::from_str(yaml).unwrap();
-        let api_val = def.get("api").unwrap();
-        let depends = api_val.get("depends").unwrap().as_sequence().unwrap();
-        let dep_def: crate::config::DependencyDef =
-            serde_yaml::from_value(depends[0].clone()).unwrap();
-        let dep = dep_def.into_dependency().unwrap();
-        match dep {
-            Dependency::FileExists { retry, .. } => assert!(retry),
-            _ => panic!("expected FileExists"),
-        }
     }
 
     #[test]

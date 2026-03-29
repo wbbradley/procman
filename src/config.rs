@@ -1,7 +1,28 @@
 use std::{collections::HashMap, time::Duration};
 
-use anyhow::{Result, anyhow, bail};
-use serde::{Deserialize, Serialize};
+use anyhow::{Result, bail};
+
+#[derive(Clone, Debug)]
+pub enum ArgType {
+    String,
+    Bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ArgDef {
+    pub name: String,
+    pub short: Option<String>,
+    pub description: Option<String>,
+    pub arg_type: ArgType,
+    pub default: Option<String>,
+    pub env: Option<String>,
+}
+
+pub struct ConfigHeader {
+    pub log_dir: Option<String>,
+    pub log_time: bool,
+    pub arg_defs: Vec<ArgDef>,
+}
 
 #[derive(Clone, Debug)]
 pub struct ForEachConfig {
@@ -120,90 +141,6 @@ impl Dependency {
             Ok(())
         });
     }
-
-    pub(crate) fn resolve_env_vars(&mut self, env: &HashMap<String, String>) -> Result<()> {
-        self.map_string_field(|s| {
-            *s = expand_env_vars(s, env)?;
-            Ok(())
-        })
-    }
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct FileContainsDef {
-    pub path: String,
-    pub format: String,
-    pub key: String,
-    #[serde(default)]
-    pub env: Option<String>,
-    #[serde(default)]
-    pub poll_interval: Option<f64>,
-    #[serde(default)]
-    pub timeout_seconds: Option<u64>,
-    #[serde(default)]
-    pub retry: Option<bool>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct ProcessExitedDef {
-    pub name: String,
-    #[serde(default)]
-    pub timeout_seconds: Option<u64>,
-    #[serde(default)]
-    pub retry: Option<bool>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum DependencyDef {
-    HttpHealthCheck {
-        url: String,
-        code: u16,
-        poll_interval: Option<f64>,
-        timeout_seconds: Option<u64>,
-        #[serde(default)]
-        retry: Option<bool>,
-    },
-    TcpConnect {
-        tcp: String,
-        poll_interval: Option<f64>,
-        timeout_seconds: Option<u64>,
-        #[serde(default)]
-        retry: Option<bool>,
-    },
-    FileContainsKey {
-        file_contains: FileContainsDef,
-    },
-    FileExists {
-        path: String,
-        #[serde(default)]
-        retry: Option<bool>,
-    },
-    ProcessExitedExpanded {
-        process_exited: ProcessExitedDef,
-    },
-    ProcessExited {
-        process_exited: String,
-        #[serde(default)]
-        retry: Option<bool>,
-    },
-    TcpNotListening {
-        not_listening: String,
-        poll_interval: Option<f64>,
-        timeout_seconds: Option<u64>,
-        #[serde(default)]
-        retry: Option<bool>,
-    },
-    FileNotExists {
-        not_exists: String,
-        #[serde(default)]
-        retry: Option<bool>,
-    },
-    ProcessNotRunning {
-        not_running: String,
-        #[serde(default)]
-        retry: Option<bool>,
-    },
 }
 
 pub(crate) fn expand_env_vars(s: &str, env: &HashMap<String, String>) -> Result<String> {
@@ -266,150 +203,6 @@ pub(crate) fn expand_env_vars(s: &str, env: &HashMap<String, String>) -> Result<
         }
     }
     Ok(result)
-}
-
-impl DependencyDef {
-    pub fn into_dependency(self) -> Result<Dependency> {
-        Ok(match self {
-            DependencyDef::HttpHealthCheck {
-                url,
-                code,
-                poll_interval,
-                timeout_seconds,
-                retry,
-            } => Dependency::HttpHealthCheck {
-                url,
-                code,
-                poll_interval: poll_interval.map(Duration::from_secs_f64),
-                timeout: timeout_seconds.map(Duration::from_secs),
-                retry: retry.unwrap_or(true),
-            },
-            DependencyDef::TcpConnect {
-                tcp,
-                poll_interval,
-                timeout_seconds,
-                retry,
-            } => Dependency::TcpConnect {
-                address: tcp,
-                poll_interval: poll_interval.map(Duration::from_secs_f64),
-                timeout: timeout_seconds.map(Duration::from_secs),
-                retry: retry.unwrap_or(true),
-            },
-            DependencyDef::FileContainsKey { file_contains } => {
-                let format = match file_contains.format.as_str() {
-                    "json" => FileFormat::Json,
-                    "yaml" => FileFormat::Yaml,
-                    other => bail!(
-                        "unsupported file_contains format: {other:?} (expected \"json\" or \"yaml\")"
-                    ),
-                };
-                let key = serde_json_path::JsonPath::parse(&file_contains.key).map_err(|e| {
-                    anyhow!(
-                        "invalid JSONPath in file_contains.key {:?}: {e}",
-                        file_contains.key
-                    )
-                })?;
-                Dependency::FileContainsKey {
-                    path: file_contains.path,
-                    format,
-                    key,
-                    env: file_contains.env,
-                    poll_interval: file_contains.poll_interval.map(Duration::from_secs_f64),
-                    timeout: file_contains.timeout_seconds.map(Duration::from_secs),
-                    retry: file_contains.retry.unwrap_or(true),
-                }
-            }
-            DependencyDef::FileExists { path, retry } => Dependency::FileExists {
-                path,
-                retry: retry.unwrap_or(true),
-            },
-            DependencyDef::ProcessExitedExpanded { process_exited } => Dependency::ProcessExited {
-                name: process_exited.name,
-                timeout: process_exited.timeout_seconds.map(Duration::from_secs),
-                retry: process_exited.retry.unwrap_or(true),
-            },
-            DependencyDef::ProcessExited {
-                process_exited,
-                retry,
-            } => Dependency::ProcessExited {
-                name: process_exited,
-                timeout: Some(Duration::from_secs(60)),
-                retry: retry.unwrap_or(true),
-            },
-            DependencyDef::TcpNotListening {
-                not_listening,
-                poll_interval,
-                timeout_seconds,
-                retry,
-            } => Dependency::TcpNotListening {
-                address: not_listening,
-                poll_interval: poll_interval.map(Duration::from_secs_f64),
-                timeout: timeout_seconds.map(Duration::from_secs),
-                retry: retry.unwrap_or(true),
-            },
-            DependencyDef::FileNotExists { not_exists, retry } => Dependency::FileNotExists {
-                path: not_exists,
-                retry: retry.unwrap_or(true),
-            },
-            DependencyDef::ProcessNotRunning { not_running, retry } => {
-                Dependency::ProcessNotRunning {
-                    pattern: not_running,
-                    retry: retry.unwrap_or(true),
-                }
-            }
-        })
-    }
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum OnFailActionDef {
-    Simple(String),
-    Spawn { spawn: String },
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-pub struct WatchDef {
-    #[serde(default)]
-    pub name: Option<String>,
-    pub check: DependencyDef,
-    #[serde(default)]
-    pub initial_delay: Option<f64>,
-    #[serde(default)]
-    pub poll_interval: Option<f64>,
-    #[serde(default)]
-    pub failure_threshold: Option<u32>,
-    #[serde(default)]
-    pub on_fail: Option<OnFailActionDef>,
-}
-
-impl WatchDef {
-    pub fn into_watch(self, process_name: &str, index: usize) -> Result<Watch> {
-        let name = self
-            .name
-            .unwrap_or_else(|| format!("{process_name}.watch-{index}"));
-        let check = self.check.into_dependency()?;
-        let on_fail = match self.on_fail {
-            None => OnFailAction::Shutdown,
-            Some(OnFailActionDef::Simple(s)) => match s.as_str() {
-                "shutdown" => OnFailAction::Shutdown,
-                "debug" => OnFailAction::Debug,
-                "log" => OnFailAction::Log,
-                other => bail!(
-                    "unknown on_fail action: {other:?} (expected \"shutdown\", \"debug\", \"log\", or {{spawn: \"name\"}})"
-                ),
-            },
-            Some(OnFailActionDef::Spawn { spawn }) => OnFailAction::Spawn(spawn),
-        };
-        Ok(Watch {
-            name,
-            check,
-            initial_delay: Duration::from_secs_f64(self.initial_delay.unwrap_or(0.0)),
-            poll_interval: Duration::from_secs_f64(self.poll_interval.unwrap_or(5.0)),
-            failure_threshold: self.failure_threshold.unwrap_or(3),
-            on_fail,
-        })
-    }
 }
 
 pub enum SupervisorCommand {

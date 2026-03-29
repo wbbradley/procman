@@ -6,8 +6,7 @@ use std::{
 use anyhow::{Result, bail};
 
 use crate::{
-    config::{self, Dependency, FileFormat, ForEachConfig, ProcessConfig, Watch},
-    config_parser,
+    config::{self, ArgDef, ArgType, Dependency, FileFormat, ForEachConfig, ProcessConfig, Watch},
     pman::{
         ast::{self, BinOp, Expr, RunSection, ShellBlock},
         parser,
@@ -112,7 +111,7 @@ pub fn lower(
     Ok((configs, log_dir))
 }
 
-pub fn lower_arg_def(arg: ast::ArgDef) -> Result<config_parser::ArgDef> {
+pub fn lower_arg_def(arg: ast::ArgDef) -> Result<ArgDef> {
     let default = match &arg.default {
         Some(expr) => Some(eval_expr_to_string(
             expr,
@@ -123,10 +122,10 @@ pub fn lower_arg_def(arg: ast::ArgDef) -> Result<config_parser::ArgDef> {
         None => None,
     };
     let arg_type = match arg.arg_type {
-        Some(ast::ArgType::Bool) => config_parser::ArgType::Bool,
-        Some(ast::ArgType::String) | None => config_parser::ArgType::String,
+        Some(ast::ArgType::Bool) => ArgType::Bool,
+        Some(ast::ArgType::String) | None => ArgType::String,
     };
-    Ok(config_parser::ArgDef {
+    Ok(ArgDef {
         name: arg.name,
         short: arg.short.map(|s| s.value),
         description: arg.description.map(|s| s.value),

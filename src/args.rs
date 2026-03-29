@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 
-use crate::config_parser::{ArgDef, ArgType};
+use crate::config::{ArgDef, ArgType};
 
 pub fn parse_user_args(raw_args: &[String], defs: &[ArgDef]) -> Result<HashMap<String, String>> {
     if defs.is_empty() {
