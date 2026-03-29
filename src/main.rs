@@ -20,7 +20,7 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(
     version,
-    about = "A process supervisor driven by a .pman config file",
+    about = "A process supervisor driven by a .pman process definition file",
     after_help = "\
 EXAMPLES:
     # Run all jobs defined in a config file

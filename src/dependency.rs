@@ -213,6 +213,8 @@ mod tests {
             "waiter",
             vec![Dependency::FileExists {
                 path: path.clone(),
+                poll_interval: None,
+                timeout: None,
                 retry: true,
             }],
         );
@@ -284,6 +286,8 @@ mod tests {
             "shutdown-test",
             vec![Dependency::FileExists {
                 path: path.clone(),
+                poll_interval: None,
+                timeout: None,
                 retry: true,
             }],
         );
@@ -351,6 +355,7 @@ mod tests {
             "api",
             vec![Dependency::ProcessExited {
                 name: "migrate".to_string(),
+                poll_interval: None,
                 timeout: Some(Duration::from_secs(60)),
                 retry: true,
             }],
@@ -395,11 +400,14 @@ mod tests {
             vec![
                 Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    poll_interval: None,
                     timeout: Some(Duration::from_secs(60)),
                     retry: true,
                 },
                 Dependency::FileExists {
                     path: path.clone(),
+                    poll_interval: None,
+                    timeout: None,
                     retry: true,
                 },
             ],
@@ -444,11 +452,14 @@ mod tests {
             vec![
                 Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    poll_interval: None,
                     timeout: Some(Duration::from_secs(60)),
                     retry: true,
                 },
                 Dependency::FileExists {
                     path: path.clone(),
+                    poll_interval: None,
+                    timeout: None,
                     retry: true,
                 },
             ],
@@ -500,6 +511,8 @@ mod tests {
                 },
                 Dependency::FileExists {
                     path: path.clone(),
+                    poll_interval: None,
+                    timeout: None,
                     retry: true,
                 },
             ],
@@ -535,6 +548,8 @@ mod tests {
             "retry-false",
             vec![Dependency::FileExists {
                 path: path.clone(),
+                poll_interval: None,
+                timeout: None,
                 retry: false,
             }],
         );
@@ -569,6 +584,8 @@ mod tests {
             "retry-true",
             vec![Dependency::FileExists {
                 path: path.clone(),
+                poll_interval: None,
+                timeout: None,
                 retry: true,
             }],
         );
@@ -605,6 +622,7 @@ mod tests {
             "api",
             vec![Dependency::ProcessExited {
                 name: "migrate".to_string(),
+                poll_interval: None,
                 timeout: Some(Duration::from_secs(60)),
                 retry: true,
             }],

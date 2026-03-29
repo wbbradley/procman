@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/procman.svg)](https://crates.io/crates/procman)
 [![docs](https://img.shields.io/badge/docs-mdbook-blue)](https://wbbradley.github.io/procman/)
 
-A process supervisor with a dependency DAG and a custom `.pman` DSL. Spawns jobs and services, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives. See the [full documentation](https://wbbradley.github.io/procman/) for detailed guides on configuration, dependencies, templates, and more.
+A process supervisor with a dependency DAG and a typed `.pman` language for defining jobs, services, and their relationships. Spawns processes, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives. See the [full documentation](https://wbbradley.github.io/procman/) for detailed guides on configuration, dependencies, templates, and more.
 
 ## Why procman?
 
@@ -234,7 +234,7 @@ Each job/service definition supports:
   - `!exists "path"` — file does not exist.
   - `!running "pattern"` — no process matches pattern (`pgrep -f`).
   - `contains "path" { format, key, var }` — file contains a key; optionally binds to a local `var`.
-  - All conditions accept optional `timeout` (default `60s`), `poll` (default `1s`), and `retry` (default `true`; `false` = fail immediately on first check).
+  - All conditions accept optional `timeout` (default: none / wait indefinitely), `poll` (default `1s`), and `retry` (default `true`; `false` = fail immediately on first check).
 - `if expr` (optional, on the `job`/`service` line): expression evaluated before spawning. If falsy, the job/service is skipped entirely. Skipped jobs register as exited so `after @job` dependents can proceed.
 - `watch name { }` (optional, services only): named runtime health checks that monitor the service after it starts. Each watch polls a condition (same types as `wait`) and takes an action when consecutive failures exceed the threshold.
 

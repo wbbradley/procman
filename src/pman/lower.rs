@@ -352,6 +352,7 @@ fn lower_wait_condition(
     match (&cond.kind, cond.negated) {
         (ast::ConditionKind::After { job }, false) => Ok(Dependency::ProcessExited {
             name: job.clone(),
+            poll_interval: poll,
             timeout,
             retry,
         }),
@@ -379,14 +380,20 @@ fn lower_wait_condition(
         }),
         (ast::ConditionKind::Exists { path: p }, false) => Ok(Dependency::FileExists {
             path: eval_string_lit_or_expr(p, arg_values, local_vars)?,
+            poll_interval: poll,
+            timeout,
             retry,
         }),
         (ast::ConditionKind::Exists { path: p }, true) => Ok(Dependency::FileNotExists {
             path: eval_string_lit_or_expr(p, arg_values, local_vars)?,
+            poll_interval: poll,
+            timeout,
             retry,
         }),
         (ast::ConditionKind::Running { pattern }, true) => Ok(Dependency::ProcessNotRunning {
             pattern: eval_string_lit_or_expr(pattern, arg_values, local_vars)?,
+            poll_interval: poll,
+            timeout,
             retry,
         }),
         (

@@ -108,13 +108,21 @@ pub fn poll_interval(dep: &Dependency) -> Duration {
         Dependency::FileContainsKey { poll_interval, .. } => {
             poll_interval.unwrap_or(Duration::from_secs(1))
         }
-        Dependency::FileExists { .. } => Duration::from_secs(1),
-        Dependency::ProcessExited { .. } => Duration::from_millis(100),
+        Dependency::FileExists { poll_interval, .. } => {
+            poll_interval.unwrap_or(Duration::from_secs(1))
+        }
+        Dependency::ProcessExited { poll_interval, .. } => {
+            poll_interval.unwrap_or(Duration::from_millis(100))
+        }
         Dependency::TcpNotListening { poll_interval, .. } => {
             poll_interval.unwrap_or(Duration::from_secs(1))
         }
-        Dependency::FileNotExists { .. } => Duration::from_secs(1),
-        Dependency::ProcessNotRunning { .. } => Duration::from_secs(1),
+        Dependency::FileNotExists { poll_interval, .. } => {
+            poll_interval.unwrap_or(Duration::from_secs(1))
+        }
+        Dependency::ProcessNotRunning { poll_interval, .. } => {
+            poll_interval.unwrap_or(Duration::from_secs(1))
+        }
     }
 }
 
@@ -123,11 +131,11 @@ pub fn timeout(dep: &Dependency) -> Option<Duration> {
         Dependency::HttpHealthCheck { timeout, .. } => *timeout,
         Dependency::TcpConnect { timeout, .. } => *timeout,
         Dependency::FileContainsKey { timeout, .. } => *timeout,
-        Dependency::FileExists { .. } => None,
+        Dependency::FileExists { timeout, .. } => *timeout,
         Dependency::ProcessExited { timeout, .. } => *timeout,
         Dependency::TcpNotListening { timeout, .. } => *timeout,
-        Dependency::FileNotExists { .. } => None,
-        Dependency::ProcessNotRunning { .. } => None,
+        Dependency::FileNotExists { timeout, .. } => *timeout,
+        Dependency::ProcessNotRunning { timeout, .. } => *timeout,
     }
 }
 
@@ -212,6 +220,8 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let dep = Dependency::FileExists {
             path: path.clone(),
+            poll_interval: None,
+            timeout: None,
             retry: true,
         };
         let agent = make_agent();
@@ -226,6 +236,7 @@ mod tests {
     fn process_exited_check_returns_false_then_true() {
         let dep = Dependency::ProcessExited {
             name: "migrate".to_string(),
+            poll_interval: None,
             timeout: Some(Duration::from_secs(60)),
             retry: true,
         };
@@ -439,6 +450,8 @@ mod tests {
     fn file_not_exists_check_returns_true_for_missing_file() {
         let dep = Dependency::FileNotExists {
             path: "/tmp/procman_nonexistent_file_99999".to_string(),
+            poll_interval: None,
+            timeout: None,
             retry: true,
         };
         let agent = make_agent();
@@ -452,6 +465,8 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         let dep = Dependency::FileNotExists {
             path: path.clone(),
+            poll_interval: None,
+            timeout: None,
             retry: true,
         };
         let agent = make_agent();
@@ -464,6 +479,8 @@ mod tests {
     fn process_not_running_check_returns_true_for_no_match() {
         let dep = Dependency::ProcessNotRunning {
             pattern: "zzz_procman_nonexistent_process_zzz".to_string(),
+            poll_interval: None,
+            timeout: None,
             retry: true,
         };
         let agent = make_agent();
@@ -476,6 +493,8 @@ mod tests {
         // pgrep -f "procman" should match the test binary itself
         let dep = Dependency::ProcessNotRunning {
             pattern: "procman".to_string(),
+            poll_interval: None,
+            timeout: None,
             retry: true,
         };
         let agent = make_agent();

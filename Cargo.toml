@@ -2,7 +2,7 @@
 name = "procman"
 version = "0.18.0"
 edition = "2024"
-description = "A process supervisor with a dependency DAG and a custom .pman DSL"
+description = "A process supervisor with a dependency DAG and a typed .pman language"
 license = "MIT"
 repository = "https://github.com/wbbradley/procman"
 readme = "README.md"

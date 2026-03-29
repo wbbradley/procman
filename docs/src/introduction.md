@@ -28,9 +28,9 @@ exits or a signal arrives, procman tears everything down cleanly.
 
 ## Design Principles
 
-The `.pman` DSL is built on three core ideas:
+The `.pman` language is built on three core ideas:
 
-- **Declarative** — the DSL describes what to run and when, not how. Runtime
+- **Declarative** — `.pman` describes what to run and when, not how. Runtime
   semantics (polling, fan-out tracking, shutdown cascades) remain procman's
   domain.
 - **Two worlds, clearly separated** — procman expressions use their own

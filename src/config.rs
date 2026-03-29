@@ -93,10 +93,13 @@ pub enum Dependency {
     },
     FileExists {
         path: String,
+        poll_interval: Option<Duration>,
+        timeout: Option<Duration>,
         retry: bool,
     },
     ProcessExited {
         name: String,
+        poll_interval: Option<Duration>,
         timeout: Option<Duration>,
         retry: bool,
     },
@@ -108,10 +111,14 @@ pub enum Dependency {
     },
     FileNotExists {
         path: String,
+        poll_interval: Option<Duration>,
+        timeout: Option<Duration>,
         retry: bool,
     },
     ProcessNotRunning {
         pattern: String,
+        poll_interval: Option<Duration>,
+        timeout: Option<Duration>,
         retry: bool,
     },
 }
@@ -314,6 +321,8 @@ mod tests {
     fn substitute_var_file_exists() {
         let mut dep = Dependency::FileExists {
             path: "/tmp/$NODE/healthy".to_string(),
+            poll_interval: None,
+            timeout: None,
             retry: true,
         };
         dep.substitute_var("NODE", "node-0");

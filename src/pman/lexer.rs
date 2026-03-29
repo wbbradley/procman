@@ -289,7 +289,6 @@ impl<'a> Lexer<'a> {
             "running" => TokenKind::Running,
             "glob" => TokenKind::Glob,
             "arg" => TokenKind::Arg,
-            "as" => TokenKind::As,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "none" => TokenKind::None,
@@ -677,11 +676,6 @@ mod tests {
     #[test]
     fn lex_unterminated_fenced_errors() {
         assert!(lex("```\nhello", 1, 1, "test.pman").is_err());
-    }
-
-    #[test]
-    fn lex_as_keyword() {
-        assert_eq!(kinds("as"), vec![TokenKind::As]);
     }
 
     #[test]

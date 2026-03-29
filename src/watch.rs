@@ -281,6 +281,8 @@ mod tests {
             "health",
             Dependency::FileExists {
                 path: path.clone(),
+                poll_interval: None,
+                timeout: None,
                 retry: true,
             },
             OnFailAction::Shutdown,
@@ -320,6 +322,8 @@ mod tests {
             name: "disk".to_string(),
             check: Dependency::FileExists {
                 path: path.clone(),
+                poll_interval: None,
+                timeout: None,
                 retry: true,
             },
             initial_delay: Duration::ZERO,
@@ -358,6 +362,8 @@ mod tests {
             name: "recovery-check".to_string(),
             check: Dependency::FileExists {
                 path: path.clone(),
+                poll_interval: None,
+                timeout: None,
                 retry: true,
             },
             initial_delay: Duration::ZERO,
@@ -406,6 +412,8 @@ mod tests {
             "health",
             Dependency::FileExists {
                 path: path.clone(),
+                poll_interval: None,
+                timeout: None,
                 retry: true,
             },
             OnFailAction::Shutdown,
@@ -439,6 +447,8 @@ mod tests {
             "health",
             Dependency::FileExists {
                 path: path.clone(),
+                poll_interval: None,
+                timeout: None,
                 retry: true,
             },
             OnFailAction::Shutdown,
@@ -468,6 +478,8 @@ mod tests {
             name: "health".to_string(),
             check: Dependency::FileExists {
                 path: path.clone(),
+                poll_interval: None,
+                timeout: None,
                 retry: true,
             },
             initial_delay: Duration::ZERO,
@@ -518,6 +530,8 @@ mod tests {
             name: "delayed".to_string(),
             check: Dependency::FileExists {
                 path: path.clone(),
+                poll_interval: None,
+                timeout: None,
                 retry: true,
             },
             initial_delay: Duration::from_millis(300),
@@ -564,6 +578,8 @@ mod tests {
             "failing",
             Dependency::FileExists {
                 path: missing_path.clone(),
+                poll_interval: None,
+                timeout: None,
                 retry: true,
             },
             OnFailAction::Shutdown,
@@ -572,6 +588,8 @@ mod tests {
             "passing",
             Dependency::FileExists {
                 path: present_path.clone(),
+                poll_interval: None,
+                timeout: None,
                 retry: true,
             },
             OnFailAction::Shutdown,

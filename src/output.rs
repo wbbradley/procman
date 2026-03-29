@@ -267,6 +267,7 @@ mod tests {
                 false,
                 vec![Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    poll_interval: None,
                     timeout: Some(Duration::from_secs(60)),
                     retry: true,
                 }],
@@ -299,6 +300,7 @@ mod tests {
                 false,
                 vec![Dependency::ProcessExited {
                     name: "server".to_string(),
+                    poll_interval: None,
                     timeout: Some(Duration::from_secs(60)),
                     retry: true,
                 }],
@@ -339,6 +341,7 @@ mod tests {
                 true,
                 vec![Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    poll_interval: None,
                     timeout: Some(Duration::from_secs(60)),
                     retry: true,
                 }],
@@ -350,6 +353,7 @@ mod tests {
                 false,
                 vec![Dependency::ProcessExited {
                     name: "middle".to_string(),
+                    poll_interval: None,
                     timeout: Some(Duration::from_secs(60)),
                     retry: true,
                 }],
@@ -371,6 +375,7 @@ mod tests {
                 false,
                 vec![Dependency::ProcessExited {
                     name: "setup".to_string(),
+                    poll_interval: None,
                     timeout: Some(Duration::from_secs(60)),
                     retry: true,
                 }],

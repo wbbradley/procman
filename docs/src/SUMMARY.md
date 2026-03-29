@@ -9,3 +9,4 @@
 - [CLI Reference](./cli.md)
 - [Logging & Output](./logging.md)
 - [Shutdown & Signals](./shutdown.md)
+- [Language Design](./language-design.md)

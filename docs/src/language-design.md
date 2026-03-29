@@ -1,4 +1,4 @@
-# Procman DSL (.pman) Design Spec
+# The .pman Language — Design Spec
 
 ## Motivation
 
@@ -10,7 +10,7 @@ The current YAML-based config has three interlocking problems:
 
 ## Design Principles
 
-- **Declarative** — the DSL describes what to run and when, not how. Runtime semantics (polling, fan-out tracking, shutdown cascades) remain procman's domain.
+- **Declarative** — `.pman` describes what to run and when, not how. Runtime semantics (polling, fan-out tracking, shutdown cascades) remain procman's domain.
 - **Two worlds, clearly separated** — procman expressions use their own syntax. Shell blocks are opaque strings. Values flow into shell exclusively via environment variables. Procman never interpolates inside shell strings.
 - **Strict typing** — type errors in expressions cause immediate shutdown. No silent coercion.
 - **Fail early** — as much validation as possible at parse time.
@@ -53,6 +53,7 @@ A `.pman` file contains top-level blocks in any order:
 ```
 config {
   logs = "./my-logs"
+  log_time = true
 
   env {
     RUST_LOG = args.log_level
@@ -82,6 +83,10 @@ config {
 ### `config.logs`
 
 Optional log directory path. Defaults to `logs/procman`. Recreated each run.
+
+### `config.log_time`
+
+Optional boolean. When `true`, every log line is prefixed with elapsed time since procman started (e.g., `api 1.2s | listening on :3000`). Defaults to `false`.
 
 ### `config.env`
 
@@ -165,12 +170,12 @@ run "echo hello"
 ```
 
 Multi-line fenced:
-```
+~~~
 run ```
   ./run-migrations
   echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
 ```
-```
+~~~
 
 Procman never interpolates inside shell strings. Values flow in exclusively via environment variables.
 
@@ -277,7 +282,7 @@ wait {
 | `exists "path"` | File exists on disk |
 | `!exists "path"` | File does not exist |
 | `!running "pattern"` | No process matches pattern (`pgrep -f`). No positive `running` form — "wait until a process is running" is inherently racy; use `connect` or `http` for readiness checks instead. |
-| `contains "path" { ... }` | File contains a key; optionally binds to a local `var` |
+| `contains "path" { ... }` | File contains a key (`format` = `"json"` or `"yaml"`); optionally binds to a local `var` |
 
 ### Condition Options
 
@@ -285,9 +290,15 @@ Any condition can have a sub-block with options:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `timeout` | `60s` | Duration before giving up |
-| `poll` | `1s` | Duration between checks |
+| `timeout` | `none` | Duration before giving up. `none` means wait indefinitely. |
+| `poll` | `1s` (`100ms` for `after`) | Duration between checks |
 | `retry` | `true` | `false` = fail immediately on first check |
+
+The `status` option is specific to `http` conditions:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `status` | `200` | Expected HTTP status code |
 
 ```
 wait {
@@ -301,7 +312,7 @@ wait {
 }
 ```
 
-Use `timeout = none` for infinite wait.
+Use `timeout = none` to explicitly set an infinite wait.
 
 ### `var` Binding
 
@@ -378,7 +389,7 @@ event recovery {
 }
 ```
 
-`on_fail spawn @name` must reference an `event`, not a `job` or `service`. The `@` sigil is a general "named entity" prefix used for jobs, services, and events throughout the DSL; the parser validates the target type based on context (`after` requires a `job`, `spawn` requires an event). When spawned, the event handler receives `PROCMAN_WATCH_*` environment variables with failure context.
+`on_fail spawn @name` must reference an `event`, not a `job` or `service`. The `@` sigil is a general "named entity" prefix used for jobs, services, and events throughout the language; the parser validates the target type based on context (`after` requires a `job`, `spawn` requires an event). When spawned, the event handler receives `PROCMAN_WATCH_*` environment variables with failure context.
 
 ## Expression Language
 
@@ -442,13 +453,16 @@ All parse-time and runtime errors include the source file path, line number, and
 ### Parse-Time
 
 - Syntax errors
+- Duplicate job, service, or event names
+- Jobs and services share a namespace — a service cannot have the same name as a job
+- Duplicate watch names within a single job/service/event
 - Unknown identifiers (referencing an arg or job that doesn't exist)
 - `after @name` must target a `job` (not a `service`)
 - `@job.KEY` references must point to a `job` (not a `service`)
 - `@job.KEY` references require `after @job` in the referencing process's `wait` block (direct or transitive)
 - Circular dependencies in `after` references
 - `on_fail spawn @name` must reference an `event`
-- Variable shadowing
+- Variable shadowing (between `for` loop variables and `contains` `var` bindings)
 - Empty `run` commands
 
 ### Runtime
@@ -468,13 +482,13 @@ All fatal — immediate shutdown:
 - `include` / `import` for splitting configs across files
 - `on_fail` block syntax for multi-action handlers
 - Arithmetic in expressions
-- `procman check <filename>` static analysis command
 
 ## Full Example
 
 ~~~
 config {
   logs = "./my-logs"
+  log_time = true
 
   env {
     RUST_LOG = args.log_level
@@ -532,6 +546,18 @@ service db {
     connect "127.0.0.1:5432"
   }
   run "db-client start"
+}
+
+job extract-config {
+  wait {
+    contains "/tmp/config.json" {
+      format = "json"
+      key = "$.database.host"
+      var = db_host
+    }
+  }
+  env DB_HOST = db_host
+  run "echo connected to $DB_HOST"
 }
 
 service healthcheck {

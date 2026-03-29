@@ -1,9 +1,24 @@
 # Changelog
 
+## [0.19.0] - 2026-03-29
+
+### Added
+- `poll` and `timeout` options are now supported on all wait conditions (`exists`, `!exists`, `!running`, `after`). Previously only `http`, `connect`, `!connect`, and `contains` accepted these options. Defaults are unchanged (poll = 1s, or 100ms for `after`; timeout = none).
+- Language Design spec added to the [mdbook documentation](https://wbbradley.github.io/procman/language-design.html).
+
+### Changed
+- Repositioned `.pman` from "DSL" to "language" across all documentation and metadata surfaces (README, Cargo.toml, CLI help, docs, design spec).
+- Corrected documentation to reflect actual default `timeout` for wait conditions: `none` (wait indefinitely), not `60s`. Runtime behavior is unchanged.
+- Documented both `"json"` and `"yaml"` as supported `contains` condition formats.
+- Expanded parse-time validation rules in the language design spec (duplicate names, namespace collisions, duplicate watch names).
+
+### Removed
+- Reserved keyword `as` removed from the lexer. It was never part of the grammar; removing it frees the identifier for use as a job/service/event name.
+
 ## [0.18.0] - 2026-03-28
 
 ### Breaking Changes
-- **Removed YAML config file support.** procman no longer accepts `.yaml` or `.yml` configuration files. Only the `.pman` DSL format is now supported. Users with YAML config files must convert them to the `.pman` format.
+- **Removed YAML config file support.** procman no longer accepts `.yaml` or `.yml` configuration files. Only the `.pman` format is now supported. Users with YAML config files must convert them to the `.pman` format.
 
 ### Added
 - `log_time` config option: when `log_time = true` is set in the `config` block, every log line is prefixed with elapsed time since procman started (e.g., `api 1.2s | listening on :3000`). Defaults to `false`.
@@ -18,7 +33,7 @@
 
 ### Added
 - `--check` CLI flag: validates the config file (parsing, arg definitions, template resolution, dependency cycle detection, all static checks) and exits with `<path>: ok` on success, without starting any processes. Useful for CI linting and editor integration.
-- `service` keyword in the `.pman` DSL for declaring long-running daemon processes, with full support for `if` conditions, `env`, `wait`, `watch`, and `for` blocks.
+- `service` keyword in `.pman` for declaring long-running daemon processes, with full support for `if` conditions, `env`, `wait`, `watch`, and `for` blocks.
 
 ### Changed
 - Error messages from the `.pman` parser and lexer now use a standardized `<file>:<line>:<col>: error: <description>` format, matching common compiler diagnostic conventions for editor gutter integration.
@@ -35,7 +50,7 @@
 ## [0.15.2] - 2026-03-24
 
 ### Added
-- New `.pman` DSL config file format as an alternative to YAML. When the config file path ends with `.pman`, procman uses a purpose-built parser supporting `config {}`, `job {}`, `event {}` blocks with `env`, `wait`, `watch`, `for` loops, conditional jobs (`job name if expr {}`), and an expression language. The YAML format continues to work unchanged.
+- New `.pman` language as an alternative to YAML. When the config file path ends with `.pman`, procman uses a purpose-built parser supporting `config {}`, `job {}`, `event {}` blocks with `env`, `wait`, `watch`, `for` loops, conditional jobs (`job name if expr {}`), and an expression language. The YAML format continues to work unchanged.
 - Source-location context (file, line, column) in `.pman` parser error messages.
 
 ### Fixed

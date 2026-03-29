@@ -38,7 +38,6 @@ pub enum TokenKind {
     Running,  // running
     Glob,     // glob
     Arg,      // arg
-    As,       // as
     True,     // true
     False,    // false
     None,     // none
