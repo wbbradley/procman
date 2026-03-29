@@ -12,6 +12,7 @@ pub struct File {
 #[derive(Debug)]
 pub struct ConfigBlock {
     pub logs: Option<StringLit>,
+    pub log_time: Option<bool>,
     pub env: Vec<EnvBinding>,
     pub args: Vec<ArgDef>,
     pub span: Span,

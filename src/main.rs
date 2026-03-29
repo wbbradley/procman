@@ -137,6 +137,7 @@ fn run_supervisor(
     let logger = Arc::new(Mutex::new(log::Logger::new(
         &names,
         header.log_dir.as_deref(),
+        header.log_time,
     )?));
 
     logger

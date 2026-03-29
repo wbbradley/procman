@@ -3,6 +3,7 @@ use std::{
     fs::{self, File},
     io::Write,
     path::PathBuf,
+    time::Instant,
 };
 
 use anyhow::{Context, Result};
@@ -13,16 +14,18 @@ pub struct Logger {
     combined_log: Option<File>,
     log_dir: PathBuf,
     print_to_stdout: bool,
+    log_time: bool,
+    start_time: Instant,
 }
 
 impl Logger {
-    pub fn new(names: &[String], custom_log_dir: Option<&str>) -> Result<Self> {
+    pub fn new(names: &[String], custom_log_dir: Option<&str>, log_time: bool) -> Result<Self> {
         let log_dir = PathBuf::from(custom_log_dir.unwrap_or("logs/procman"));
         let _ = fs::remove_dir_all(&log_dir);
         fs::create_dir_all(&log_dir).context("creating logs directory")?;
         let combined_log =
             File::create(log_dir.join("procman.log")).context("creating combined log file")?;
-        Self::with_options(names, log_dir, true, Some(combined_log))
+        Self::with_options(names, log_dir, true, Some(combined_log), log_time)
     }
 
     fn with_options(
@@ -30,6 +33,7 @@ impl Logger {
         log_dir: PathBuf,
         print_to_stdout: bool,
         combined_log: Option<File>,
+        log_time: bool,
     ) -> Result<Self> {
         fs::create_dir_all(&log_dir).context("creating logs directory")?;
         let max_name_len = names.iter().map(|n| n.len()).max().unwrap_or(0);
@@ -48,12 +52,14 @@ impl Logger {
             combined_log,
             log_dir,
             print_to_stdout,
+            log_time,
+            start_time: Instant::now(),
         })
     }
 
     #[cfg(test)]
     pub fn new_for_test(names: &[String], log_dir: PathBuf) -> Result<Self> {
-        Self::with_options(names, log_dir, false, None)
+        Self::with_options(names, log_dir, false, None, false)
     }
 
     pub fn log_dir(&self) -> &std::path::Path {
@@ -73,11 +79,17 @@ impl Logger {
 
     pub fn log_line(&mut self, name: &str, line: &str) {
         let padded = format!("{:>width$}", name, width = self.max_name_len);
+        let prefix = if self.log_time {
+            let elapsed = self.start_time.elapsed().as_secs_f64();
+            format!("{padded} {elapsed:.1}s |")
+        } else {
+            format!("{padded} |")
+        };
         if let Some(f) = &mut self.combined_log {
-            let _ = writeln!(f, "{padded} | {line}");
+            let _ = writeln!(f, "{prefix} {line}");
         }
         if self.print_to_stdout {
-            println!("{padded} | {line}");
+            println!("{prefix} {line}");
         }
         if let Some(f) = self.log_files.get_mut(name) {
             let _ = writeln!(f, "{line}");

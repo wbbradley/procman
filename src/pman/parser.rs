@@ -193,6 +193,7 @@ impl<'a> Parser<'a> {
 
         let mut config = ast::ConfigBlock {
             logs: None,
+            log_time: None,
             env: Vec::new(),
             args: Vec::new(),
             span: start_span,
@@ -210,6 +211,23 @@ impl<'a> Parser<'a> {
                     self.advance();
                     self.expect(&TokenKind::Assign)?;
                     config.logs = Some(self.expect_string_lit()?);
+                }
+                Some(TokenKind::Ident(name)) if name == "log_time" => {
+                    let name_span = self.span();
+                    self.advance();
+                    self.expect(&TokenKind::Assign)?;
+                    let expr = self.parse_expr()?;
+                    match expr {
+                        Expr::BoolLit(v, _) => {
+                            config.log_time = Some(v);
+                        }
+                        _ => {
+                            bail!(
+                                "{}",
+                                self.fmt_error(name_span, "log_time must be true or false")
+                            );
+                        }
+                    }
                 }
                 Some(TokenKind::Arg) => {
                     config.args.push(self.parse_arg_def()?);
@@ -936,6 +954,39 @@ mod tests {
         assert!(matches!(&config.env[0].value, Expr::StringLit(s, _) if s == "production"));
         assert_eq!(config.env[1].key, "PORT");
         assert!(matches!(&config.env[1].value, Expr::ArgsRef(name, _) if name == "port"));
+    }
+
+    #[test]
+    fn parse_config_log_time_true() {
+        let file = parse("config { log_time = true }", "test.pman").unwrap();
+        let config = file.config.unwrap();
+        assert_eq!(config.log_time, Some(true));
+    }
+
+    #[test]
+    fn parse_config_log_time_false() {
+        let file = parse("config { log_time = false }", "test.pman").unwrap();
+        let config = file.config.unwrap();
+        assert_eq!(config.log_time, Some(false));
+    }
+
+    #[test]
+    fn parse_config_log_time_default() {
+        let file = parse("config {}", "test.pman").unwrap();
+        let config = file.config.unwrap();
+        assert!(config.log_time.is_none());
+    }
+
+    #[test]
+    fn parse_config_log_time_with_logs() {
+        let file = parse(
+            r#"config { logs = "./my-logs" log_time = true }"#,
+            "test.pman",
+        )
+        .unwrap();
+        let config = file.config.unwrap();
+        assert_eq!(config.logs.unwrap().value, "./my-logs");
+        assert_eq!(config.log_time, Some(true));
     }
 
     // ── Job/event tests ──

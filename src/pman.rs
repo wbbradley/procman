@@ -27,6 +27,11 @@ pub fn parse_header(input: &str, path: &str) -> Result<config_parser::ConfigHead
         .config
         .as_ref()
         .and_then(|c| c.logs.as_ref().map(|l| l.value.clone()));
+    let log_time = file
+        .config
+        .as_ref()
+        .and_then(|c| c.log_time)
+        .unwrap_or(false);
     let arg_defs = match file.config {
         Some(config) => config
             .args
@@ -35,5 +40,9 @@ pub fn parse_header(input: &str, path: &str) -> Result<config_parser::ConfigHead
             .collect::<Result<_>>()?,
         None => Vec::new(),
     };
-    Ok(config_parser::ConfigHeader { log_dir, arg_defs })
+    Ok(config_parser::ConfigHeader {
+        log_dir,
+        log_time,
+        arg_defs,
+    })
 }

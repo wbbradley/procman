@@ -26,6 +26,7 @@ pub struct ArgDef {
 
 pub struct ConfigHeader {
     pub log_dir: Option<String>,
+    pub log_time: bool,
     pub arg_defs: Vec<ArgDef>,
 }
 
@@ -38,6 +39,7 @@ struct ProcmanFile {
 #[derive(Deserialize)]
 struct ConfigSection {
     logs: Option<String>,
+    log_time: Option<bool>,
     args: Option<HashMap<String, YamlArgDef>>,
 }
 
@@ -103,11 +105,20 @@ fn parse_procman_file(path: &str) -> Result<ProcmanFile> {
 pub fn parse_header(path: &str) -> Result<ConfigHeader> {
     let file = parse_procman_file(path)?;
     let log_dir = file.config.as_ref().and_then(|c| c.logs.clone());
+    let log_time = file
+        .config
+        .as_ref()
+        .and_then(|c| c.log_time)
+        .unwrap_or(false);
     let arg_defs = match file.config.and_then(|c| c.args) {
         Some(args) => convert_arg_defs(args)?,
         None => Vec::new(),
     };
-    Ok(ConfigHeader { log_dir, arg_defs })
+    Ok(ConfigHeader {
+        log_dir,
+        log_time,
+        arg_defs,
+    })
 }
 
 #[derive(Deserialize)]
@@ -1426,5 +1437,47 @@ jobs:
         let (configs, _) = parse(&path, &HashMap::new(), &arg_values).unwrap();
         let app = configs.iter().find(|c| c.name == "app").unwrap();
         assert_eq!(app.run, "echo ${{ setup.DB_URL }} info");
+    }
+
+    #[test]
+    fn parse_yaml_config_log_time() {
+        let yaml = "\
+config:
+  log_time: true
+jobs:
+  web:
+    run: echo hello
+";
+        let path = write_yaml(yaml);
+        let header = parse_header(&path).unwrap();
+        assert!(header.log_time);
+    }
+
+    #[test]
+    fn parse_yaml_config_log_time_default() {
+        let yaml = "\
+jobs:
+  web:
+    run: echo hello
+";
+        let path = write_yaml(yaml);
+        let header = parse_header(&path).unwrap();
+        assert!(!header.log_time);
+    }
+
+    #[test]
+    fn parse_yaml_config_log_time_with_logs() {
+        let yaml = "\
+config:
+  logs: ./my-logs
+  log_time: true
+jobs:
+  web:
+    run: echo hello
+";
+        let path = write_yaml(yaml);
+        let header = parse_header(&path).unwrap();
+        assert_eq!(header.log_dir.as_deref(), Some("./my-logs"));
+        assert!(header.log_time);
     }
 }
