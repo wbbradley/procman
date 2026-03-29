@@ -7,9 +7,7 @@ A process supervisor with a dependency DAG and a custom `.pman` DSL. Spawns jobs
 
 ## Why procman?
 
-If your local dev loop looks like `docker compose up --build`, you're waiting for container rebuilds every time you change a line of code. procman runs your processes directly on the host — edit, restart, and see results in seconds instead of minutes.
-
-For infrastructure that genuinely needs containers (databases, message queues, etc.), just wrap them in a procman service:
+Running processes directly on your host means faster startup, straightforward debugging, native access to profiling tools, and no container rebuild step in your edit/run cycle. For infrastructure that genuinely needs containers (databases, message queues, etc.), just wrap them in a procman service:
 
 ```
 service db {
