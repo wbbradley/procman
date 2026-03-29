@@ -3,7 +3,28 @@
 [![crates.io](https://img.shields.io/crates/v/procman.svg)](https://crates.io/crates/procman)
 [![docs](https://img.shields.io/badge/docs-mdbook-blue)](https://wbbradley.github.io/procman/)
 
-A foreman-like process supervisor written in Rust. Reads a `.pman` config file, spawns all listed jobs and services, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives. See the [full documentation](https://wbbradley.github.io/procman/) for detailed guides on configuration, dependencies, templates, and more.
+A process supervisor with a dependency DAG and a custom `.pman` DSL. Spawns jobs and services, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives. See the [full documentation](https://wbbradley.github.io/procman/) for detailed guides on configuration, dependencies, templates, and more.
+
+## Why procman?
+
+If your local dev loop looks like `docker compose up --build`, you're waiting for container rebuilds every time you change a line of code. procman runs your processes directly on the host — edit, restart, and see results in seconds instead of minutes.
+
+For infrastructure that genuinely needs containers (databases, message queues, etc.), just wrap them in a procman service:
+
+```
+service db {
+  run "docker compose up db"
+}
+
+service api {
+  wait {
+    connect "127.0.0.1:5432"
+  }
+  run "cargo run --bin api-server"
+}
+```
+
+You get fast iteration on the code you're actively changing, Docker for the things that benefit from it, and procman handling the dependency ordering between them.
 
 ## Usage
 
@@ -188,6 +209,7 @@ The config file contains top-level blocks in any order:
 
 - `config { }` (optional): global settings.
   - `logs` (optional): custom log directory path (default: `logs/procman`). Recreated each run.
+  - `log_time` (optional, default `false`): when `true`, each log line is prefixed with elapsed time since procman started (e.g., `api 1.2s | listening on :3000`).
   - `env { }` (optional): global environment variable bindings applied to all jobs and services. Overridable per-job/service.
   - `arg name { }` (optional): user-defined CLI arguments parsed from argv after `--`. Underscores in names become dashes on the CLI (e.g. `log_level` → `--log-level`). Fields:
     - `type` (optional, default `string`): `string` or `bool`. String args take a value (`--name VALUE`), bool args are flags (`--name` = true).

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.18.0] - 2026-03-28
+
+### Breaking Changes
+- **Removed YAML config file support.** procman no longer accepts `.yaml` or `.yml` configuration files. Only the `.pman` DSL format is now supported. Users with YAML config files must convert them to the `.pman` format.
+
+### Added
+- `log_time` config option: when `log_time = true` is set in the `config` block, every log line is prefixed with elapsed time since procman started (e.g., `api 1.2s | listening on :3000`). Defaults to `false`.
+
 ## [0.17.0] - 2026-03-28
 
 ### Breaking Changes
