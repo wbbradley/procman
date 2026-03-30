@@ -4,6 +4,7 @@ use crate::pman::token::Span;
 #[derive(Debug)]
 pub struct File {
     pub config: Option<ConfigBlock>,
+    pub args: Vec<ArgDef>,
     pub jobs: Vec<JobDef>,
     pub services: Vec<ServiceDef>,
     pub events: Vec<EventDef>,
@@ -14,7 +15,6 @@ pub struct ConfigBlock {
     pub logs: Option<StringLit>,
     pub log_time: Option<bool>,
     pub env: Vec<EnvBinding>,
-    pub args: Vec<ArgDef>,
     pub span: Span,
 }
 

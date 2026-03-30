@@ -33,7 +33,8 @@ Duration literals are a number followed by a unit suffix: `s` (seconds), `ms` (m
 
 A `.pman` file contains top-level blocks in any order:
 
-- `config { }` — global settings, args, global env
+- `config { }` — global settings, global env
+- `arg name { }` — CLI argument declaration
 - `job name { }` — one-shot process (runs to completion)
 - `job name if expr { }` — conditionally evaluated one-shot job
 - `service name { }` — long-running daemon process
@@ -50,25 +51,6 @@ config {
   env {
     RUST_LOG = args.log_level
   }
-
-  arg port {
-    type = string
-    default = "3000"
-    short = "p"
-    description = "Port to listen on"
-  }
-
-  arg log_level {
-    type = string
-    default = "info"
-    short = "r"
-    description = "RUST_LOG configuration"
-  }
-
-  arg enable_feature {
-    type = bool
-    default = false
-  }
 }
 ```
 
@@ -84,9 +66,32 @@ Optional boolean. When `true`, every log line is prefixed with elapsed time sinc
 
 Global environment variable bindings applied to all jobs. Overridable per-job.
 
-### `config.arg`
+## Arg Declarations
 
-CLI arguments parsed after `--`. Underscores become dashes on the CLI (`log_level` -> `--log-level`).
+CLI arguments parsed after `--`. Declared at the top level, outside `config`.
+
+```
+arg port {
+  type = string
+  default = "3000"
+  short = "p"
+  description = "Port to listen on"
+}
+
+arg log_level {
+  type = string
+  default = "info"
+  short = "r"
+  description = "RUST_LOG configuration"
+}
+
+arg enable_feature {
+  type = bool
+  default = false
+}
+```
+
+Underscores become dashes on the CLI (`log_level` -> `--log-level`).
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
@@ -485,25 +490,25 @@ config {
   env {
     RUST_LOG = args.log_level
   }
+}
 
-  arg port {
-    type = string
-    default = "3000"
-    short = "p"
-    description = "Port to listen on"
-  }
+arg port {
+  type = string
+  default = "3000"
+  short = "p"
+  description = "Port to listen on"
+}
 
-  arg log_level {
-    type = string
-    default = "info"
-    short = "r"
-    description = "RUST_LOG configuration"
-  }
+arg log_level {
+  type = string
+  default = "info"
+  short = "r"
+  description = "RUST_LOG configuration"
+}
 
-  arg enable_worker {
-    type = bool
-    default = false
-  }
+arg enable_worker {
+  type = bool
+  default = false
 }
 
 job migrate {

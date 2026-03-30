@@ -146,6 +146,7 @@ impl<'a> Parser<'a> {
     fn parse_file(&mut self) -> Result<ast::File> {
         let mut file = ast::File {
             config: None,
+            args: Vec::new(),
             jobs: Vec::new(),
             services: Vec::new(),
             events: Vec::new(),
@@ -158,6 +159,9 @@ impl<'a> Parser<'a> {
                         bail!("{}", self.fmt_error(self.span(), "duplicate config block"));
                     }
                     file.config = Some(self.parse_config_block()?);
+                }
+                Some(TokenKind::Arg) => {
+                    file.args.push(self.parse_arg_def()?);
                 }
                 Some(TokenKind::Job) => {
                     file.jobs.push(self.parse_job_def()?);
@@ -174,7 +178,7 @@ impl<'a> Parser<'a> {
                         self.fmt_error(
                             self.span(),
                             &format!(
-                                "expected 'config', 'job', 'service', or 'event', got {:?}",
+                                "expected 'config', 'arg', 'job', 'service', or 'event', got {:?}",
                                 other
                             )
                         )
@@ -195,7 +199,6 @@ impl<'a> Parser<'a> {
             logs: None,
             log_time: None,
             env: Vec::new(),
-            args: Vec::new(),
             span: start_span,
         };
 
@@ -228,9 +231,6 @@ impl<'a> Parser<'a> {
                             );
                         }
                     }
-                }
-                Some(TokenKind::Arg) => {
-                    config.args.push(self.parse_arg_def()?);
                 }
                 Some(TokenKind::Env) => {
                     self.parse_env_entry_or_block(&mut config.env)?;
@@ -903,7 +903,6 @@ mod tests {
         let file = parse("config {}", "test.pman").unwrap();
         let config = file.config.unwrap();
         assert!(config.logs.is_none());
-        assert!(config.args.is_empty());
         assert!(config.env.is_empty());
     }
 
@@ -915,21 +914,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_config_arg() {
+    fn parse_top_level_arg() {
         let input = r#"
-            config {
-                arg port {
-                    type = string
-                    default = "8080"
-                    short = "-p"
-                    description = "Port to listen on"
-                }
+            arg port {
+                type = string
+                default = "8080"
+                short = "-p"
+                description = "Port to listen on"
             }
         "#;
         let file = parse(input, "test.pman").unwrap();
-        let config = file.config.unwrap();
-        assert_eq!(config.args.len(), 1);
-        let arg = &config.args[0];
+        assert_eq!(file.args.len(), 1);
+        let arg = &file.args[0];
         assert_eq!(arg.name, "port");
         assert_eq!(arg.arg_type, Some(ast::ArgType::String));
         assert!(matches!(&arg.default, Some(Expr::StringLit(s, _)) if s == "8080"));
@@ -1308,24 +1304,49 @@ mod tests {
     }
 
     #[test]
-    fn parse_config_bool_arg() {
+    fn parse_top_level_bool_arg() {
         let input = r#"
-            config {
-                arg verbose {
-                    type = bool
-                    default = false
-                    short = "-v"
-                    description = "Enable verbose output"
-                }
+            arg verbose {
+                type = bool
+                default = false
+                short = "-v"
+                description = "Enable verbose output"
             }
         "#;
         let file = parse(input, "test.pman").unwrap();
-        let config = file.config.unwrap();
-        assert_eq!(config.args.len(), 1);
-        let arg = &config.args[0];
+        assert_eq!(file.args.len(), 1);
+        let arg = &file.args[0];
         assert_eq!(arg.name, "verbose");
         assert_eq!(arg.arg_type, Some(ast::ArgType::Bool));
         assert!(matches!(&arg.default, Some(Expr::BoolLit(false, _))));
         assert_eq!(arg.short.as_ref().unwrap().value, "-v");
+    }
+
+    #[test]
+    fn parse_multiple_top_level_args() {
+        let input = r#"
+            arg port { type = string default = "3000" }
+            arg verbose { type = bool default = false }
+            job web { run "serve" }
+        "#;
+        let file = parse(input, "test.pman").unwrap();
+        assert_eq!(file.args.len(), 2);
+        assert_eq!(file.args[0].name, "port");
+        assert_eq!(file.args[1].name, "verbose");
+    }
+
+    #[test]
+    fn parse_arg_inside_config_fails() {
+        let input = r#"
+            config {
+                arg port { type = string default = "3000" }
+            }
+        "#;
+        let err = parse(input, "test.pman").unwrap_err();
+        assert!(
+            err.to_string().contains("unexpected token in config block"),
+            "got: {}",
+            err
+        );
     }
 }

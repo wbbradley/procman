@@ -759,7 +759,7 @@ mod tests {
     fn lower_env_with_args_ref() {
         let (configs, _) = lower_with_args(
             r#"
-            config { arg port { type = string default = "3000" } }
+            arg port { type = string default = "3000" }
             job web { env PORT = args.port run "serve" }
             "#,
             &[("port", "8080")],
@@ -894,7 +894,7 @@ mod tests {
     fn lower_conditional_job_false_skipped() {
         let (configs, _) = lower_with_args(
             r#"
-            config { arg enabled { type = bool default = false } }
+            arg enabled { type = bool default = false }
             job worker if args.enabled { run "work" }
             "#,
             &[("enabled", "false")],
@@ -906,7 +906,7 @@ mod tests {
     fn lower_conditional_job_true_emitted() {
         let (configs, _) = lower_with_args(
             r#"
-            config { arg enabled { type = bool default = false } }
+            arg enabled { type = bool default = false }
             job worker if args.enabled { run "work" }
             "#,
             &[("enabled", "true")],
@@ -919,7 +919,7 @@ mod tests {
     fn lower_skipped_job_still_allows_after() {
         let (configs, _) = lower_with_args(
             r#"
-            config { arg enabled { type = bool default = false } }
+            arg enabled { type = bool default = false }
             job setup if args.enabled { run "setup" }
             service api { wait { after @setup } run "start" }
             "#,
@@ -1055,25 +1055,25 @@ config {
     env {
         RUST_LOG = args.log_level
     }
+}
 
-    arg port {
-        type = string
-        default = "3000"
-        short = "p"
-        description = "Port to listen on"
-    }
+arg port {
+    type = string
+    default = "3000"
+    short = "p"
+    description = "Port to listen on"
+}
 
-    arg log_level {
-        type = string
-        default = "info"
-        short = "r"
-        description = "RUST_LOG configuration"
-    }
+arg log_level {
+    type = string
+    default = "info"
+    short = "r"
+    description = "RUST_LOG configuration"
+}
 
-    arg enable_worker {
-        type = bool
-        default = false
-    }
+arg enable_worker {
+    type = bool
+    default = false
 }
 
 job migrate {

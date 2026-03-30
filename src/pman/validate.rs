@@ -8,12 +8,23 @@ use crate::pman::{
 };
 
 pub fn validate(file: &ast::File, path: &str) -> Result<()> {
+    let mut arg_names: HashSet<&str> = HashSet::new();
     let mut job_names: HashSet<&str> = HashSet::new();
     let mut service_names: HashSet<&str> = HashSet::new();
     let mut event_names: HashSet<&str> = HashSet::new();
     // Jobs are once=true by default; collect all job names as once jobs.
     let mut once_jobs: HashSet<&str> = HashSet::new();
     let mut errors: Vec<String> = Vec::new();
+
+    // Step 0: Check duplicate arg names.
+    for arg in &file.args {
+        if !arg_names.insert(&arg.name) {
+            errors.push(
+                arg.span
+                    .fmt_error(path, &format!("duplicate arg name '{}'", arg.name)),
+            );
+        }
+    }
 
     // Step 1: Collect names and check duplicates.
     for job in &file.jobs {
@@ -682,5 +693,20 @@ job web { run "other" }"#;
             "expected file location in error: {msg}"
         );
         assert!(msg.contains("error: duplicate job name"), "got: {msg}");
+    }
+
+    #[test]
+    fn duplicate_arg_name_detected() {
+        let input = r#"
+            arg port { type = string default = "3000" }
+            arg port { type = string default = "8080" }
+            job web { run "serve" }
+        "#;
+        let err = parse_and_validate(input).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate arg name"),
+            "got: {}",
+            err
+        );
     }
 }
