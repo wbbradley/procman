@@ -69,7 +69,7 @@ impl<'a> Lexer<'a> {
         let start_col = self.col;
         let start_pos = self.pos;
 
-        // consume opening ```
+        // consume opening """
         self.advance();
         self.advance();
         self.advance();
@@ -84,11 +84,11 @@ impl<'a> Lexer<'a> {
                     start_col
                 );
             }
-            if self.starts_with(b"```") {
+            if self.starts_with(b"\"\"\"") {
                 let content =
                     std::str::from_utf8(&self.input[content_start..self.pos]).expect("valid utf-8");
                 let content = content.to_string();
-                // consume closing ```
+                // consume closing """
                 self.advance();
                 self.advance();
                 self.advance();
@@ -338,7 +338,7 @@ impl<'a> Lexer<'a> {
         let ch = self.peek();
 
         // fenced string
-        if self.starts_with(b"```") {
+        if self.starts_with(b"\"\"\"") {
             return self.lex_fenced_string().map(Some);
         }
 
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn lex_fenced_string() {
-        let input = "run ```\n  echo hello\n```";
+        let input = "run \"\"\"\n  echo hello\n\"\"\"";
         assert_eq!(
             kinds(input),
             vec![
@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn lex_unterminated_fenced_errors() {
-        assert!(lex("```\nhello", 1, 1, "test.pman").is_err());
+        assert!(lex("\"\"\"\nhello", 1, 1, "test.pman").is_err());
     }
 
     #[test]

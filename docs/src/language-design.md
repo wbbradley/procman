@@ -125,10 +125,10 @@ A `service` is a long-running daemon process that runs for the lifetime of the s
 
 ```
 job migrate {
-  run ```
+  run """
     ./run-migrations
     echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
-  ```
+  """
 }
 
 service api {
@@ -155,7 +155,7 @@ service api {
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `run` | yes | Shell command — inline `"..."` or fenced triple-backtick block |
+| `run` | yes | Shell command — inline `"..."` or fenced triple-quote block |
 | `env` | no | Single `env KEY = expr` or `env { }` block. Both styles can coexist. |
 | `wait` | no | Block of conditions, all must pass before `run` |
 | `if` | no | Expression on the `job`/`service` line: `job name if expr { }` |
@@ -171,10 +171,10 @@ run "echo hello"
 
 Multi-line fenced:
 ~~~
-run ```
+run """
   ./run-migrations
   echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
-```
+"""
 ~~~
 
 Procman never interpolates inside shell strings. Values flow in exclusively via environment variables.
@@ -515,10 +515,10 @@ config {
 }
 
 job migrate {
-  run ```
+  run """
     ./run-migrations
     echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
-  ```
+  """
 }
 
 service web {

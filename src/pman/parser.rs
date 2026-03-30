@@ -1057,7 +1057,7 @@ mod tests {
 
     #[test]
     fn parse_fenced_run() {
-        let input = "job migrate { run ```\n  ./run-migrations\n``` }";
+        let input = "job migrate { run \"\"\"\n  ./run-migrations\n\"\"\" }";
         let file = parse(input, "test.pman").unwrap();
         let job = &file.jobs[0];
         assert!(

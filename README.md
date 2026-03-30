@@ -126,10 +126,10 @@ config {
 }
 
 job migrate {
-  run ```
+  run """
     ./run-migrations
     echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
-  ```
+  """
 }
 
 service web {
@@ -222,7 +222,7 @@ The config file contains top-level blocks in any order:
 
 Each job/service definition supports:
 
-- `run` (required): the command to execute. Inline `"..."` or fenced triple-backtick block. All commands are passed to `sh -euo pipefail -c`, so shell features (pipes, redirects, `&&`, variable expansion) work. The strict flags mean unset variable references and pipeline failures are treated as errors.
+- `run` (required): the command to execute. Inline `"..."` or fenced triple-quote block. All commands are passed to `sh -euo pipefail -c`, so shell features (pipes, redirects, `&&`, variable expansion) work. The strict flags mean unset variable references and pipeline failures are treated as errors.
 - `env` (optional): per-job environment variables. Single `env KEY = expr` or `env { }` block. Supports `args.name` references and `@job.KEY` output references.
 - `for VAR in iterable { }` (optional): fan-out across an iterable. Supported iterables: `glob("pattern")`, `["a", "b"]`, `0..3` (exclusive range), `0..=3` (inclusive range). Each iteration spawns an instance with the variable bound.
 - `wait { }` (optional): block of conditions that must all be satisfied before `run` executes. Circular dependencies are detected at parse time. Condition types:

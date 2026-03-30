@@ -167,12 +167,12 @@ run "echo hello"
 
 Multi-line fenced form:
 
-````
-run ```
+```
+run """
   ./run-migrations
   echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
+"""
 ```
-````
 
 Procman never interpolates inside shell strings. Values flow in exclusively
 via environment variables.
@@ -293,12 +293,12 @@ run "echo hello"
 ```
 
 Multi-line fenced:
-````
-run ```
+```
+run """
   ./run-migrations
   echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
+"""
 ```
-````
 
 ## Expression Language
 

@@ -37,10 +37,10 @@ strings.
 
 ~~~
 job migrate {
-  run ```
+  run """
     ./run-migrations
     echo "DATABASE_URL=postgres://localhost:5432/mydb" > $PROCMAN_OUTPUT
-  ```
+  """
 }
 
 service api {

@@ -46,7 +46,7 @@ pub enum TokenKind {
     String(String),       // "..." (contents, escapes resolved)
     Number(f64),          // 42, 3.14
     Duration(f64),        // 5.0 (seconds) — suffix parsed into seconds
-    FencedString(String), // ``` ... ``` (raw contents)
+    FencedString(String), // """ ... """ (raw contents)
 
     // Identifiers and references
     Ident(String), // bare identifier (e.g., job name, var name)
