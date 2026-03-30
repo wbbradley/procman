@@ -1,13 +1,5 @@
 # The .pman Language — Design Spec
 
-## Motivation
-
-The current YAML-based config has three interlocking problems:
-
-1. **Expressiveness ceiling** — no conditionals, limited iteration (glob-only `for_each`), no computed values.
-2. **Syntactic friction** — three interpolation mechanisms (`$VAR`, `${{ args.x }}`, `${{ process.key }}`), each resolved at different times. `serde(untagged)` dependency parsing produces confusing error messages.
-3. **Blurred mental model** — `condition` and `run` are shell commands, `depends` is declarative, templates mix procman expressions into shell strings. The boundary between config and script is unclear.
-
 ## Design Principles
 
 - **Declarative** — `.pman` describes what to run and when, not how. Runtime semantics (polling, fan-out tracking, shutdown cascades) remain procman's domain.
