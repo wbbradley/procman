@@ -16,12 +16,24 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
     let mut once_jobs: HashSet<&str> = HashSet::new();
     let mut errors: Vec<String> = Vec::new();
 
-    // Step 0: Check duplicate arg names.
+    // Step 0a: Check duplicate arg names.
     for arg in &file.args {
         if !arg_names.insert(&arg.name) {
             errors.push(
                 arg.span
                     .fmt_error(path, &format!("duplicate arg name '{}'", arg.name)),
+            );
+        }
+    }
+
+    // Step 0b: Check duplicate env keys.
+    let mut seen_env_keys: HashSet<&str> = HashSet::new();
+    for binding in &file.env {
+        if !seen_env_keys.insert(&binding.key) {
+            errors.push(
+                binding
+                    .span
+                    .fmt_error(path, &format!("duplicate env key '{}'", binding.key)),
             );
         }
     }
@@ -705,6 +717,23 @@ job web { run "other" }"#;
         let err = parse_and_validate(input).unwrap_err();
         assert!(
             err.to_string().contains("duplicate arg name"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn duplicate_env_key_detected() {
+        let input = r#"
+            env {
+                K = "a"
+                K = "b"
+            }
+            job web { run "serve" }
+        "#;
+        let err = parse_and_validate(input).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate env key"),
             "got: {}",
             err
         );

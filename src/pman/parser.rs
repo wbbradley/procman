@@ -147,6 +147,7 @@ impl<'a> Parser<'a> {
         let mut file = ast::File {
             config: None,
             args: Vec::new(),
+            env: Vec::new(),
             jobs: Vec::new(),
             services: Vec::new(),
             events: Vec::new(),
@@ -169,6 +170,9 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::Service) => {
                     file.services.push(self.parse_service_def()?);
                 }
+                Some(TokenKind::Env) => {
+                    self.parse_env_entry_or_block(&mut file.env)?;
+                }
                 Some(TokenKind::Event) => {
                     file.events.push(self.parse_event_def()?);
                 }
@@ -178,7 +182,7 @@ impl<'a> Parser<'a> {
                         self.fmt_error(
                             self.span(),
                             &format!(
-                                "expected 'config', 'arg', 'job', 'service', or 'event', got {:?}",
+                                "expected 'config', 'arg', 'env', 'job', 'service', or 'event', got {:?}",
                                 other
                             )
                         )
@@ -198,7 +202,6 @@ impl<'a> Parser<'a> {
         let mut config = ast::ConfigBlock {
             logs: None,
             log_time: None,
-            env: Vec::new(),
             span: start_span,
         };
 
@@ -231,9 +234,6 @@ impl<'a> Parser<'a> {
                             );
                         }
                     }
-                }
-                Some(TokenKind::Env) => {
-                    self.parse_env_entry_or_block(&mut config.env)?;
                 }
                 Some(other) => {
                     bail!(
@@ -903,7 +903,6 @@ mod tests {
         let file = parse("config {}", "test.pman").unwrap();
         let config = file.config.unwrap();
         assert!(config.logs.is_none());
-        assert!(config.env.is_empty());
     }
 
     #[test]
@@ -934,22 +933,39 @@ mod tests {
     }
 
     #[test]
-    fn parse_config_env_block() {
+    fn parse_top_level_env_block() {
         let input = r#"
-            config {
-                env {
-                    NODE_ENV = "production"
-                    PORT = args.port
-                }
+            env {
+                NODE_ENV = "production"
+                PORT = args.port
             }
         "#;
         let file = parse(input, "test.pman").unwrap();
-        let config = file.config.unwrap();
-        assert_eq!(config.env.len(), 2);
-        assert_eq!(config.env[0].key, "NODE_ENV");
-        assert!(matches!(&config.env[0].value, Expr::StringLit(s, _) if s == "production"));
-        assert_eq!(config.env[1].key, "PORT");
-        assert!(matches!(&config.env[1].value, Expr::ArgsRef(name, _) if name == "port"));
+        assert_eq!(file.env.len(), 2);
+        assert_eq!(file.env[0].key, "NODE_ENV");
+        assert!(matches!(&file.env[0].value, Expr::StringLit(s, _) if s == "production"));
+        assert_eq!(file.env[1].key, "PORT");
+        assert!(matches!(&file.env[1].value, Expr::ArgsRef(name, _) if name == "port"));
+    }
+
+    #[test]
+    fn parse_top_level_env_single() {
+        let input = r#"env NODE_ENV = "production""#;
+        let file = parse(input, "test.pman").unwrap();
+        assert_eq!(file.env.len(), 1);
+        assert_eq!(file.env[0].key, "NODE_ENV");
+        assert!(matches!(&file.env[0].value, Expr::StringLit(s, _) if s == "production"));
+    }
+
+    #[test]
+    fn parse_env_rejected_in_config() {
+        let input = r#"config { env { NODE_ENV = "production" } }"#;
+        let err = parse(input, "test.pman").unwrap_err();
+        assert!(
+            err.to_string().contains("unexpected token in config block"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]

@@ -8,17 +8,17 @@ top-level blocks in any order.
 ```
 config {
   logs = "./my-logs"
+}
 
-  env {
-    RUST_LOG = args.log_level
-  }
+env {
+  RUST_LOG = args.log_level
+}
 
-  arg port {
-    type = string
-    default = "3000"
-    short = "p"
-    description = "Port to listen on"
-  }
+arg port {
+  type = string
+  default = "3000"
+  short = "p"
+  description = "Port to listen on"
 }
 
 job migrate {
@@ -41,7 +41,9 @@ event recovery {
 
 A `.pman` file may contain:
 
-- **`config { }`** — global settings, CLI args, and shared environment variables
+- **`config { }`** — global settings (logs, log_time)
+- **`arg name { }`** — CLI argument declaration
+- **`env { }`** / **`env KEY = expr`** — global environment variable bindings
 - **`job name { }`** — a one-shot process that runs to completion
 - **`job name if expr { }`** — a conditionally evaluated one-shot job
 - **`service name { }`** — a long-running daemon process
@@ -85,36 +87,41 @@ config {
 }
 ```
 
-### `config.env`
+## `env { }` Block
 
 Global environment variable bindings applied to all jobs. Overridable per-job.
+Declared at the top level.
 
+Block form:
 ```
-config {
-  env {
-    RUST_LOG = args.log_level
-  }
+env {
+  RUST_LOG = args.log_level
 }
 ```
 
-### `config.arg`
+Single-binding form:
+```
+env RUST_LOG = args.log_level
+```
 
-CLI arguments parsed after `--`. Underscores become dashes on the CLI
-(`log_level` → `--log-level`).
+Both forms can appear multiple times and coexist in the same file.
+
+## `arg name { }` Block
+
+CLI arguments parsed after `--`. Declared at the top level. Underscores become
+dashes on the CLI (`log_level` → `--log-level`).
 
 ```
-config {
-  arg port {
-    type = string
-    default = "3000"
-    short = "p"
-    description = "Port to listen on"
-  }
+arg port {
+  type = string
+  default = "3000"
+  short = "p"
+  description = "Port to listen on"
+}
 
-  arg enable_feature {
-    type = bool
-    default = false
-  }
+arg enable_feature {
+  type = bool
+  default = false
 }
 ```
 
@@ -126,7 +133,7 @@ config {
 | `default` | no | — | Fallback value. Args without a default are required. |
 
 Arg values are referenced in expressions as `args.name`. There is no `env`
-field on args — use `config { env { } }` to explicitly bind args to
+field on args — use a top-level `env { }` block to explicitly bind args to
 environment variables.
 
 Running `procman myapp.pman -- --help` prints generated usage based on the
@@ -140,7 +147,7 @@ Lowest to highest:
 |--------|----------|
 | System env (inherited) | lowest |
 | CLI `-e KEY=VALUE` flags | |
-| Global `config { env { } }` | |
+| Top-level `env { }` | |
 | Per-job `env` | |
 | Per-iteration `for` bindings | highest |
 

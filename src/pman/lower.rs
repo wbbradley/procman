@@ -32,11 +32,8 @@ pub fn lower(
     let mut base_env: HashMap<String, String> = std::env::vars().collect();
     base_env.extend(extra_env.clone());
 
-    // Evaluate global env from config.env bindings.
-    let global_env = match &file.config {
-        Some(config) => eval_env_bindings(&config.env, arg_values, &HashMap::new(), path)?,
-        None => HashMap::new(),
-    };
+    // Evaluate global env bindings.
+    let global_env = eval_env_bindings(&file.env, arg_values, &HashMap::new(), path)?;
 
     // Determine skipped jobs/services (those with false conditions).
     let mut skipped_jobs: HashSet<String> = HashSet::new();
@@ -991,7 +988,7 @@ mod tests {
     fn lower_global_env_applies_to_all_jobs() {
         let (configs, _) = lower_with_args(
             r#"
-            config { env { RUST_LOG = args.log_level } }
+            env { RUST_LOG = args.log_level }
             job web { run "serve" }
             job api { run "start" }
             "#,
@@ -1032,7 +1029,7 @@ mod tests {
     fn lower_per_job_env_overrides_global() {
         let (configs, _) = lower_with_args(
             r#"
-            config { env { RUST_LOG = args.log_level } }
+            env { RUST_LOG = args.log_level }
             job web { env RUST_LOG = "warn" run "serve" }
             "#,
             &[("log_level", "debug")],
@@ -1051,10 +1048,10 @@ mod tests {
         let input = r#"
 config {
     logs = "./my-logs"
+}
 
-    env {
-        RUST_LOG = args.log_level
-    }
+env {
+    RUST_LOG = args.log_level
 }
 
 arg port {

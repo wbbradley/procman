@@ -33,8 +33,9 @@ Duration literals are a number followed by a unit suffix: `s` (seconds), `ms` (m
 
 A `.pman` file contains top-level blocks in any order:
 
-- `config { }` — global settings, global env
+- `config { }` — global settings (logs, log_time)
 - `arg name { }` — CLI argument declaration
+- `env { }` / `env KEY = expr` — global environment variable bindings
 - `job name { }` — one-shot process (runs to completion)
 - `job name if expr { }` — conditionally evaluated one-shot job
 - `service name { }` — long-running daemon process
@@ -47,10 +48,6 @@ A `.pman` file contains top-level blocks in any order:
 config {
   logs = "./my-logs"
   log_time = true
-
-  env {
-    RUST_LOG = args.log_level
-  }
 }
 ```
 
@@ -62,9 +59,24 @@ Optional log directory path. Defaults to `logs/procman`. Recreated each run.
 
 Optional boolean. When `true`, every log line is prefixed with elapsed time since procman started (e.g., `api 1.2s | listening on :3000`). Defaults to `false`.
 
-### `config.env`
+## Env Block
 
-Global environment variable bindings applied to all jobs. Overridable per-job.
+Global environment variable bindings applied to all jobs. Overridable per-job. Declared at the top level.
+
+Block form:
+```
+env {
+  RUST_LOG = args.log_level
+  PORT = "3000"
+}
+```
+
+Single-binding form:
+```
+env RUST_LOG = args.log_level
+```
+
+Both forms can appear multiple times and coexist in the same file.
 
 ## Arg Declarations
 
@@ -100,7 +112,7 @@ Underscores become dashes on the CLI (`log_level` -> `--log-level`).
 | `description` | no | — | Help text for `-- --help` |
 | `default` | no | — | Fallback value. Args without a default are required. |
 
-Arg values are referenced in expressions as `args.name`. There is no `env` field on args — use `config { env { } }` to explicitly bind args to environment variables.
+Arg values are referenced in expressions as `args.name`. There is no `env` field on args — use a top-level `env { }` block to explicitly bind args to environment variables.
 
 ### Env Precedence
 
@@ -108,7 +120,7 @@ Lowest to highest:
 
 1. System env (inherited)
 2. CLI `-e KEY=VALUE` flags
-3. Global `config { env { } }`
+3. Top-level `env { }`
 4. Per-job `env`
 5. Per-iteration `for` bindings
 
@@ -486,10 +498,10 @@ All fatal — immediate shutdown:
 config {
   logs = "./my-logs"
   log_time = true
+}
 
-  env {
-    RUST_LOG = args.log_level
-  }
+env {
+  RUST_LOG = args.log_level
 }
 
 arg port {
