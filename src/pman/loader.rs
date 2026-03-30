@@ -20,6 +20,7 @@ pub struct LoadedModule {
     pub path: String,
     #[allow(dead_code)]
     pub alias: String,
+    pub bindings: Vec<ast::ImportBinding>,
 }
 
 pub fn load(root_content: &str, root_path: &str) -> Result<LoadedModules> {
@@ -126,6 +127,7 @@ pub fn load(root_content: &str, root_path: &str) -> Result<LoadedModules> {
                 file: imported_file,
                 path: canonical_str,
                 alias: alias.clone(),
+                bindings: import_def.bindings.clone(),
             },
         );
     }
@@ -291,6 +293,35 @@ mod tests {
             "expected alias 'database', got keys: {:?}",
             modules.imports.keys().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn load_import_with_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string }
+            job migrate { run "migrate" }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db { url = "postgres://localhost/mydb" }
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = load(&content, root_path.to_str().unwrap()).unwrap();
+        assert_eq!(modules.imports["db"].bindings.len(), 1);
+        assert_eq!(modules.imports["db"].bindings[0].name, "url");
     }
 
     #[test]

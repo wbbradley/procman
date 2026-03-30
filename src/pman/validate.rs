@@ -539,6 +539,7 @@ struct ModuleEntities<'a> {
     services: HashSet<&'a str>,
     events: HashSet<&'a str>,
     once_jobs: HashSet<&'a str>,
+    args: HashSet<&'a str>,
 }
 
 fn build_module_entities(file: &ast::File) -> ModuleEntities<'_> {
@@ -547,7 +548,11 @@ fn build_module_entities(file: &ast::File) -> ModuleEntities<'_> {
         services: HashSet::new(),
         events: HashSet::new(),
         once_jobs: HashSet::new(),
+        args: HashSet::new(),
     };
+    for arg in &file.args {
+        entities.args.insert(&arg.name);
+    }
     for job in &file.jobs {
         entities.jobs.insert(&job.name);
         entities.once_jobs.insert(&job.name);
@@ -655,6 +660,26 @@ fn collect_namespaced_output_refs(
             collect_namespaced_output_refs(lhs, owner_name, registry, path, errors);
             collect_namespaced_output_refs(rhs, owner_name, registry, path, errors);
         }
+        Expr::NamespacedArgsRef(ns, name, span) => match registry.get(ns.as_str()) {
+            None => {
+                errors.push(span.fmt_error(
+                    path,
+                    &format!(
+                        "'{owner_name}': {ns}::args.{name} references unknown import alias '{ns}'"
+                    ),
+                ));
+            }
+            Some(entities) => {
+                if !entities.args.contains(name.as_str()) {
+                    errors.push(span.fmt_error(
+                        path,
+                        &format!(
+                            "'{owner_name}': {ns}::args.{name} references unknown arg '{name}' in '{ns}'"
+                        ),
+                    ));
+                }
+            }
+        },
         Expr::UnaryNot(inner, _) => {
             collect_namespaced_output_refs(inner, owner_name, registry, path, errors);
         }
@@ -701,6 +726,23 @@ pub fn validate_cross_refs(modules: &LoadedModules) -> Result<()> {
     let mut registry: HashMap<&str, ModuleEntities<'_>> = HashMap::new();
     for (alias, module) in &modules.imports {
         registry.insert(alias.as_str(), build_module_entities(&module.file));
+    }
+
+    // Validate import binding names reference existing args in target modules.
+    for import_def in &modules.root.imports {
+        if let Some(entities) = registry.get(import_def.alias.as_str()) {
+            for binding in &import_def.bindings {
+                if !entities.args.contains(binding.name.as_str()) {
+                    errors.push(binding.span.fmt_error(
+                        &modules.root_path,
+                        &format!(
+                            "import '{}': binding '{}' does not match any arg in the imported module",
+                            import_def.alias, binding.name,
+                        ),
+                    ));
+                }
+            }
+        }
     }
 
     // Validate namespaced refs in the root file.
@@ -1244,6 +1286,150 @@ job web { run "other" }"#;
                     http "http://localhost:8080/health"
                     on_fail spawn @db::recovery
                 }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        validate(&modules.root, root_path.to_str().unwrap()).unwrap();
+        for module in modules.imports.values() {
+            validate(&module.file, &module.path).unwrap();
+        }
+        validate_cross_refs(&modules).unwrap();
+    }
+
+    #[test]
+    fn import_binding_unknown_arg_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(&db_path, r#"job migrate { run "migrate" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db { url = "x" }
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        validate(&modules.root, root_path.to_str().unwrap()).unwrap();
+        let err = validate_cross_refs(&modules).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match any arg"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn import_binding_valid_arg_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string }
+            job migrate { run "migrate" }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db { url = "postgres://localhost/mydb" }
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        validate(&modules.root, root_path.to_str().unwrap()).unwrap();
+        for module in modules.imports.values() {
+            validate(&module.file, &module.path).unwrap();
+        }
+        validate_cross_refs(&modules).unwrap();
+    }
+
+    #[test]
+    fn namespaced_args_ref_unknown_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            service api {
+                env { DB_URL = db::args.url }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        validate(&modules.root, root_path.to_str().unwrap()).unwrap();
+        let err = validate_cross_refs(&modules).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown import alias"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn namespaced_args_ref_unknown_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(&db_path, r#"job migrate { run "migrate" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            service api {
+                env { DB_URL = db::args.url }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        validate(&modules.root, root_path.to_str().unwrap()).unwrap();
+        let err = validate_cross_refs(&modules).unwrap_err();
+        assert!(err.to_string().contains("unknown arg"), "got: {err}");
+    }
+
+    #[test]
+    fn namespaced_args_ref_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string }
+            job migrate { run "migrate" }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            service api {
+                env { DB_URL = db::args.url }
                 run "serve"
             }
             "#,

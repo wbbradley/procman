@@ -21,7 +21,7 @@ pub struct ImportDef {
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ImportBinding {
     pub name: String,
     pub value: Expr,
