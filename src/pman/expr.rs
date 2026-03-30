@@ -200,7 +200,7 @@ impl<'a> ExprParser<'a> {
                     }
                 }
             }
-            // @job.KEY
+            // @job.KEY or @ns::job.KEY
             TokenKind::At => {
                 let start_span = self.advance().span;
                 if self.at_end() {
@@ -209,7 +209,7 @@ impl<'a> ExprParser<'a> {
                         start_span.fmt_error(self.path, "expected identifier after '@'")
                     );
                 }
-                let job_name = match self.peek().unwrap().clone() {
+                let first_ident = match self.peek().unwrap().clone() {
                     TokenKind::Ident(name) => {
                         self.advance();
                         name
@@ -224,6 +224,30 @@ impl<'a> ExprParser<'a> {
                         );
                     }
                 };
+                let (namespace, job_name) = if self.peek() == Some(&TokenKind::ColonColon) {
+                    self.advance();
+                    let second_ident = match self.peek().cloned() {
+                        Some(TokenKind::Ident(name)) => {
+                            self.advance();
+                            name
+                        }
+                        other => {
+                            bail!(
+                                "{}",
+                                self.span().fmt_error(
+                                    self.path,
+                                    &format!(
+                                        "expected job name after '@{}::', got {:?}",
+                                        first_ident, other
+                                    )
+                                )
+                            );
+                        }
+                    };
+                    (Some(first_ident), second_ident)
+                } else {
+                    (None, first_ident)
+                };
                 self.expect(&TokenKind::Dot)?;
                 if self.at_end() {
                     bail!(
@@ -236,7 +260,7 @@ impl<'a> ExprParser<'a> {
                     TokenKind::Ident(key) => {
                         let end_span = self.advance().span;
                         let span = merge_spans(start_span, end_span);
-                        Ok(Expr::JobOutputRef(job_name, key, span))
+                        Ok(Expr::JobOutputRef(namespace, job_name, key, span))
                     }
                     other => {
                         bail!(
@@ -302,7 +326,7 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::DurationLit(_, s)
         | Expr::NoneLit(s)
         | Expr::ArgsRef(_, s)
-        | Expr::JobOutputRef(_, _, s)
+        | Expr::JobOutputRef(_, _, _, s)
         | Expr::LocalVar(_, s)
         | Expr::BinOp(_, _, _, s)
         | Expr::UnaryNot(_, s) => *s,
@@ -364,7 +388,23 @@ mod tests {
     fn job_output_ref() {
         let expr = parse("@migrate.exit_code");
         assert!(
-            matches!(expr, Expr::JobOutputRef(job, key, _) if job == "migrate" && key == "exit_code")
+            matches!(expr, Expr::JobOutputRef(None, ref job, ref key, _) if job == "migrate" && key == "exit_code")
+        );
+    }
+
+    #[test]
+    fn job_output_ref_namespaced() {
+        let expr = parse("@db::migrate.URL");
+        assert!(
+            matches!(expr, Expr::JobOutputRef(Some(ref ns), ref job, ref key, _) if ns == "db" && job == "migrate" && key == "URL")
+        );
+    }
+
+    #[test]
+    fn job_output_ref_local_unchanged() {
+        let expr = parse("@migrate.URL");
+        assert!(
+            matches!(expr, Expr::JobOutputRef(None, ref job, ref key, _) if job == "migrate" && key == "URL")
         );
     }
 

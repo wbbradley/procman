@@ -162,7 +162,7 @@ fn eval_expr_to_string(
                 span.fmt_error(path, &format!("undefined arg: args.{name}"))
             ),
         },
-        Expr::JobOutputRef(job, key, _) => Ok(format!("${{{{ {job}.{key} }}}}")),
+        Expr::JobOutputRef(_ns, job, key, _) => Ok(format!("${{{{ {job}.{key} }}}}")),
         Expr::LocalVar(name, span) => match local_vars.get(name) {
             Some(v) => Ok(v.clone()),
             None => bail!(
@@ -235,7 +235,7 @@ fn eval_condition_expr(
             "{}",
             span.fmt_error(path, "none not valid in condition context")
         ),
-        Expr::JobOutputRef(_, _, span) => bail!(
+        Expr::JobOutputRef(_, _, _, span) => bail!(
             "{}",
             span.fmt_error(path, "job output ref not valid in condition context")
         ),
@@ -347,7 +347,7 @@ fn lower_wait_condition(
     let retry = eval_option_retry(&opts.retry, path)?;
 
     match (&cond.kind, cond.negated) {
-        (ast::ConditionKind::After { job }, false) => Ok(Dependency::ProcessExited {
+        (ast::ConditionKind::After { namespace: _, job }, false) => Ok(Dependency::ProcessExited {
             name: job.clone(),
             poll_interval: poll,
             timeout,
@@ -478,7 +478,7 @@ fn lower_watch(
         Some(ast::OnFailAction::Shutdown) => config::OnFailAction::Shutdown,
         Some(ast::OnFailAction::Debug) => config::OnFailAction::Debug,
         Some(ast::OnFailAction::Log) => config::OnFailAction::Log,
-        Some(ast::OnFailAction::Spawn(name)) => config::OnFailAction::Spawn(name.clone()),
+        Some(ast::OnFailAction::Spawn(_ns, name)) => config::OnFailAction::Spawn(name.clone()),
     };
     Ok(Watch {
         name: watch.name.clone(),
@@ -521,7 +521,7 @@ fn lower_job_or_event(
     if let Some(wait) = &body.wait {
         for cond in &wait.conditions {
             // Strip `after @skipped_job` dependencies.
-            if let ast::ConditionKind::After { job } = &cond.kind
+            if let ast::ConditionKind::After { namespace: _, job } = &cond.kind
                 && skipped_jobs.contains(job)
             {
                 continue;

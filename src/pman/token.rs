@@ -38,6 +38,8 @@ pub enum TokenKind {
     Running,  // running
     Glob,     // glob
     Arg,      // arg
+    Import,   // import
+    As,       // as
     True,     // true
     False,    // false
     None,     // none
@@ -66,16 +68,17 @@ pub enum TokenKind {
     Not, // !
 
     // Punctuation
-    Assign,   // =
-    LBrace,   // {
-    RBrace,   // }
-    LBracket, // [
-    RBracket, // ]
-    LParen,   // (
-    RParen,   // )
-    Comma,    // ,
-    DotDot,   // ..
-    DotDotEq, // ..=
+    Assign,     // =
+    LBrace,     // {
+    RBrace,     // }
+    LBracket,   // [
+    RBracket,   // ]
+    LParen,     // (
+    RParen,     // )
+    Comma,      // ,
+    DotDot,     // ..
+    DotDotEq,   // ..=
+    ColonColon, // ::
 }
 
 #[derive(Clone, Debug)]

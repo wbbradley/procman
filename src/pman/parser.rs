@@ -145,6 +145,7 @@ impl<'a> Parser<'a> {
 
     fn parse_file(&mut self) -> Result<ast::File> {
         let mut file = ast::File {
+            imports: Vec::new(),
             config: None,
             args: Vec::new(),
             env: Vec::new(),
@@ -155,6 +156,9 @@ impl<'a> Parser<'a> {
 
         while !self.at_end() {
             match self.peek() {
+                Some(TokenKind::Import) => {
+                    file.imports.push(self.parse_import_def()?);
+                }
                 Some(TokenKind::Config) => {
                     if file.config.is_some() {
                         bail!("{}", self.fmt_error(self.span(), "duplicate config block"));
@@ -182,7 +186,7 @@ impl<'a> Parser<'a> {
                         self.fmt_error(
                             self.span(),
                             &format!(
-                                "expected 'config', 'arg', 'env', 'job', 'service', or 'event', got {:?}",
+                                "expected 'import', 'config', 'arg', 'env', 'job', 'service', or 'event', got {:?}",
                                 other
                             )
                         )
@@ -193,6 +197,36 @@ impl<'a> Parser<'a> {
         }
 
         Ok(file)
+    }
+
+    fn parse_import_def(&mut self) -> Result<ast::ImportDef> {
+        let start_span = self.expect(&TokenKind::Import)?.span;
+        let path = self.expect_string_lit()?;
+        let alias = if self.eat(&TokenKind::As) {
+            let (name, _) = self.expect_ident()?;
+            name
+        } else {
+            derive_import_alias(&path.value, start_span, self.path)?
+        };
+        let end_span = self.tokens[self.pos - 1].span;
+        Ok(ast::ImportDef {
+            path,
+            alias,
+            span: merge_spans(start_span, end_span),
+        })
+    }
+
+    /// Parse `@name` or `@ns::name`, returning `(namespace, name, span)`.
+    fn parse_at_ref(&mut self) -> Result<(Option<String>, String, Span)> {
+        let start_span = self.expect(&TokenKind::At)?.span;
+        let (first, _) = self.expect_ident()?;
+        if self.eat(&TokenKind::ColonColon) {
+            let (second, end_span) = self.expect_ident()?;
+            Ok((Some(first), second, merge_spans(start_span, end_span)))
+        } else {
+            let end_span = self.tokens[self.pos - 1].span;
+            Ok((None, first, merge_spans(start_span, end_span)))
+        }
     }
 
     fn parse_config_block(&mut self) -> Result<ast::ConfigBlock> {
@@ -502,13 +536,12 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Some(TokenKind::After) => {
                 self.advance();
-                self.expect(&TokenKind::At)?;
-                let (job, _) = self.expect_ident()?;
+                let (namespace, job, _) = self.parse_at_ref()?;
                 let options = self.parse_condition_options()?;
                 let end_span = self.tokens[self.pos - 1].span;
                 Ok(ast::WaitCondition {
                     negated,
-                    kind: ast::ConditionKind::After { job },
+                    kind: ast::ConditionKind::After { namespace, job },
                     options,
                     span: merge_spans(start_span, end_span),
                 })
@@ -760,9 +793,8 @@ impl<'a> Parser<'a> {
             }
             Some(TokenKind::Spawn) => {
                 self.advance();
-                self.expect(&TokenKind::At)?;
-                let (name, _) = self.expect_ident()?;
-                Ok(ast::OnFailAction::Spawn(name))
+                let (namespace, name, _) = self.parse_at_ref()?;
+                Ok(ast::OnFailAction::Spawn(namespace, name))
             }
             _ => {
                 bail!(
@@ -883,6 +915,30 @@ pub fn parse(input: &str, path: &str) -> Result<ast::File> {
     let tokens = lexer::lex(input, 1, 1, path)?;
     let mut parser = Parser::new(tokens, path);
     parser.parse_file()
+}
+
+fn derive_import_alias(path_str: &str, span: Span, file_path: &str) -> Result<String> {
+    // Extract basename from path.
+    let basename = path_str.rsplit('/').next().unwrap_or(path_str);
+    // Strip .pman extension.
+    let stem = basename.strip_suffix(".pman").unwrap_or(basename);
+    // Validate it's a legal identifier.
+    let bytes = stem.as_bytes();
+    if bytes.is_empty()
+        || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+        || !bytes[1..]
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        bail!(
+            "{}",
+            span.fmt_error(
+                file_path,
+                &format!("cannot derive alias from '{}'; use 'as <alias>'", path_str)
+            )
+        );
+    }
+    Ok(stem.to_string())
 }
 
 fn merge_spans(a: Span, b: Span) -> Span {
@@ -1091,7 +1147,7 @@ mod tests {
         let wait = file.jobs[0].body.wait.as_ref().unwrap();
         assert_eq!(wait.conditions.len(), 1);
         assert!(
-            matches!(&wait.conditions[0].kind, ast::ConditionKind::After { job } if job == "migrate")
+            matches!(&wait.conditions[0].kind, ast::ConditionKind::After { namespace: None, job } if job == "migrate")
         );
         assert!(!wait.conditions[0].negated);
     }
@@ -1248,7 +1304,9 @@ mod tests {
         let file = parse(input, "test.pman").unwrap();
         let w = &file.jobs[0].body.watches[0];
         assert_eq!(w.name, "disk");
-        assert!(matches!(&w.on_fail, Some(ast::OnFailAction::Spawn(name)) if name == "recovery"));
+        assert!(
+            matches!(&w.on_fail, Some(ast::OnFailAction::Spawn(None, name)) if name == "recovery")
+        );
     }
 
     #[test]
@@ -1363,6 +1421,121 @@ mod tests {
             err.to_string().contains("unexpected token in config block"),
             "got: {}",
             err
+        );
+    }
+
+    // ── Import tests ──
+
+    #[test]
+    fn parse_import_with_alias() {
+        let file = parse(r#"import "db/database.pman" as db"#, "test.pman").unwrap();
+        assert_eq!(file.imports.len(), 1);
+        assert_eq!(file.imports[0].path.value, "db/database.pman");
+        assert_eq!(file.imports[0].alias, "db");
+    }
+
+    #[test]
+    fn parse_import_derived_alias() {
+        let file = parse(r#"import "database.pman""#, "test.pman").unwrap();
+        assert_eq!(file.imports.len(), 1);
+        assert_eq!(file.imports[0].path.value, "database.pman");
+        assert_eq!(file.imports[0].alias, "database");
+    }
+
+    #[test]
+    fn parse_import_derived_alias_with_path() {
+        let file = parse(r#"import "lib/utils.pman""#, "test.pman").unwrap();
+        assert_eq!(file.imports.len(), 1);
+        assert_eq!(file.imports[0].alias, "utils");
+    }
+
+    #[test]
+    fn parse_import_bad_basename_requires_as() {
+        let err = parse(r#"import "my.setup.pman""#, "test.pman").unwrap_err();
+        assert!(
+            err.to_string().contains("cannot derive alias"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parse_multiple_imports() {
+        let input = r#"
+            import "db.pman" as db
+            import "cache.pman"
+            job web { run "serve" }
+        "#;
+        let file = parse(input, "test.pman").unwrap();
+        assert_eq!(file.imports.len(), 2);
+        assert_eq!(file.imports[0].alias, "db");
+        assert_eq!(file.imports[1].alias, "cache");
+        assert_eq!(file.jobs.len(), 1);
+    }
+
+    #[test]
+    fn parse_namespaced_after() {
+        let input = r#"
+            job api {
+                wait { after @db::migrate }
+                run "serve"
+            }
+        "#;
+        let file = parse(input, "test.pman").unwrap();
+        let cond = &file.jobs[0].body.wait.as_ref().unwrap().conditions[0];
+        assert!(
+            matches!(&cond.kind, ast::ConditionKind::After { namespace: Some(ns), job } if ns == "db" && job == "migrate")
+        );
+    }
+
+    #[test]
+    fn parse_local_after_unchanged() {
+        let input = r#"
+            job api {
+                wait { after @migrate }
+                run "serve"
+            }
+        "#;
+        let file = parse(input, "test.pman").unwrap();
+        let cond = &file.jobs[0].body.wait.as_ref().unwrap().conditions[0];
+        assert!(
+            matches!(&cond.kind, ast::ConditionKind::After { namespace: None, job } if job == "migrate")
+        );
+    }
+
+    #[test]
+    fn parse_namespaced_spawn() {
+        let input = r#"
+            job web {
+                run "serve"
+                watch health {
+                    http "http://localhost:8080/health"
+                    on_fail spawn @db::recovery
+                }
+            }
+        "#;
+        let file = parse(input, "test.pman").unwrap();
+        let w = &file.jobs[0].body.watches[0];
+        assert!(
+            matches!(&w.on_fail, Some(ast::OnFailAction::Spawn(Some(ns), name)) if ns == "db" && name == "recovery")
+        );
+    }
+
+    #[test]
+    fn parse_local_spawn_unchanged() {
+        let input = r#"
+            job web {
+                run "serve"
+                watch health {
+                    http "http://localhost:8080/health"
+                    on_fail spawn @recovery
+                }
+            }
+        "#;
+        let file = parse(input, "test.pman").unwrap();
+        let w = &file.jobs[0].body.watches[0];
+        assert!(
+            matches!(&w.on_fail, Some(ast::OnFailAction::Spawn(None, name)) if name == "recovery")
         );
     }
 }

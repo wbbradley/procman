@@ -98,7 +98,11 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
         let mut targets = HashSet::new();
         if let Some(wait) = &job.body.wait {
             for cond in &wait.conditions {
-                if let ast::ConditionKind::After { job: target } = &cond.kind {
+                if let ast::ConditionKind::After {
+                    namespace: _,
+                    job: target,
+                } = &cond.kind
+                {
                     if !job_names.contains(target.as_str()) {
                         errors.push(cond.span.fmt_error(
                             path,
@@ -123,7 +127,11 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
         let mut targets = HashSet::new();
         if let Some(wait) = &service.body.wait {
             for cond in &wait.conditions {
-                if let ast::ConditionKind::After { job: target } = &cond.kind {
+                if let ast::ConditionKind::After {
+                    namespace: _,
+                    job: target,
+                } = &cond.kind
+                {
                     if !job_names.contains(target.as_str()) {
                         errors.push(cond.span.fmt_error(
                             path,
@@ -151,7 +159,11 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
         let mut targets = HashSet::new();
         if let Some(wait) = &event.body.wait {
             for cond in &wait.conditions {
-                if let ast::ConditionKind::After { job: target } = &cond.kind {
+                if let ast::ConditionKind::After {
+                    namespace: _,
+                    job: target,
+                } = &cond.kind
+                {
                     if !job_names.contains(target.as_str()) {
                         errors.push(cond.span.fmt_error(
                             path,
@@ -284,7 +296,7 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
 
 fn collect_output_refs(expr: &Expr) -> Vec<(&str, &str, Span)> {
     match expr {
-        Expr::JobOutputRef(job, key, span) => vec![(job.as_str(), key.as_str(), *span)],
+        Expr::JobOutputRef(_ns, job, key, span) => vec![(job.as_str(), key.as_str(), *span)],
         Expr::BinOp(lhs, _, rhs, _) => {
             let mut refs = collect_output_refs(lhs);
             refs.extend(collect_output_refs(rhs));
@@ -416,7 +428,7 @@ fn validate_spawns(
 ) -> Vec<String> {
     let mut errors = Vec::new();
     for watch in &body.watches {
-        if let Some(ast::OnFailAction::Spawn(target)) = &watch.on_fail {
+        if let Some(ast::OnFailAction::Spawn(_ns, target)) = &watch.on_fail {
             let t = target.as_str();
             if event_names.contains(t) {
                 // OK — events are valid spawn targets

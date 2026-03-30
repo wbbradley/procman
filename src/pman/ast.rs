@@ -3,12 +3,21 @@ use crate::pman::token::Span;
 /// A complete .pman file.
 #[derive(Debug)]
 pub struct File {
+    pub imports: Vec<ImportDef>,
     pub config: Option<ConfigBlock>,
     pub args: Vec<ArgDef>,
     pub env: Vec<EnvBinding>,
     pub jobs: Vec<JobDef>,
     pub services: Vec<ServiceDef>,
     pub events: Vec<EventDef>,
+}
+
+#[derive(Debug)]
+pub struct ImportDef {
+    pub path: StringLit,
+    pub alias: String,
+    #[allow(dead_code)]
+    pub span: Span,
 }
 
 #[derive(Debug)]
@@ -128,6 +137,7 @@ pub struct WaitCondition {
 #[derive(Debug)]
 pub enum ConditionKind {
     After {
+        namespace: Option<String>,
         job: String,
     },
     Http {
@@ -174,7 +184,7 @@ pub enum OnFailAction {
     Shutdown,
     Debug,
     Log,
-    Spawn(String),
+    Spawn(Option<String>, String),
 }
 
 /// Expression — evaluated at runtime.
@@ -185,9 +195,9 @@ pub enum Expr {
     BoolLit(bool, Span),
     DurationLit(f64, Span),
     NoneLit(Span),
-    ArgsRef(String, Span),              // args.name
-    JobOutputRef(String, String, Span), // @job.KEY
-    LocalVar(String, Span),             // bare identifier in expression context
+    ArgsRef(String, Span),                              // args.name
+    JobOutputRef(Option<String>, String, String, Span), // @ns::job.KEY or @job.KEY
+    LocalVar(String, Span),                             // bare identifier in expression context
     BinOp(Box<Expr>, BinOp, Box<Expr>, Span),
     UnaryNot(Box<Expr>, Span),
 }
@@ -201,7 +211,7 @@ impl Expr {
             | Expr::DurationLit(_, s)
             | Expr::NoneLit(s)
             | Expr::ArgsRef(_, s)
-            | Expr::JobOutputRef(_, _, s)
+            | Expr::JobOutputRef(_, _, _, s)
             | Expr::LocalVar(_, s)
             | Expr::BinOp(_, _, _, s)
             | Expr::UnaryNot(_, s) => *s,

@@ -289,6 +289,8 @@ impl<'a> Lexer<'a> {
             "running" => TokenKind::Running,
             "glob" => TokenKind::Glob,
             "arg" => TokenKind::Arg,
+            "import" => TokenKind::Import,
+            "as" => TokenKind::As,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "none" => TokenKind::None,
@@ -434,6 +436,17 @@ impl<'a> Lexer<'a> {
             self.advance();
             return Ok(Some(self.make_token(
                 TokenKind::Or,
+                start_pos,
+                start_line,
+                start_col,
+            )));
+        }
+
+        if self.starts_with(b"::") {
+            self.advance();
+            self.advance();
+            return Ok(Some(self.make_token(
+                TokenKind::ColonColon,
                 start_pos,
                 start_line,
                 start_col,
@@ -645,6 +658,32 @@ mod tests {
         assert_eq!(
             kinds("web-server"),
             vec![TokenKind::Ident("web-server".into())]
+        );
+    }
+
+    #[test]
+    fn lex_import_as_keywords() {
+        assert_eq!(
+            kinds(r#"import "foo.pman" as bar"#),
+            vec![
+                TokenKind::Import,
+                TokenKind::String("foo.pman".into()),
+                TokenKind::As,
+                TokenKind::Ident("bar".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_colon_colon() {
+        assert_eq!(
+            kinds("@ns::migrate"),
+            vec![
+                TokenKind::At,
+                TokenKind::Ident("ns".into()),
+                TokenKind::ColonColon,
+                TokenKind::Ident("migrate".into()),
+            ]
         );
     }
 
