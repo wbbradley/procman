@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 
 use crate::pman::{
     ast::{self, Expr, RunSection, ShellBlock},
+    loader::LoadedModules,
     token::Span,
 };
 
@@ -94,15 +95,19 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
     let mut after_edges: HashMap<&str, HashSet<&str>> = HashMap::new();
 
     // Step 2: Validate after references + build edges.
+    // Namespaced refs (e.g. @ns::job) are deferred to cross-module validation.
     for job in &file.jobs {
         let mut targets = HashSet::new();
         if let Some(wait) = &job.body.wait {
             for cond in &wait.conditions {
                 if let ast::ConditionKind::After {
-                    namespace: _,
+                    namespace,
                     job: target,
                 } = &cond.kind
                 {
+                    if namespace.is_some() {
+                        continue; // deferred to validate_cross_refs
+                    }
                     if !job_names.contains(target.as_str()) {
                         errors.push(cond.span.fmt_error(
                             path,
@@ -128,10 +133,13 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
         if let Some(wait) = &service.body.wait {
             for cond in &wait.conditions {
                 if let ast::ConditionKind::After {
-                    namespace: _,
+                    namespace,
                     job: target,
                 } = &cond.kind
                 {
+                    if namespace.is_some() {
+                        continue;
+                    }
                     if !job_names.contains(target.as_str()) {
                         errors.push(cond.span.fmt_error(
                             path,
@@ -160,10 +168,13 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
         if let Some(wait) = &event.body.wait {
             for cond in &wait.conditions {
                 if let ast::ConditionKind::After {
-                    namespace: _,
+                    namespace,
                     job: target,
                 } = &cond.kind
                 {
+                    if namespace.is_some() {
+                        continue;
+                    }
                     if !job_names.contains(target.as_str()) {
                         errors.push(cond.span.fmt_error(
                             path,
@@ -296,7 +307,9 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
 
 fn collect_output_refs(expr: &Expr) -> Vec<(&str, &str, Span)> {
     match expr {
-        Expr::JobOutputRef(_ns, job, key, span) => vec![(job.as_str(), key.as_str(), *span)],
+        // Skip namespaced refs — deferred to cross-module validation.
+        Expr::JobOutputRef(Some(_), _, _, _) => vec![],
+        Expr::JobOutputRef(None, job, key, span) => vec![(job.as_str(), key.as_str(), *span)],
         Expr::BinOp(lhs, _, rhs, _) => {
             let mut refs = collect_output_refs(lhs);
             refs.extend(collect_output_refs(rhs));
@@ -428,7 +441,11 @@ fn validate_spawns(
 ) -> Vec<String> {
     let mut errors = Vec::new();
     for watch in &body.watches {
-        if let Some(ast::OnFailAction::Spawn(_ns, target)) = &watch.on_fail {
+        if let Some(ast::OnFailAction::Spawn(ns, target)) = &watch.on_fail {
+            // Skip namespaced refs — deferred to cross-module validation.
+            if ns.is_some() {
+                continue;
+            }
             let t = target.as_str();
             if event_names.contains(t) {
                 // OK — events are valid spawn targets
@@ -515,6 +532,387 @@ fn check_empty_run(body: &ast::JobBody, path: &str) -> Vec<String> {
         _ => {}
     }
     errors
+}
+
+struct ModuleEntities<'a> {
+    jobs: HashSet<&'a str>,
+    services: HashSet<&'a str>,
+    events: HashSet<&'a str>,
+    once_jobs: HashSet<&'a str>,
+}
+
+fn build_module_entities(file: &ast::File) -> ModuleEntities<'_> {
+    let mut entities = ModuleEntities {
+        jobs: HashSet::new(),
+        services: HashSet::new(),
+        events: HashSet::new(),
+        once_jobs: HashSet::new(),
+    };
+    for job in &file.jobs {
+        entities.jobs.insert(&job.name);
+        entities.once_jobs.insert(&job.name);
+    }
+    for service in &file.services {
+        entities.services.insert(&service.name);
+    }
+    for event in &file.events {
+        entities.events.insert(&event.name);
+    }
+    entities
+}
+
+fn validate_namespaced_after_refs_in_body(
+    owner_name: &str,
+    body: &ast::JobBody,
+    registry: &HashMap<&str, ModuleEntities<'_>>,
+    path: &str,
+    errors: &mut Vec<String>,
+) {
+    if let Some(wait) = &body.wait {
+        for cond in &wait.conditions {
+            if let ast::ConditionKind::After {
+                namespace: Some(ns),
+                job: target,
+            } = &cond.kind
+            {
+                match registry.get(ns.as_str()) {
+                    None => {
+                        errors.push(cond.span.fmt_error(
+                            path,
+                            &format!(
+                                "'{owner_name}': after @{ns}::{target} references unknown import alias '{ns}'"
+                            ),
+                        ));
+                    }
+                    Some(entities) => {
+                        if !entities.jobs.contains(target.as_str())
+                            && !entities.services.contains(target.as_str())
+                        {
+                            errors.push(cond.span.fmt_error(
+                                path,
+                                &format!(
+                                    "'{owner_name}': after @{ns}::{target} references unknown entity in '{ns}'"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn validate_namespaced_output_refs_in_body(
+    owner_name: &str,
+    body: &ast::JobBody,
+    registry: &HashMap<&str, ModuleEntities<'_>>,
+    path: &str,
+    errors: &mut Vec<String>,
+) {
+    let mut all_exprs: Vec<&Expr> = Vec::new();
+    for env in &body.env {
+        all_exprs.push(&env.value);
+    }
+    if let RunSection::ForLoop(fl) = &body.run_section {
+        for env in &fl.env {
+            all_exprs.push(&env.value);
+        }
+    }
+    for expr in all_exprs {
+        collect_namespaced_output_refs(expr, owner_name, registry, path, errors);
+    }
+}
+
+fn collect_namespaced_output_refs(
+    expr: &Expr,
+    owner_name: &str,
+    registry: &HashMap<&str, ModuleEntities<'_>>,
+    path: &str,
+    errors: &mut Vec<String>,
+) {
+    match expr {
+        Expr::JobOutputRef(Some(ns), job, _key, span) => match registry.get(ns.as_str()) {
+            None => {
+                errors.push(span.fmt_error(
+                    path,
+                    &format!(
+                        "'{owner_name}': @{ns}::{job}.* references unknown import alias '{ns}'"
+                    ),
+                ));
+            }
+            Some(entities) => {
+                if !entities.once_jobs.contains(job.as_str()) {
+                    errors.push(span.fmt_error(
+                        path,
+                        &format!(
+                            "'{owner_name}': @{ns}::{job}.* requires '{job}' to be a job in '{ns}'"
+                        ),
+                    ));
+                }
+            }
+        },
+        Expr::BinOp(lhs, _, rhs, _) => {
+            collect_namespaced_output_refs(lhs, owner_name, registry, path, errors);
+            collect_namespaced_output_refs(rhs, owner_name, registry, path, errors);
+        }
+        Expr::UnaryNot(inner, _) => {
+            collect_namespaced_output_refs(inner, owner_name, registry, path, errors);
+        }
+        _ => {}
+    }
+}
+
+fn validate_namespaced_spawns_in_body(
+    body: &ast::JobBody,
+    registry: &HashMap<&str, ModuleEntities<'_>>,
+    path: &str,
+    errors: &mut Vec<String>,
+) {
+    for watch in &body.watches {
+        if let Some(ast::OnFailAction::Spawn(Some(ns), target)) = &watch.on_fail {
+            match registry.get(ns.as_str()) {
+                None => {
+                    errors.push(watch.span.fmt_error(
+                        path,
+                        &format!(
+                            "on_fail spawn @{ns}::{target} references unknown import alias '{ns}'"
+                        ),
+                    ));
+                }
+                Some(entities) => {
+                    if !entities.events.contains(target.as_str()) {
+                        errors.push(watch.span.fmt_error(
+                            path,
+                            &format!(
+                                "on_fail spawn @{ns}::{target} must reference an event in '{ns}'"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn validate_cross_refs(modules: &LoadedModules) -> Result<()> {
+    let mut errors = Vec::new();
+
+    // Build a registry of each imported module's entities.
+    let mut registry: HashMap<&str, ModuleEntities<'_>> = HashMap::new();
+    for (alias, module) in &modules.imports {
+        registry.insert(alias.as_str(), build_module_entities(&module.file));
+    }
+
+    // Validate namespaced refs in the root file.
+    let root_path = &modules.root_path;
+    for job in &modules.root.jobs {
+        validate_namespaced_after_refs_in_body(
+            &job.name,
+            &job.body,
+            &registry,
+            root_path,
+            &mut errors,
+        );
+        validate_namespaced_output_refs_in_body(
+            &job.name,
+            &job.body,
+            &registry,
+            root_path,
+            &mut errors,
+        );
+        validate_namespaced_spawns_in_body(&job.body, &registry, root_path, &mut errors);
+    }
+    for service in &modules.root.services {
+        validate_namespaced_after_refs_in_body(
+            &service.name,
+            &service.body,
+            &registry,
+            root_path,
+            &mut errors,
+        );
+        validate_namespaced_output_refs_in_body(
+            &service.name,
+            &service.body,
+            &registry,
+            root_path,
+            &mut errors,
+        );
+        validate_namespaced_spawns_in_body(&service.body, &registry, root_path, &mut errors);
+    }
+    for event in &modules.root.events {
+        validate_namespaced_after_refs_in_body(
+            &event.name,
+            &event.body,
+            &registry,
+            root_path,
+            &mut errors,
+        );
+        validate_namespaced_output_refs_in_body(
+            &event.name,
+            &event.body,
+            &registry,
+            root_path,
+            &mut errors,
+        );
+        validate_namespaced_spawns_in_body(&event.body, &registry, root_path, &mut errors);
+    }
+
+    // Build combined after-edges graph with qualified names for cycle detection.
+    let mut combined_edges: HashMap<String, HashSet<String>> = HashMap::new();
+
+    // Root file edges.
+    for job in &modules.root.jobs {
+        let mut targets = HashSet::new();
+        if let Some(wait) = &job.body.wait {
+            for cond in &wait.conditions {
+                if let ast::ConditionKind::After {
+                    namespace,
+                    job: target,
+                } = &cond.kind
+                {
+                    match namespace {
+                        Some(ns) => {
+                            targets.insert(format!("{ns}::{target}"));
+                        }
+                        None => {
+                            targets.insert(target.clone());
+                        }
+                    }
+                }
+            }
+        }
+        combined_edges.insert(job.name.clone(), targets);
+    }
+    for service in &modules.root.services {
+        let mut targets = HashSet::new();
+        if let Some(wait) = &service.body.wait {
+            for cond in &wait.conditions {
+                if let ast::ConditionKind::After {
+                    namespace,
+                    job: target,
+                } = &cond.kind
+                {
+                    match namespace {
+                        Some(ns) => {
+                            targets.insert(format!("{ns}::{target}"));
+                        }
+                        None => {
+                            targets.insert(target.clone());
+                        }
+                    }
+                }
+            }
+        }
+        combined_edges.insert(service.name.clone(), targets);
+    }
+    for event in &modules.root.events {
+        let mut targets = HashSet::new();
+        if let Some(wait) = &event.body.wait {
+            for cond in &wait.conditions {
+                if let ast::ConditionKind::After {
+                    namespace,
+                    job: target,
+                } = &cond.kind
+                {
+                    match namespace {
+                        Some(ns) => {
+                            targets.insert(format!("{ns}::{target}"));
+                        }
+                        None => {
+                            targets.insert(target.clone());
+                        }
+                    }
+                }
+            }
+        }
+        combined_edges.insert(event.name.clone(), targets);
+    }
+
+    // Imported module edges (qualified names).
+    for (alias, module) in &modules.imports {
+        for job in &module.file.jobs {
+            let qualified = format!("{alias}::{}", job.name);
+            let mut targets = HashSet::new();
+            if let Some(wait) = &job.body.wait {
+                for cond in &wait.conditions {
+                    if let ast::ConditionKind::After {
+                        namespace,
+                        job: target,
+                    } = &cond.kind
+                    {
+                        match namespace {
+                            Some(ns) => {
+                                targets.insert(format!("{ns}::{target}"));
+                            }
+                            None => {
+                                targets.insert(format!("{alias}::{target}"));
+                            }
+                        }
+                    }
+                }
+            }
+            combined_edges.insert(qualified, targets);
+        }
+        for service in &module.file.services {
+            let qualified = format!("{alias}::{}", service.name);
+            let mut targets = HashSet::new();
+            if let Some(wait) = &service.body.wait {
+                for cond in &wait.conditions {
+                    if let ast::ConditionKind::After {
+                        namespace,
+                        job: target,
+                    } = &cond.kind
+                    {
+                        match namespace {
+                            Some(ns) => {
+                                targets.insert(format!("{ns}::{target}"));
+                            }
+                            None => {
+                                targets.insert(format!("{alias}::{target}"));
+                            }
+                        }
+                    }
+                }
+            }
+            combined_edges.insert(qualified, targets);
+        }
+        for event in &module.file.events {
+            let qualified = format!("{alias}::{}", event.name);
+            let mut targets = HashSet::new();
+            if let Some(wait) = &event.body.wait {
+                for cond in &wait.conditions {
+                    if let ast::ConditionKind::After {
+                        namespace,
+                        job: target,
+                    } = &cond.kind
+                    {
+                        match namespace {
+                            Some(ns) => {
+                                targets.insert(format!("{ns}::{target}"));
+                            }
+                            None => {
+                                targets.insert(format!("{alias}::{target}"));
+                            }
+                        }
+                    }
+                }
+            }
+            combined_edges.insert(qualified, targets);
+        }
+    }
+
+    // Cycle detection on combined graph.
+    let str_edges: HashMap<&str, HashSet<&str>> = combined_edges
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.iter().map(|s| s.as_str()).collect()))
+        .collect();
+    detect_cycles(&str_edges)?;
+
+    if !errors.is_empty() {
+        bail!("{}", errors.join("\n"));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -749,5 +1147,115 @@ job web { run "other" }"#;
             "got: {}",
             err
         );
+    }
+
+    #[test]
+    fn namespaced_after_ref_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(&db_path, r#"job migrate { run "migrate" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            service api {
+                wait { after @db::migrate }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        validate(&modules.root, root_path.to_str().unwrap()).unwrap();
+        for module in modules.imports.values() {
+            validate(&module.file, &module.path).unwrap();
+        }
+        validate_cross_refs(&modules).unwrap();
+    }
+
+    #[test]
+    fn namespaced_after_ref_unknown_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            service api {
+                wait { after @bogus::migrate }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        validate(&modules.root, root_path.to_str().unwrap()).unwrap();
+        let err = validate_cross_refs(&modules).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown import alias"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn namespaced_after_ref_unknown_entity() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(&db_path, r#"job migrate { run "migrate" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            service api {
+                wait { after @db::nonexistent }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        validate(&modules.root, root_path.to_str().unwrap()).unwrap();
+        let err = validate_cross_refs(&modules).unwrap_err();
+        assert!(err.to_string().contains("unknown entity"), "got: {err}");
+    }
+
+    #[test]
+    fn namespaced_spawn_ref_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(&db_path, r#"event recovery { run "recover" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            service api {
+                watch health {
+                    http "http://localhost:8080/health"
+                    on_fail spawn @db::recovery
+                }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        validate(&modules.root, root_path.to_str().unwrap()).unwrap();
+        for module in modules.imports.values() {
+            validate(&module.file, &module.path).unwrap();
+        }
+        validate_cross_refs(&modules).unwrap();
     }
 }

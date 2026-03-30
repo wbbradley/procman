@@ -9,21 +9,27 @@ use crate::{
     config::{self, ArgDef, ArgType, Dependency, FileFormat, ForEachConfig, ProcessConfig, Watch},
     pman::{
         ast::{self, BinOp, Expr, RunSection, ShellBlock},
+        loader::LoadedModules,
         parser,
         validate,
     },
 };
 
-pub fn lower(
-    input: &str,
-    path: &str,
+pub fn lower_modules(
+    modules: &LoadedModules,
     extra_env: &HashMap<String, String>,
     arg_values: &HashMap<String, String>,
 ) -> Result<(Vec<ProcessConfig>, Option<String>)> {
-    let file = parser::parse(input, path)?;
-    validate::validate(&file, path)?;
+    // Validate root and each imported file.
+    validate::validate(&modules.root, &modules.root_path)?;
+    for module in modules.imports.values() {
+        validate::validate(&module.file, &module.path)?;
+    }
+    // Cross-module validation.
+    validate::validate_cross_refs(modules)?;
 
-    let log_dir = file
+    let log_dir = modules
+        .root
         .config
         .as_ref()
         .and_then(|c| c.logs.as_ref().map(|l| l.value.clone()));
@@ -32,80 +38,181 @@ pub fn lower(
     let mut base_env: HashMap<String, String> = std::env::vars().collect();
     base_env.extend(extra_env.clone());
 
-    // Evaluate global env bindings.
-    let global_env = eval_env_bindings(&file.env, arg_values, &HashMap::new(), path)?;
-
-    // Determine skipped jobs/services (those with false conditions).
+    // Compute global skipped jobs across all modules.
     let mut skipped_jobs: HashSet<String> = HashSet::new();
+    collect_skipped_jobs(
+        &modules.root,
+        None,
+        arg_values,
+        &modules.root_path,
+        &mut skipped_jobs,
+    )?;
+    for (alias, module) in &modules.imports {
+        collect_skipped_jobs(
+            &module.file,
+            Some(alias.as_str()),
+            arg_values,
+            &module.path,
+            &mut skipped_jobs,
+        )?;
+    }
+
+    let mut configs = Vec::new();
+
+    // Lower root entities (no prefix).
+    lower_file_entities(
+        &modules.root,
+        &modules.root_path,
+        None,
+        &base_env,
+        arg_values,
+        &skipped_jobs,
+        &mut configs,
+    )?;
+
+    // Lower each imported module's entities (with alias prefix).
+    for (alias, module) in &modules.imports {
+        lower_file_entities(
+            &module.file,
+            &module.path,
+            Some(alias.as_str()),
+            &base_env,
+            arg_values,
+            &skipped_jobs,
+            &mut configs,
+        )?;
+    }
+
+    Ok((configs, log_dir))
+}
+
+fn collect_skipped_jobs(
+    file: &ast::File,
+    prefix: Option<&str>,
+    arg_values: &HashMap<String, String>,
+    path: &str,
+    skipped_jobs: &mut HashSet<String>,
+) -> Result<()> {
     for job in &file.jobs {
         if let Some(cond_expr) = &job.condition
             && !eval_condition_expr(cond_expr, arg_values, path)?
         {
-            skipped_jobs.insert(job.name.clone());
+            let name = match prefix {
+                Some(p) => format!("{p}::{}", job.name),
+                None => job.name.clone(),
+            };
+            skipped_jobs.insert(name);
         }
     }
     for service in &file.services {
         if let Some(cond_expr) = &service.condition
             && !eval_condition_expr(cond_expr, arg_values, path)?
         {
-            skipped_jobs.insert(service.name.clone());
+            let name = match prefix {
+                Some(p) => format!("{p}::{}", service.name),
+                None => service.name.clone(),
+            };
+            skipped_jobs.insert(name);
         }
     }
+    Ok(())
+}
 
-    let mut configs = Vec::new();
+fn lower_file_entities(
+    file: &ast::File,
+    path: &str,
+    prefix: Option<&str>,
+    base_env: &HashMap<String, String>,
+    arg_values: &HashMap<String, String>,
+    skipped_jobs: &HashSet<String>,
+    configs: &mut Vec<ProcessConfig>,
+) -> Result<()> {
+    // Evaluate this module's global env bindings.
+    let global_env = eval_env_bindings(&file.env, arg_values, &HashMap::new(), prefix, path)?;
 
     for job in &file.jobs {
-        if skipped_jobs.contains(&job.name) {
+        let qualified = match prefix {
+            Some(p) => format!("{p}::{}", job.name),
+            None => job.name.clone(),
+        };
+        if skipped_jobs.contains(&qualified) {
             continue;
         }
         let mut job_configs = lower_job_or_event(
-            &job.name,
+            &qualified,
             &job.body,
             true,
             true, // jobs default to once=true
-            &base_env,
+            base_env,
             &global_env,
             arg_values,
-            &skipped_jobs,
+            skipped_jobs,
+            prefix,
             path,
         )?;
         configs.append(&mut job_configs);
     }
 
     for service in &file.services {
-        if skipped_jobs.contains(&service.name) {
+        let qualified = match prefix {
+            Some(p) => format!("{p}::{}", service.name),
+            None => service.name.clone(),
+        };
+        if skipped_jobs.contains(&qualified) {
             continue;
         }
         let mut service_configs = lower_job_or_event(
-            &service.name,
+            &qualified,
             &service.body,
             true,
             false, // services default to once=false
-            &base_env,
+            base_env,
             &global_env,
             arg_values,
-            &skipped_jobs,
+            skipped_jobs,
+            prefix,
             path,
         )?;
         configs.append(&mut service_configs);
     }
 
     for event in &file.events {
+        let qualified = match prefix {
+            Some(p) => format!("{p}::{}", event.name),
+            None => event.name.clone(),
+        };
         let mut event_configs = lower_job_or_event(
-            &event.name,
+            &qualified,
             &event.body,
             false,
             false, // events default to once=false
-            &base_env,
+            base_env,
             &global_env,
             arg_values,
-            &skipped_jobs,
+            skipped_jobs,
+            prefix,
             path,
         )?;
         configs.append(&mut event_configs);
     }
 
-    Ok((configs, log_dir))
+    Ok(())
+}
+
+/// Backward-compatible wrapper used by tests.
+pub fn lower(
+    input: &str,
+    path: &str,
+    extra_env: &HashMap<String, String>,
+    arg_values: &HashMap<String, String>,
+) -> Result<(Vec<ProcessConfig>, Option<String>)> {
+    let file = parser::parse(input, path)?;
+    let modules = LoadedModules {
+        root: file,
+        root_path: path.to_string(),
+        imports: HashMap::new(),
+    };
+    lower_modules(&modules, extra_env, arg_values)
 }
 
 pub fn lower_arg_def(arg: ast::ArgDef) -> Result<ArgDef> {
@@ -114,6 +221,7 @@ pub fn lower_arg_def(arg: ast::ArgDef) -> Result<ArgDef> {
             expr,
             &HashMap::new(),
             &HashMap::new(),
+            None,
             "",
         )?),
         None => None,
@@ -136,6 +244,7 @@ fn eval_expr_to_string(
     expr: &Expr,
     arg_values: &HashMap<String, String>,
     local_vars: &HashMap<String, String>,
+    prefix: Option<&str>,
     path: &str,
 ) -> Result<String> {
     match expr {
@@ -162,7 +271,16 @@ fn eval_expr_to_string(
                 span.fmt_error(path, &format!("undefined arg: args.{name}"))
             ),
         },
-        Expr::JobOutputRef(_ns, job, key, _) => Ok(format!("${{{{ {job}.{key} }}}}")),
+        Expr::JobOutputRef(ns, job, key, _) => {
+            let qualified = match ns {
+                Some(ns) => format!("{ns}::{job}"),
+                None => match prefix {
+                    Some(p) => format!("{p}::{job}"),
+                    None => job.clone(),
+                },
+            };
+            Ok(format!("${{{{ {qualified}.{key} }}}}"))
+        }
         Expr::LocalVar(name, span) => match local_vars.get(name) {
             Some(v) => Ok(v.clone()),
             None => bail!(
@@ -207,8 +325,8 @@ fn eval_condition_expr(
                     || eval_condition_expr(rhs, arg_values, path)?),
                 _ => {
                     // Comparison operators: evaluate both sides as strings and compare.
-                    let l = eval_expr_to_string(lhs, arg_values, &HashMap::new(), path)?;
-                    let r = eval_expr_to_string(rhs, arg_values, &HashMap::new(), path)?;
+                    let l = eval_expr_to_string(lhs, arg_values, &HashMap::new(), None, path)?;
+                    let r = eval_expr_to_string(rhs, arg_values, &HashMap::new(), None, path)?;
                     Ok(match op {
                         BinOp::Eq => l == r,
                         BinOp::Ne => l != r,
@@ -246,11 +364,12 @@ fn eval_env_bindings(
     bindings: &[ast::EnvBinding],
     arg_values: &HashMap<String, String>,
     local_vars: &HashMap<String, String>,
+    prefix: Option<&str>,
     path: &str,
 ) -> Result<HashMap<String, String>> {
     let mut env = HashMap::new();
     for binding in bindings {
-        let value = eval_expr_to_string(&binding.value, arg_values, local_vars, path)?;
+        let value = eval_expr_to_string(&binding.value, arg_values, local_vars, prefix, path)?;
         env.insert(binding.key.clone(), value);
     }
     Ok(env)
@@ -339,6 +458,7 @@ fn lower_wait_condition(
     cond: &ast::WaitCondition,
     arg_values: &HashMap<String, String>,
     local_vars: &HashMap<String, String>,
+    prefix: Option<&str>,
     path: &str,
 ) -> Result<Dependency> {
     let opts = &cond.options;
@@ -347,12 +467,21 @@ fn lower_wait_condition(
     let retry = eval_option_retry(&opts.retry, path)?;
 
     match (&cond.kind, cond.negated) {
-        (ast::ConditionKind::After { namespace: _, job }, false) => Ok(Dependency::ProcessExited {
-            name: job.clone(),
-            poll_interval: poll,
-            timeout,
-            retry,
-        }),
+        (ast::ConditionKind::After { namespace, job }, false) => {
+            let qualified = match namespace {
+                Some(ns) => format!("{ns}::{job}"),
+                None => match prefix {
+                    Some(p) => format!("{p}::{job}"),
+                    None => job.clone(),
+                },
+            };
+            Ok(Dependency::ProcessExited {
+                name: qualified,
+                poll_interval: poll,
+                timeout,
+                retry,
+            })
+        }
         (ast::ConditionKind::Http { url }, false) => {
             let code = eval_option_status(&opts.status, path)?;
             Ok(Dependency::HttpHealthCheck {
@@ -467,9 +596,10 @@ fn lower_watch(
     watch: &ast::WatchDef,
     arg_values: &HashMap<String, String>,
     local_vars: &HashMap<String, String>,
+    prefix: Option<&str>,
     path: &str,
 ) -> Result<Watch> {
-    let check = lower_wait_condition(&watch.condition, arg_values, local_vars, path)?;
+    let check = lower_wait_condition(&watch.condition, arg_values, local_vars, prefix, path)?;
     let initial_delay = eval_option_duration(&watch.initial_delay, Duration::ZERO, path)?;
     let poll_interval = eval_option_duration(&watch.poll, Duration::from_secs(5), path)?;
     let failure_threshold = eval_option_u32(&watch.threshold, 3, path)?;
@@ -478,7 +608,16 @@ fn lower_watch(
         Some(ast::OnFailAction::Shutdown) => config::OnFailAction::Shutdown,
         Some(ast::OnFailAction::Debug) => config::OnFailAction::Debug,
         Some(ast::OnFailAction::Log) => config::OnFailAction::Log,
-        Some(ast::OnFailAction::Spawn(_ns, name)) => config::OnFailAction::Spawn(name.clone()),
+        Some(ast::OnFailAction::Spawn(ns, name)) => {
+            let qualified = match ns {
+                Some(ns) => format!("{ns}::{name}"),
+                None => match prefix {
+                    Some(p) => format!("{p}::{name}"),
+                    None => name.clone(),
+                },
+            };
+            config::OnFailAction::Spawn(qualified)
+        }
     };
     Ok(Watch {
         name: watch.name.clone(),
@@ -507,6 +646,7 @@ fn lower_job_or_event(
     global_env: &HashMap<String, String>,
     arg_values: &HashMap<String, String>,
     skipped_jobs: &HashSet<String>,
+    prefix: Option<&str>,
     path: &str,
 ) -> Result<Vec<ProcessConfig>> {
     let once = once_default;
@@ -521,13 +661,20 @@ fn lower_job_or_event(
     if let Some(wait) = &body.wait {
         for cond in &wait.conditions {
             // Strip `after @skipped_job` dependencies.
-            if let ast::ConditionKind::After { namespace: _, job } = &cond.kind
-                && skipped_jobs.contains(job)
-            {
-                continue;
+            if let ast::ConditionKind::After { namespace, job } = &cond.kind {
+                let qualified = match namespace {
+                    Some(ns) => format!("{ns}::{job}"),
+                    None => match prefix {
+                        Some(p) => format!("{p}::{job}"),
+                        None => job.clone(),
+                    },
+                };
+                if skipped_jobs.contains(&qualified) {
+                    continue;
+                }
             }
 
-            let dep = lower_wait_condition(cond, arg_values, &local_vars, path)?;
+            let dep = lower_wait_condition(cond, arg_values, &local_vars, prefix, path)?;
 
             // Track var bindings from contains.
             if let ast::ConditionKind::Contains { var: Some(v), .. } = &cond.kind {
@@ -558,7 +705,7 @@ fn lower_job_or_event(
         if env_keys_from_vars.contains_key(&binding.key) {
             continue;
         }
-        let value = eval_expr_to_string(&binding.value, arg_values, &local_vars, path)?;
+        let value = eval_expr_to_string(&binding.value, arg_values, &local_vars, prefix, path)?;
         job_env.insert(binding.key.clone(), value);
     }
 
@@ -571,7 +718,7 @@ fn lower_job_or_event(
     let watches: Vec<Watch> = body
         .watches
         .iter()
-        .map(|w| lower_watch(w, arg_values, &local_vars, path))
+        .map(|w| lower_watch(w, arg_values, &local_vars, prefix, path))
         .collect::<Result<_>>()?;
 
     match &body.run_section {
@@ -593,7 +740,8 @@ fn lower_job_or_event(
                 // real value at runtime.
                 let mut placeholder_vars = HashMap::new();
                 placeholder_vars.insert(fl.var.clone(), format!("${{{}}}", fl.var));
-                let for_env = eval_env_bindings(&fl.env, arg_values, &placeholder_vars, path)?;
+                let for_env =
+                    eval_env_bindings(&fl.env, arg_values, &placeholder_vars, prefix, path)?;
                 let mut glob_env = merged_env;
                 glob_env.extend(for_env);
 
@@ -615,12 +763,14 @@ fn lower_job_or_event(
             ast::Iterable::Array(items) => {
                 let mut configs = Vec::new();
                 for (i, item_expr) in items.iter().enumerate() {
-                    let item_value = eval_expr_to_string(item_expr, arg_values, &local_vars, path)?;
+                    let item_value =
+                        eval_expr_to_string(item_expr, arg_values, &local_vars, prefix, path)?;
                     let mut iter_local_vars = HashMap::new();
                     iter_local_vars.insert(fl.var.clone(), item_value);
 
                     // Evaluate for-loop env with the loop var in scope.
-                    let for_env = eval_env_bindings(&fl.env, arg_values, &iter_local_vars, path)?;
+                    let for_env =
+                        eval_env_bindings(&fl.env, arg_values, &iter_local_vars, prefix, path)?;
                     let mut iter_env = merged_env.clone();
                     iter_env.extend(for_env);
 
@@ -646,7 +796,8 @@ fn lower_job_or_event(
                     let mut iter_local_vars = HashMap::new();
                     iter_local_vars.insert(fl.var.clone(), val.to_string());
 
-                    let for_env = eval_env_bindings(&fl.env, arg_values, &iter_local_vars, path)?;
+                    let for_env =
+                        eval_env_bindings(&fl.env, arg_values, &iter_local_vars, prefix, path)?;
                     let mut iter_env = merged_env.clone();
                     iter_env.extend(for_env);
 
@@ -672,7 +823,8 @@ fn lower_job_or_event(
                     let mut iter_local_vars = HashMap::new();
                     iter_local_vars.insert(fl.var.clone(), val.to_string());
 
-                    let for_env = eval_env_bindings(&fl.env, arg_values, &iter_local_vars, path)?;
+                    let for_env =
+                        eval_env_bindings(&fl.env, arg_values, &iter_local_vars, prefix, path)?;
                     let mut iter_env = merged_env.clone();
                     iter_env.extend(for_env);
 
@@ -1175,5 +1327,168 @@ event recovery {
 
         let web_watched = configs.iter().find(|c| c.name == "web_watched").unwrap();
         assert_eq!(web_watched.watches.len(), 2);
+    }
+
+    #[test]
+    fn lower_imported_job_prefixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(&db_path, r#"job migrate { run "migrate" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"web"), "names: {names:?}");
+        assert!(names.contains(&"db::migrate"), "names: {names:?}");
+    }
+
+    #[test]
+    fn lower_namespaced_after_dep() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(&db_path, r#"job migrate { run "migrate" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            service api {
+                wait { after @db::migrate }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let api = configs.iter().find(|c| c.name == "api").unwrap();
+        assert_eq!(api.depends.len(), 1);
+        match &api.depends[0] {
+            Dependency::ProcessExited { name, .. } => {
+                assert_eq!(name, "db::migrate");
+            }
+            other => panic!("expected ProcessExited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_namespaced_output_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(&db_path, r#"job migrate { run "migrate" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            service api {
+                wait { after @db::migrate }
+                env DB_URL = @db::migrate.DATABASE_URL
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let api = configs.iter().find(|c| c.name == "api").unwrap();
+        assert_eq!(
+            api.env.get("DB_URL").unwrap(),
+            "${{ db::migrate.DATABASE_URL }}"
+        );
+    }
+
+    #[test]
+    fn lower_env_scoping() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            env { MODULE_VAR = "from_db" }
+            job migrate { run "migrate" }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            env { ROOT_VAR = "from_root" }
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let web = configs.iter().find(|c| c.name == "web").unwrap();
+        let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
+        // Root job has ROOT_VAR but not MODULE_VAR.
+        assert_eq!(web.env.get("ROOT_VAR").unwrap(), "from_root");
+        assert!(!web.env.contains_key("MODULE_VAR"));
+        // Imported job has MODULE_VAR but not ROOT_VAR.
+        assert_eq!(migrate.env.get("MODULE_VAR").unwrap(), "from_db");
+        assert!(!migrate.env.contains_key("ROOT_VAR"));
+    }
+
+    #[test]
+    fn lower_skipped_imported_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg enabled { type = bool default = false }
+            job migrate if args.enabled { run "migrate" }
+            job other { run "other" }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            service api {
+                wait { after @db::migrate }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let args = HashMap::from([("enabled".to_string(), "false".to_string())]);
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &args).unwrap();
+        let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
+        // migrate is skipped; api still exists but without the after dep.
+        assert!(!names.contains(&"db::migrate"));
+        assert!(names.contains(&"api"));
+        assert!(names.contains(&"db::other"));
+        let api = configs.iter().find(|c| c.name == "api").unwrap();
+        assert!(api.depends.is_empty());
     }
 }

@@ -1,6 +1,7 @@
 mod ast;
 mod expr;
 mod lexer;
+pub mod loader;
 mod lower;
 mod parser;
 mod token;
@@ -18,7 +19,8 @@ pub fn parse(
     extra_env: &HashMap<String, String>,
     arg_values: &HashMap<String, String>,
 ) -> Result<(Vec<crate::config::ProcessConfig>, Option<String>)> {
-    lower::lower(input, path, extra_env, arg_values)
+    let modules = loader::load(input, path)?;
+    lower::lower_modules(&modules, extra_env, arg_values)
 }
 
 pub fn parse_header(input: &str, path: &str) -> Result<config::ConfigHeader> {

@@ -214,4 +214,28 @@ mod tests {
         let result = run_supervisor(config_path, HashMap::new(), vec![], false, true);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn check_flag_with_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(&db_path, r#"job migrate { run "migrate" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            service api {
+                wait { after @db::migrate }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let config_path = root_path.to_str().unwrap().to_string();
+        let result = run_supervisor(config_path, HashMap::new(), vec![], false, true);
+        assert!(result.is_ok(), "got: {}", result.unwrap_err());
+    }
 }

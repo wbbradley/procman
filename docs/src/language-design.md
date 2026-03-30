@@ -29,11 +29,73 @@ Duration literals are a number followed by a unit suffix: `s` (seconds), `ms` (m
 
 `none` represents the absence of a value. It is valid only in specific positions: `timeout = none` (infinite wait), `default = none` (no default). Using `none` in env value positions or boolean contexts is a parse-time error.
 
+## Imports
+
+A root `.pman` file can import other `.pman` files to compose multi-module configurations:
+
+```
+import "db/migrations.pman" as db
+import "monitoring.pman"
+```
+
+### Syntax
+
+`import "path" as alias` — loads the file at `path` and makes its entities available under `alias`. If `as alias` is omitted, the alias is derived from the filename stem (e.g., `monitoring.pman` becomes `monitoring`).
+
+### Namespaced References
+
+Imported entities are referenced with the `@alias::name` syntax:
+
+```
+service api {
+  wait { after @db::migrate }
+  env DB_URL = @db::migrate.DATABASE_URL
+  run "serve"
+}
+
+service web {
+  watch health {
+    http "http://localhost:8080/health"
+    on_fail spawn @monitoring::recovery
+  }
+  run "web-server"
+}
+```
+
+The `@alias::name` syntax works in:
+- `after @alias::job` — wait for an imported job to complete
+- `@alias::job.KEY` — reference output from an imported job
+- `on_fail spawn @alias::event` — spawn an imported event handler
+
+### Path Resolution
+
+Import paths are resolved relative to the importing file's directory.
+
+### Restrictions
+
+- **Config block**: only the root file may contain a `config { }` block. Imported files with config blocks produce an error.
+- **Nested imports**: imported files cannot themselves contain `import` statements (reserved for a future phase).
+- **Alias uniqueness**: each import alias must be unique within the root file.
+- **Diamond imports**: two imports that resolve to the same canonical file path produce an error. Use a single import with one alias.
+
+### Env Scoping
+
+Each module's top-level `env { }` bindings apply only to entities defined in that module. The root file's env does not leak into imported modules, and vice versa. System env and CLI `-e` flags are shared across all modules.
+
+### Runtime Names
+
+At runtime, imported entities have names prefixed with `alias::` (e.g., `db::migrate`). This prefix appears in logs, process names, and dependency references.
+
+### Cycle Detection
+
+Circular dependencies are detected across the combined graph of all modules.
+
 ## Top-Level Blocks
 
 A `.pman` file contains top-level blocks in any order:
 
-- `config { }` — global settings (logs, log_time)
+- `import "path" as alias` — import another `.pman` file (root file only)
+- `config { }` — global settings (logs, log_time; root file only)
 - `arg name { }` — CLI argument declaration
 - `env { }` / `env KEY = expr` — global environment variable bindings
 - `job name { }` — one-shot process (runs to completion)
@@ -488,7 +550,7 @@ All fatal — immediate shutdown:
 
 ## Future Work (Out of Scope for v1)
 
-- `include` / `import` for splitting configs across files
+- Nested imports (imported files importing other files)
 - `on_fail` block syntax for multi-action handlers
 - Arithmetic in expressions
 
