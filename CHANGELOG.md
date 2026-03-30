@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.20.0] - 2026-03-29
+
+### Breaking Changes
+- Fenced string syntax changed from triple-backtick to triple-quote (`"""`). All multi-line `run` blocks in `.pman` files must now use `"""` as the delimiter.
+
 ## [0.19.0] - 2026-03-29
 
 ### Added
