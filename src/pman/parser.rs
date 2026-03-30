@@ -208,12 +208,40 @@ impl<'a> Parser<'a> {
         } else {
             derive_import_alias(&path.value, start_span, self.path)?
         };
+        let bindings = if self.eat(&TokenKind::LBrace) {
+            self.parse_import_bindings()?
+        } else {
+            Vec::new()
+        };
         let end_span = self.tokens[self.pos - 1].span;
         Ok(ast::ImportDef {
             path,
             alias,
+            bindings,
             span: merge_spans(start_span, end_span),
         })
+    }
+
+    fn parse_import_bindings(&mut self) -> Result<Vec<ast::ImportBinding>> {
+        let mut bindings = Vec::new();
+        while !self.eat(&TokenKind::RBrace) {
+            if self.at_end() {
+                bail!(
+                    "{}",
+                    self.fmt_error(self.span(), "unterminated import binding block")
+                );
+            }
+            let (name, name_span) = self.expect_ident()?;
+            self.expect(&TokenKind::Assign)?;
+            let value = self.parse_expr()?;
+            let value_span = value.span();
+            bindings.push(ast::ImportBinding {
+                name,
+                value,
+                span: merge_spans(name_span, value_span),
+            });
+        }
+        Ok(bindings)
     }
 
     /// Parse `@name` or `@ns::name`, returning `(namespace, name, span)`.
@@ -1537,5 +1565,56 @@ mod tests {
         assert!(
             matches!(&w.on_fail, Some(ast::OnFailAction::Spawn(None, name)) if name == "recovery")
         );
+    }
+
+    #[test]
+    fn parse_import_with_single_binding() {
+        let input = r#"import "db.pman" as db { url = args.db_url }"#;
+        let file = parse(input, "test.pman").unwrap();
+        assert_eq!(file.imports.len(), 1);
+        let imp = &file.imports[0];
+        assert_eq!(imp.alias, "db");
+        assert_eq!(imp.bindings.len(), 1);
+        assert_eq!(imp.bindings[0].name, "url");
+        assert!(matches!(&imp.bindings[0].value, Expr::ArgsRef(name, _) if name == "db_url"));
+    }
+
+    #[test]
+    fn parse_import_with_multiple_bindings() {
+        let input = "import \"db.pman\" as db {\n  url = args.db_url\n  port = \"5432\"\n}";
+        let file = parse(input, "test.pman").unwrap();
+        let imp = &file.imports[0];
+        assert_eq!(imp.bindings.len(), 2);
+        assert_eq!(imp.bindings[0].name, "url");
+        assert!(matches!(&imp.bindings[0].value, Expr::ArgsRef(name, _) if name == "db_url"));
+        assert_eq!(imp.bindings[1].name, "port");
+        assert!(matches!(&imp.bindings[1].value, Expr::StringLit(s, _) if s == "5432"));
+    }
+
+    #[test]
+    fn parse_import_without_bindings() {
+        let input = r#"import "db.pman" as db"#;
+        let file = parse(input, "test.pman").unwrap();
+        assert_eq!(file.imports.len(), 1);
+        assert_eq!(file.imports[0].alias, "db");
+        assert!(file.imports[0].bindings.is_empty());
+    }
+
+    #[test]
+    fn parse_import_derived_alias_with_bindings() {
+        let input = r#"import "cache.pman" { port = "6379" }"#;
+        let file = parse(input, "test.pman").unwrap();
+        assert_eq!(file.imports[0].alias, "cache");
+        assert_eq!(file.imports[0].bindings.len(), 1);
+        assert_eq!(file.imports[0].bindings[0].name, "port");
+        assert!(matches!(&file.imports[0].bindings[0].value, Expr::StringLit(s, _) if s == "6379"));
+    }
+
+    #[test]
+    fn parse_import_with_empty_bindings() {
+        let input = r#"import "db.pman" as db {}"#;
+        let file = parse(input, "test.pman").unwrap();
+        assert_eq!(file.imports[0].alias, "db");
+        assert!(file.imports[0].bindings.is_empty());
     }
 }

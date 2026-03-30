@@ -271,6 +271,10 @@ fn eval_expr_to_string(
                 span.fmt_error(path, &format!("undefined arg: args.{name}"))
             ),
         },
+        Expr::NamespacedArgsRef(_, _, span) => bail!(
+            "{}",
+            span.fmt_error(path, "namespaced args references are not yet supported")
+        ),
         Expr::JobOutputRef(ns, job, key, _) => {
             let qualified = match ns {
                 Some(ns) => format!("{ns}::{job}"),
@@ -356,6 +360,10 @@ fn eval_condition_expr(
         Expr::JobOutputRef(_, _, _, span) => bail!(
             "{}",
             span.fmt_error(path, "job output ref not valid in condition context")
+        ),
+        Expr::NamespacedArgsRef(_, _, span) => bail!(
+            "{}",
+            span.fmt_error(path, "namespaced args ref not valid in condition context")
         ),
     }
 }

@@ -16,6 +16,15 @@ pub struct File {
 pub struct ImportDef {
     pub path: StringLit,
     pub alias: String,
+    pub bindings: Vec<ImportBinding>,
+    #[allow(dead_code)]
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct ImportBinding {
+    pub name: String,
+    pub value: Expr,
     #[allow(dead_code)]
     pub span: Span,
 }
@@ -196,6 +205,7 @@ pub enum Expr {
     DurationLit(f64, Span),
     NoneLit(Span),
     ArgsRef(String, Span),                              // args.name
+    NamespacedArgsRef(String, String, Span),            // namespace::args.name
     JobOutputRef(Option<String>, String, String, Span), // @ns::job.KEY or @job.KEY
     LocalVar(String, Span),                             // bare identifier in expression context
     BinOp(Box<Expr>, BinOp, Box<Expr>, Span),
@@ -211,6 +221,7 @@ impl Expr {
             | Expr::DurationLit(_, s)
             | Expr::NoneLit(s)
             | Expr::ArgsRef(_, s)
+            | Expr::NamespacedArgsRef(_, _, s)
             | Expr::JobOutputRef(_, _, _, s)
             | Expr::LocalVar(_, s)
             | Expr::BinOp(_, _, _, s)

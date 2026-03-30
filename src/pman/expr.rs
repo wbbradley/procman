@@ -280,10 +280,37 @@ impl<'a> ExprParser<'a> {
                 self.expect(&TokenKind::RParen)?;
                 Ok(inner)
             }
-            // local variable
+            // local variable or namespaced args ref (ns::args.name)
             TokenKind::Ident(name) => {
-                let span = self.advance().span;
-                Ok(Expr::LocalVar(name, span))
+                let start_span = self.advance().span;
+                if self.peek() == Some(&TokenKind::ColonColon)
+                    && self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Args)
+                {
+                    self.advance(); // ::
+                    self.advance(); // args
+                    self.expect(&TokenKind::Dot)?;
+                    match self.peek().cloned() {
+                        Some(TokenKind::Ident(arg_name)) => {
+                            let end_span = self.advance().span;
+                            return Ok(Expr::NamespacedArgsRef(
+                                name,
+                                arg_name,
+                                merge_spans(start_span, end_span),
+                            ));
+                        }
+                        other => bail!(
+                            "{}",
+                            self.span().fmt_error(
+                                self.path,
+                                &format!(
+                                    "expected identifier after '{}::args.', got {:?}",
+                                    name, other
+                                )
+                            )
+                        ),
+                    }
+                }
+                Ok(Expr::LocalVar(name, start_span))
             }
             other => {
                 bail!(
@@ -326,6 +353,7 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::DurationLit(_, s)
         | Expr::NoneLit(s)
         | Expr::ArgsRef(_, s)
+        | Expr::NamespacedArgsRef(_, _, s)
         | Expr::JobOutputRef(_, _, _, s)
         | Expr::LocalVar(_, s)
         | Expr::BinOp(_, _, _, s)
@@ -449,5 +477,21 @@ mod tests {
     fn none_literal() {
         let expr = parse("none");
         assert!(matches!(expr, Expr::NoneLit(_)));
+    }
+
+    #[test]
+    fn namespaced_args_ref() {
+        let expr = parse("db::args.url");
+        assert!(
+            matches!(expr, Expr::NamespacedArgsRef(ref ns, ref name, _) if ns == "db" && name == "url")
+        );
+    }
+
+    #[test]
+    fn namespaced_args_ref_multi_char() {
+        let expr = parse("my_cache::args.port");
+        assert!(
+            matches!(expr, Expr::NamespacedArgsRef(ref ns, ref name, _) if ns == "my_cache" && name == "port")
+        );
     }
 }
