@@ -28,6 +28,21 @@ pub fn lower_modules(
     // Cross-module validation.
     validate::validate_cross_refs(modules)?;
 
+    // Resolve per-module arg values.
+    let mut per_module_args: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for (alias, module) in &modules.imports {
+        let resolved = resolve_module_args(module, arg_values, &modules.root_path)?;
+        per_module_args.insert(alias.clone(), resolved);
+    }
+
+    // Build extended root args (includes namespaced entries for NamespacedArgsRef).
+    let mut root_args = arg_values.clone();
+    for (alias, mod_args) in &per_module_args {
+        for (name, value) in mod_args {
+            root_args.insert(format!("{alias}::{name}"), value.clone());
+        }
+    }
+
     let log_dir = modules
         .root
         .config
@@ -43,7 +58,7 @@ pub fn lower_modules(
     collect_skipped_jobs(
         &modules.root,
         None,
-        arg_values,
+        &root_args,
         &modules.root_path,
         &mut skipped_jobs,
     )?;
@@ -51,7 +66,7 @@ pub fn lower_modules(
         collect_skipped_jobs(
             &module.file,
             Some(alias.as_str()),
-            arg_values,
+            &per_module_args[alias],
             &module.path,
             &mut skipped_jobs,
         )?;
@@ -65,7 +80,7 @@ pub fn lower_modules(
         &modules.root_path,
         None,
         &base_env,
-        arg_values,
+        &root_args,
         &skipped_jobs,
         &mut configs,
     )?;
@@ -77,7 +92,7 @@ pub fn lower_modules(
             &module.path,
             Some(alias.as_str()),
             &base_env,
-            arg_values,
+            &per_module_args[alias],
             &skipped_jobs,
             &mut configs,
         )?;
@@ -116,6 +131,58 @@ fn collect_skipped_jobs(
         }
     }
     Ok(())
+}
+
+fn resolve_module_args(
+    module: &crate::pman::loader::LoadedModule,
+    root_arg_values: &HashMap<String, String>,
+    root_path: &str,
+) -> Result<HashMap<String, String>> {
+    let mut resolved = HashMap::new();
+
+    // Apply defaults from module's arg definitions.
+    for arg_def in &module.file.args {
+        if let Some(ref default_expr) = arg_def.default {
+            let value = eval_expr_to_string(
+                default_expr,
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                &module.path,
+            )?;
+            resolved.insert(arg_def.name.clone(), value);
+        }
+    }
+
+    // Override with import-site bindings (evaluated in root context).
+    for binding in &module.bindings {
+        let value = eval_expr_to_string(
+            &binding.value,
+            root_arg_values,
+            &HashMap::new(),
+            None,
+            root_path,
+        )?;
+        resolved.insert(binding.name.clone(), value);
+    }
+
+    // Error on unbound args (no binding, no default).
+    for arg_def in &module.file.args {
+        if !resolved.contains_key(&arg_def.name) {
+            bail!(
+                "{}",
+                arg_def.span.fmt_error(
+                    &module.path,
+                    &format!(
+                        "imported module '{}': arg '{}' has no import-site binding and no default",
+                        module.alias, arg_def.name
+                    ),
+                )
+            );
+        }
+    }
+
+    Ok(resolved)
 }
 
 fn lower_file_entities(
@@ -271,10 +338,19 @@ fn eval_expr_to_string(
                 span.fmt_error(path, &format!("undefined arg: args.{name}"))
             ),
         },
-        Expr::NamespacedArgsRef(_, _, span) => bail!(
-            "{}",
-            span.fmt_error(path, "namespaced args references are not yet supported")
-        ),
+        Expr::NamespacedArgsRef(ns, name, span) => {
+            let key = format!("{ns}::{name}");
+            match arg_values.get(&key) {
+                Some(v) => Ok(v.clone()),
+                None => bail!(
+                    "{}",
+                    span.fmt_error(
+                        path,
+                        &format!("undefined namespaced arg: {ns}::args.{name}")
+                    )
+                ),
+            }
+        }
         Expr::JobOutputRef(ns, job, key, _) => {
             let qualified = match ns {
                 Some(ns) => format!("{ns}::{job}"),
@@ -361,10 +437,19 @@ fn eval_condition_expr(
             "{}",
             span.fmt_error(path, "job output ref not valid in condition context")
         ),
-        Expr::NamespacedArgsRef(_, _, span) => bail!(
-            "{}",
-            span.fmt_error(path, "namespaced args ref not valid in condition context")
-        ),
+        Expr::NamespacedArgsRef(ns, name, span) => {
+            let key = format!("{ns}::{name}");
+            let v = arg_values.get(&key).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{}",
+                    span.fmt_error(
+                        path,
+                        &format!("undefined namespaced arg: {ns}::args.{name}")
+                    )
+                )
+            })?;
+            Ok(v != "false" && v != "0" && !v.is_empty())
+        }
     }
 }
 
@@ -1498,5 +1583,205 @@ event recovery {
         assert!(names.contains(&"db::other"));
         let api = configs.iter().find(|c| c.name == "api").unwrap();
         assert!(api.depends.is_empty());
+    }
+
+    #[test]
+    fn lower_import_binding_literal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string }
+            job migrate {
+                env { DB = args.url }
+                run "migrate"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db { url = "pg://localhost" }
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
+        assert_eq!(migrate.env.get("DB").unwrap(), "pg://localhost");
+    }
+
+    #[test]
+    fn lower_import_binding_from_root_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string }
+            job migrate {
+                env { DB = args.url }
+                run "migrate"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            arg db_url { type = string default = "pg://mydb" }
+            import "db.pman" as db { url = args.db_url }
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let args = HashMap::from([("db_url".to_string(), "pg://mydb".to_string())]);
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &args).unwrap();
+        let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
+        assert_eq!(migrate.env.get("DB").unwrap(), "pg://mydb");
+    }
+
+    #[test]
+    fn lower_namespaced_args_ref_in_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string }
+            job migrate { run "migrate" }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db { url = "pg://x" }
+            service api {
+                env { DB = db::args.url }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let api = configs.iter().find(|c| c.name == "api").unwrap();
+        assert_eq!(api.env.get("DB").unwrap(), "pg://x");
+    }
+
+    #[test]
+    fn lower_namespaced_args_ref_in_condition() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg enabled { type = bool default = true }
+            job migrate { run "migrate" }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db { enabled = "false" }
+            service api if db::args.enabled { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            !names.contains(&"api"),
+            "api should be skipped; got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn lower_unbound_imported_arg_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string }
+            job migrate { run "migrate" }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let err = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no import-site binding and no default"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn lower_import_binding_overrides_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string default = "old" }
+            job migrate {
+                env { DB = args.url }
+                run "migrate"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db { url = "new" }
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
+        assert_eq!(migrate.env.get("DB").unwrap(), "new");
     }
 }
