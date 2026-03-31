@@ -139,7 +139,7 @@ If none of the three provides a value, the arg is required and surfaces as a CLI
 ### Restrictions
 
 - **Config block**: only the root file may contain a `config { }` block. Imported files with config blocks produce an error.
-- **Nested imports**: imported files cannot themselves contain `import` statements (reserved for a future phase).
+- **Nested imports**: imported files may contain `import` statements. Each module's imports are private; transitive namespaces are not accessible from parent modules.
 - **Alias uniqueness**: each import alias must be unique within the root file.
 - **Diamond imports**: two imports that resolve to the same canonical file path produce an error. Use a single import with one alias.
 - **Binding validation**: import-site bindings must reference args that are declared in the imported module. Binding an undefined arg is an error.
@@ -160,7 +160,7 @@ Circular dependencies are detected across the combined graph of all modules.
 
 A `.pman` file contains top-level blocks in any order:
 
-- `import "path" as alias` — import another `.pman` file (root file only)
+- `import "path" as alias` — import another `.pman` file
 - `config { }` — global settings (logs, log_time; root file only)
 - `arg name { }` — CLI argument declaration
 - `env { }` / `env KEY = expr` — global environment variable bindings
@@ -616,7 +616,6 @@ All fatal — immediate shutdown:
 
 ## Future Work (Out of Scope for v1)
 
-- Nested imports (imported files importing other files)
 - `on_fail` block syntax for multi-action handlers
 - Arithmetic in expressions
 

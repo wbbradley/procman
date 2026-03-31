@@ -719,22 +719,26 @@ fn validate_namespaced_spawns_in_body(
     }
 }
 
-pub fn validate_cross_refs(modules: &LoadedModules) -> Result<()> {
-    let mut errors = Vec::new();
-
-    // Build a registry of each imported module's entities.
+/// Validate one file's cross-module refs against its direct imports' registry.
+fn validate_module_cross_refs(
+    file: &ast::File,
+    path: &str,
+    direct_imports: &HashMap<String, crate::pman::loader::LoadedModule>,
+    errors: &mut Vec<String>,
+) {
+    // Build a registry of each direct import's entities.
     let mut registry: HashMap<&str, ModuleEntities<'_>> = HashMap::new();
-    for (alias, module) in &modules.imports {
+    for (alias, module) in direct_imports {
         registry.insert(alias.as_str(), build_module_entities(&module.file));
     }
 
     // Validate import binding names reference existing args in target modules.
-    for import_def in &modules.root.imports {
+    for import_def in &file.imports {
         if let Some(entities) = registry.get(import_def.alias.as_str()) {
             for binding in &import_def.bindings {
                 if !entities.args.contains(binding.name.as_str()) {
                     errors.push(binding.span.fmt_error(
-                        &modules.root_path,
+                        path,
                         &format!(
                             "import '{}': binding '{}' does not match any arg in the imported module",
                             import_def.alias, binding.name,
@@ -745,65 +749,54 @@ pub fn validate_cross_refs(modules: &LoadedModules) -> Result<()> {
         }
     }
 
-    // Validate namespaced refs in the root file.
-    let root_path = &modules.root_path;
-    for job in &modules.root.jobs {
-        validate_namespaced_after_refs_in_body(
-            &job.name,
-            &job.body,
-            &registry,
-            root_path,
-            &mut errors,
-        );
-        validate_namespaced_output_refs_in_body(
-            &job.name,
-            &job.body,
-            &registry,
-            root_path,
-            &mut errors,
-        );
-        validate_namespaced_spawns_in_body(&job.body, &registry, root_path, &mut errors);
+    // Validate namespaced refs in this file's entities.
+    for job in &file.jobs {
+        validate_namespaced_after_refs_in_body(&job.name, &job.body, &registry, path, errors);
+        validate_namespaced_output_refs_in_body(&job.name, &job.body, &registry, path, errors);
+        validate_namespaced_spawns_in_body(&job.body, &registry, path, errors);
     }
-    for service in &modules.root.services {
+    for service in &file.services {
         validate_namespaced_after_refs_in_body(
             &service.name,
             &service.body,
             &registry,
-            root_path,
-            &mut errors,
+            path,
+            errors,
         );
         validate_namespaced_output_refs_in_body(
             &service.name,
             &service.body,
             &registry,
-            root_path,
-            &mut errors,
+            path,
+            errors,
         );
-        validate_namespaced_spawns_in_body(&service.body, &registry, root_path, &mut errors);
+        validate_namespaced_spawns_in_body(&service.body, &registry, path, errors);
     }
-    for event in &modules.root.events {
-        validate_namespaced_after_refs_in_body(
-            &event.name,
-            &event.body,
-            &registry,
-            root_path,
-            &mut errors,
-        );
-        validate_namespaced_output_refs_in_body(
-            &event.name,
-            &event.body,
-            &registry,
-            root_path,
-            &mut errors,
-        );
-        validate_namespaced_spawns_in_body(&event.body, &registry, root_path, &mut errors);
+    for event in &file.events {
+        validate_namespaced_after_refs_in_body(&event.name, &event.body, &registry, path, errors);
+        validate_namespaced_output_refs_in_body(&event.name, &event.body, &registry, path, errors);
+        validate_namespaced_spawns_in_body(&event.body, &registry, path, errors);
     }
 
-    // Build combined after-edges graph with qualified names for cycle detection.
-    let mut combined_edges: HashMap<String, HashSet<String>> = HashMap::new();
+    // Recurse into sub-imports.
+    for module in direct_imports.values() {
+        validate_module_cross_refs(&module.file, &module.path, &module.imports, errors);
+    }
+}
 
-    // Root file edges.
-    for job in &modules.root.jobs {
+/// Build after-edges for one file's entities, using `prefix` for qualified names.
+/// A namespaced ref `@ns::target` at prefix `P` becomes `{P}::{ns}::{target}`.
+/// An unnamespaced ref `@target` at prefix `P` becomes `{P}::{target}` (or just `target` if no prefix).
+fn build_edges_for_file(
+    file: &ast::File,
+    prefix: Option<&str>,
+    edges: &mut HashMap<String, HashSet<String>>,
+) {
+    for job in &file.jobs {
+        let qualified = match prefix {
+            Some(p) => format!("{p}::{}", job.name),
+            None => job.name.clone(),
+        };
         let mut targets = HashSet::new();
         if let Some(wait) = &job.body.wait {
             for cond in &wait.conditions {
@@ -812,20 +805,22 @@ pub fn validate_cross_refs(modules: &LoadedModules) -> Result<()> {
                     job: target,
                 } = &cond.kind
                 {
-                    match namespace {
-                        Some(ns) => {
-                            targets.insert(format!("{ns}::{target}"));
-                        }
-                        None => {
-                            targets.insert(target.clone());
-                        }
-                    }
+                    targets.insert(match (prefix, namespace.as_deref()) {
+                        (Some(p), Some(ns)) => format!("{p}::{ns}::{target}"),
+                        (None, Some(ns)) => format!("{ns}::{target}"),
+                        (Some(p), None) => format!("{p}::{target}"),
+                        (None, None) => target.clone(),
+                    });
                 }
             }
         }
-        combined_edges.insert(job.name.clone(), targets);
+        edges.insert(qualified, targets);
     }
-    for service in &modules.root.services {
+    for service in &file.services {
+        let qualified = match prefix {
+            Some(p) => format!("{p}::{}", service.name),
+            None => service.name.clone(),
+        };
         let mut targets = HashSet::new();
         if let Some(wait) = &service.body.wait {
             for cond in &wait.conditions {
@@ -834,20 +829,22 @@ pub fn validate_cross_refs(modules: &LoadedModules) -> Result<()> {
                     job: target,
                 } = &cond.kind
                 {
-                    match namespace {
-                        Some(ns) => {
-                            targets.insert(format!("{ns}::{target}"));
-                        }
-                        None => {
-                            targets.insert(target.clone());
-                        }
-                    }
+                    targets.insert(match (prefix, namespace.as_deref()) {
+                        (Some(p), Some(ns)) => format!("{p}::{ns}::{target}"),
+                        (None, Some(ns)) => format!("{ns}::{target}"),
+                        (Some(p), None) => format!("{p}::{target}"),
+                        (None, None) => target.clone(),
+                    });
                 }
             }
         }
-        combined_edges.insert(service.name.clone(), targets);
+        edges.insert(qualified, targets);
     }
-    for event in &modules.root.events {
+    for event in &file.events {
+        let qualified = match prefix {
+            Some(p) => format!("{p}::{}", event.name),
+            None => event.name.clone(),
+        };
         let mut targets = HashSet::new();
         if let Some(wait) = &event.body.wait {
             for cond in &wait.conditions {
@@ -856,92 +853,54 @@ pub fn validate_cross_refs(modules: &LoadedModules) -> Result<()> {
                     job: target,
                 } = &cond.kind
                 {
-                    match namespace {
-                        Some(ns) => {
-                            targets.insert(format!("{ns}::{target}"));
-                        }
-                        None => {
-                            targets.insert(target.clone());
-                        }
-                    }
+                    targets.insert(match (prefix, namespace.as_deref()) {
+                        (Some(p), Some(ns)) => format!("{p}::{ns}::{target}"),
+                        (None, Some(ns)) => format!("{ns}::{target}"),
+                        (Some(p), None) => format!("{p}::{target}"),
+                        (None, None) => target.clone(),
+                    });
                 }
             }
         }
-        combined_edges.insert(event.name.clone(), targets);
+        edges.insert(qualified, targets);
     }
+}
 
-    // Imported module edges (qualified names).
-    for (alias, module) in &modules.imports {
-        for job in &module.file.jobs {
-            let qualified = format!("{alias}::{}", job.name);
-            let mut targets = HashSet::new();
-            if let Some(wait) = &job.body.wait {
-                for cond in &wait.conditions {
-                    if let ast::ConditionKind::After {
-                        namespace,
-                        job: target,
-                    } = &cond.kind
-                    {
-                        match namespace {
-                            Some(ns) => {
-                                targets.insert(format!("{ns}::{target}"));
-                            }
-                            None => {
-                                targets.insert(format!("{alias}::{target}"));
-                            }
-                        }
-                    }
-                }
-            }
-            combined_edges.insert(qualified, targets);
-        }
-        for service in &module.file.services {
-            let qualified = format!("{alias}::{}", service.name);
-            let mut targets = HashSet::new();
-            if let Some(wait) = &service.body.wait {
-                for cond in &wait.conditions {
-                    if let ast::ConditionKind::After {
-                        namespace,
-                        job: target,
-                    } = &cond.kind
-                    {
-                        match namespace {
-                            Some(ns) => {
-                                targets.insert(format!("{ns}::{target}"));
-                            }
-                            None => {
-                                targets.insert(format!("{alias}::{target}"));
-                            }
-                        }
-                    }
-                }
-            }
-            combined_edges.insert(qualified, targets);
-        }
-        for event in &module.file.events {
-            let qualified = format!("{alias}::{}", event.name);
-            let mut targets = HashSet::new();
-            if let Some(wait) = &event.body.wait {
-                for cond in &wait.conditions {
-                    if let ast::ConditionKind::After {
-                        namespace,
-                        job: target,
-                    } = &cond.kind
-                    {
-                        match namespace {
-                            Some(ns) => {
-                                targets.insert(format!("{ns}::{target}"));
-                            }
-                            None => {
-                                targets.insert(format!("{alias}::{target}"));
-                            }
-                        }
-                    }
-                }
-            }
-            combined_edges.insert(qualified, targets);
-        }
+/// Recursively build edges for all modules in the tree.
+fn build_edges_recursive(
+    imports: &HashMap<String, crate::pman::loader::LoadedModule>,
+    prefix: Option<&str>,
+    edges: &mut HashMap<String, HashSet<String>>,
+) {
+    for (alias, module) in imports {
+        let compound = match prefix {
+            Some(p) => format!("{p}::{alias}"),
+            None => alias.clone(),
+        };
+        build_edges_for_file(&module.file, Some(&compound), edges);
+        build_edges_recursive(&module.imports, Some(&compound), edges);
     }
+}
+
+pub fn validate_cross_refs(modules: &LoadedModules) -> Result<()> {
+    let mut errors = Vec::new();
+
+    // Validate root file's cross-refs against its direct imports.
+    validate_module_cross_refs(
+        &modules.root,
+        &modules.root_path,
+        &modules.imports,
+        &mut errors,
+    );
+
+    // Build combined after-edges graph with qualified names for cycle detection.
+    let mut combined_edges: HashMap<String, HashSet<String>> = HashMap::new();
+
+    // Root file edges.
+    build_edges_for_file(&modules.root, None, &mut combined_edges);
+
+    // Recursively build edges for all imported modules.
+    build_edges_recursive(&modules.imports, None, &mut combined_edges);
 
     // Cycle detection on combined graph.
     let str_edges: HashMap<&str, HashSet<&str>> = combined_edges

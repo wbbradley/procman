@@ -15,31 +15,102 @@ use crate::{
     },
 };
 
+fn qualify_name(prefix: Option<&str>, namespace: Option<&str>, name: &str) -> String {
+    match (prefix, namespace) {
+        (Some(p), Some(ns)) => format!("{p}::{ns}::{name}"),
+        (None, Some(ns)) => format!("{ns}::{name}"),
+        (Some(p), None) => format!("{p}::{name}"),
+        (None, None) => name.to_string(),
+    }
+}
+
+/// Recursively validate a module and all its sub-imports.
+fn validate_recursive(module: &crate::pman::loader::LoadedModule) -> Result<()> {
+    validate::validate(&module.file, &module.path)?;
+    for sub in module.imports.values() {
+        validate_recursive(sub)?;
+    }
+    Ok(())
+}
+
+/// Flatten the module tree into a list of `(compound_prefix, &LoadedModule)` pairs,
+/// resolving args recursively. Each module's resolved args are stored in `per_module_args`
+/// keyed by compound prefix.
+fn collect_modules_and_resolve_args<'a>(
+    module: &'a crate::pman::loader::LoadedModule,
+    prefix: &str,
+    parent_arg_values: &HashMap<String, String>,
+    parent_path: &str,
+    per_module_args: &mut HashMap<String, HashMap<String, String>>,
+    all_modules: &mut Vec<(String, &'a crate::pman::loader::LoadedModule)>,
+) -> Result<()> {
+    let resolved = resolve_module_args(module, parent_arg_values, parent_path)?;
+
+    // Recurse into sub-imports, using this module's resolved args as parent context.
+    for (sub_alias, sub_module) in &module.imports {
+        let sub_prefix = format!("{prefix}::{sub_alias}");
+        collect_modules_and_resolve_args(
+            sub_module,
+            &sub_prefix,
+            &resolved,
+            &module.path,
+            per_module_args,
+            all_modules,
+        )?;
+    }
+
+    // Extend this module's arg map with sub_alias::name entries (for NamespacedArgsRef).
+    let mut extended = resolved.clone();
+    for (sub_alias, sub_module) in &module.imports {
+        let sub_prefix = format!("{prefix}::{sub_alias}");
+        if let Some(sub_args) = per_module_args.get(&sub_prefix) {
+            for (name, value) in sub_args {
+                extended.insert(format!("{sub_alias}::{name}"), value.clone());
+            }
+        }
+        // Also register sub-module arg names directly (for the sub_alias::args.name pattern).
+        let _ = sub_module;
+    }
+
+    per_module_args.insert(prefix.to_string(), extended);
+    all_modules.push((prefix.to_string(), module));
+    Ok(())
+}
+
 pub fn lower_modules(
     modules: &LoadedModules,
     extra_env: &HashMap<String, String>,
     arg_values: &HashMap<String, String>,
 ) -> Result<(Vec<ProcessConfig>, Option<String>)> {
-    // Validate root and each imported file.
+    // Validate root and all imported files recursively.
     validate::validate(&modules.root, &modules.root_path)?;
     for module in modules.imports.values() {
-        validate::validate(&module.file, &module.path)?;
+        validate_recursive(module)?;
     }
     // Cross-module validation.
     validate::validate_cross_refs(modules)?;
 
-    // Resolve per-module arg values.
+    // Flatten all imports recursively, resolving args at each level.
     let mut per_module_args: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut all_modules: Vec<(String, &crate::pman::loader::LoadedModule)> = Vec::new();
     for (alias, module) in &modules.imports {
-        let resolved = resolve_module_args(module, arg_values, &modules.root_path)?;
-        per_module_args.insert(alias.clone(), resolved);
+        collect_modules_and_resolve_args(
+            module,
+            alias,
+            arg_values,
+            &modules.root_path,
+            &mut per_module_args,
+            &mut all_modules,
+        )?;
     }
 
-    // Build extended root args (includes namespaced entries for NamespacedArgsRef).
+    // Build extended root args (includes namespaced entries for direct imports only).
     let mut root_args = arg_values.clone();
-    for (alias, mod_args) in &per_module_args {
-        for (name, value) in mod_args {
-            root_args.insert(format!("{alias}::{name}"), value.clone());
+    for alias in modules.imports.keys() {
+        if let Some(mod_args) = per_module_args.get(alias.as_str()) {
+            for (name, value) in mod_args {
+                root_args.insert(format!("{alias}::{name}"), value.clone());
+            }
         }
     }
 
@@ -62,11 +133,11 @@ pub fn lower_modules(
         &modules.root_path,
         &mut skipped_jobs,
     )?;
-    for (alias, module) in &modules.imports {
+    for (prefix, module) in &all_modules {
         collect_skipped_jobs(
             &module.file,
-            Some(alias.as_str()),
-            &per_module_args[alias],
+            Some(prefix.as_str()),
+            &per_module_args[prefix],
             &module.path,
             &mut skipped_jobs,
         )?;
@@ -85,14 +156,14 @@ pub fn lower_modules(
         &mut configs,
     )?;
 
-    // Lower each imported module's entities (with alias prefix).
-    for (alias, module) in &modules.imports {
+    // Lower each flattened module's entities (with compound prefix).
+    for (prefix, module) in &all_modules {
         lower_file_entities(
             &module.file,
             &module.path,
-            Some(alias.as_str()),
+            Some(prefix.as_str()),
             &base_env,
-            &per_module_args[alias],
+            &per_module_args[prefix],
             &skipped_jobs,
             &mut configs,
         )?;
@@ -112,22 +183,14 @@ fn collect_skipped_jobs(
         if let Some(cond_expr) = &job.condition
             && !eval_condition_expr(cond_expr, arg_values, path)?
         {
-            let name = match prefix {
-                Some(p) => format!("{p}::{}", job.name),
-                None => job.name.clone(),
-            };
-            skipped_jobs.insert(name);
+            skipped_jobs.insert(qualify_name(prefix, None, &job.name));
         }
     }
     for service in &file.services {
         if let Some(cond_expr) = &service.condition
             && !eval_condition_expr(cond_expr, arg_values, path)?
         {
-            let name = match prefix {
-                Some(p) => format!("{p}::{}", service.name),
-                None => service.name.clone(),
-            };
-            skipped_jobs.insert(name);
+            skipped_jobs.insert(qualify_name(prefix, None, &service.name));
         }
     }
     Ok(())
@@ -206,10 +269,7 @@ fn lower_file_entities(
     let global_env = eval_env_bindings(&file.env, arg_values, &HashMap::new(), prefix, path)?;
 
     for job in &file.jobs {
-        let qualified = match prefix {
-            Some(p) => format!("{p}::{}", job.name),
-            None => job.name.clone(),
-        };
+        let qualified = qualify_name(prefix, None, &job.name);
         if skipped_jobs.contains(&qualified) {
             continue;
         }
@@ -229,10 +289,7 @@ fn lower_file_entities(
     }
 
     for service in &file.services {
-        let qualified = match prefix {
-            Some(p) => format!("{p}::{}", service.name),
-            None => service.name.clone(),
-        };
+        let qualified = qualify_name(prefix, None, &service.name);
         if skipped_jobs.contains(&qualified) {
             continue;
         }
@@ -252,10 +309,7 @@ fn lower_file_entities(
     }
 
     for event in &file.events {
-        let qualified = match prefix {
-            Some(p) => format!("{p}::{}", event.name),
-            None => event.name.clone(),
-        };
+        let qualified = qualify_name(prefix, None, &event.name);
         let mut event_configs = lower_job_or_event(
             &qualified,
             &event.body,
@@ -367,13 +421,7 @@ fn eval_expr_to_string(
             }
         }
         Expr::JobOutputRef(ns, job, key, _) => {
-            let qualified = match ns {
-                Some(ns) => format!("{ns}::{job}"),
-                None => match prefix {
-                    Some(p) => format!("{p}::{job}"),
-                    None => job.clone(),
-                },
-            };
+            let qualified = qualify_name(prefix, ns.as_deref(), job);
             Ok(format!("${{{{ {qualified}.{key} }}}}"))
         }
         Expr::LocalVar(name, span) => match local_vars.get(name) {
@@ -576,13 +624,7 @@ fn lower_wait_condition(
 
     match (&cond.kind, cond.negated) {
         (ast::ConditionKind::After { namespace, job }, false) => {
-            let qualified = match namespace {
-                Some(ns) => format!("{ns}::{job}"),
-                None => match prefix {
-                    Some(p) => format!("{p}::{job}"),
-                    None => job.clone(),
-                },
-            };
+            let qualified = qualify_name(prefix, namespace.as_deref(), job);
             Ok(Dependency::ProcessExited {
                 name: qualified,
                 poll_interval: poll,
@@ -717,14 +759,7 @@ fn lower_watch(
         Some(ast::OnFailAction::Debug) => config::OnFailAction::Debug,
         Some(ast::OnFailAction::Log) => config::OnFailAction::Log,
         Some(ast::OnFailAction::Spawn(ns, name)) => {
-            let qualified = match ns {
-                Some(ns) => format!("{ns}::{name}"),
-                None => match prefix {
-                    Some(p) => format!("{p}::{name}"),
-                    None => name.clone(),
-                },
-            };
-            config::OnFailAction::Spawn(qualified)
+            config::OnFailAction::Spawn(qualify_name(prefix, ns.as_deref(), name))
         }
     };
     Ok(Watch {
@@ -770,13 +805,7 @@ fn lower_job_or_event(
         for cond in &wait.conditions {
             // Strip `after @skipped_job` dependencies.
             if let ast::ConditionKind::After { namespace, job } = &cond.kind {
-                let qualified = match namespace {
-                    Some(ns) => format!("{ns}::{job}"),
-                    None => match prefix {
-                        Some(p) => format!("{p}::{job}"),
-                        None => job.clone(),
-                    },
-                };
+                let qualified = qualify_name(prefix, namespace.as_deref(), job);
                 if skipped_jobs.contains(&qualified) {
                     continue;
                 }
@@ -1988,5 +2017,141 @@ event recovery {
         let (configs, _) = lower_modules(&modules, &HashMap::new(), &arg_values).unwrap();
         let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
         assert_eq!(migrate.env.get("DB").unwrap(), "from-cli");
+    }
+
+    #[test]
+    fn lower_nested_import_entities() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner_path = dir.path().join("inner.pman");
+        std::fs::write(&inner_path, r#"job setup { run "setup" }"#).unwrap();
+
+        let lib_path = dir.path().join("lib.pman");
+        std::fs::write(
+            &lib_path,
+            r#"
+            import "inner.pman" as inner
+            job init {
+                wait { after @inner::setup }
+                run "init"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "lib.pman" as lib
+            service api {
+                wait { after @lib::init }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
+        // Verify compound-prefixed runtime names.
+        assert!(names.contains(&"lib::inner::setup"), "names: {names:?}");
+        assert!(names.contains(&"lib::init"), "names: {names:?}");
+        assert!(names.contains(&"api"), "names: {names:?}");
+        // Verify lib::init depends on lib::inner::setup.
+        let init = configs.iter().find(|c| c.name == "lib::init").unwrap();
+        match &init.depends[0] {
+            Dependency::ProcessExited { name, .. } => {
+                assert_eq!(name, "lib::inner::setup");
+            }
+            other => panic!("expected ProcessExited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_nested_import_arg_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner_path = dir.path().join("inner.pman");
+        std::fs::write(
+            &inner_path,
+            r#"
+            arg port { type = string }
+            job setup {
+                env { PORT = args.port }
+                run "setup"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let lib_path = dir.path().join("lib.pman");
+        std::fs::write(
+            &lib_path,
+            r#"
+            arg base_port { type = string }
+            import "inner.pman" as inner { port = args.base_port }
+            job init { run "init" }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "lib.pman" as lib { base_port = "9090" }
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let setup = configs
+            .iter()
+            .find(|c| c.name == "lib::inner::setup")
+            .unwrap();
+        assert_eq!(setup.env.get("PORT").unwrap(), "9090");
+    }
+
+    #[test]
+    fn nested_import_transitive_namespace_rejected() {
+        // Root tries to reference @inner::setup, but inner is lib's private import.
+        let dir = tempfile::tempdir().unwrap();
+        let inner_path = dir.path().join("inner.pman");
+        std::fs::write(&inner_path, r#"job setup { run "setup" }"#).unwrap();
+
+        let lib_path = dir.path().join("lib.pman");
+        std::fs::write(
+            &lib_path,
+            r#"
+            import "inner.pman" as inner
+            job init { run "init" }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "lib.pman" as lib
+            service api {
+                wait { after @inner::setup }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let err = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown import alias"),
+            "got: {err}"
+        );
     }
 }

@@ -21,20 +21,41 @@ pub struct LoadedModule {
     #[allow(dead_code)]
     pub alias: String,
     pub bindings: Vec<ast::ImportBinding>,
+    pub imports: HashMap<String, LoadedModule>,
 }
 
 pub fn load(root_content: &str, root_path: &str) -> Result<LoadedModules> {
     let root = parser::parse(root_content, root_path)?;
 
+    // Seed the visited set with root's canonical path for cycle detection.
+    let root_canonical =
+        std::fs::canonicalize(root_path).unwrap_or_else(|_| std::path::PathBuf::from(root_path));
+    let mut visited = HashSet::new();
+    visited.insert(root_canonical.to_string_lossy().to_string());
+
+    let imports = load_imports(&root.imports, root_path, &mut visited)?;
+
+    Ok(LoadedModules {
+        root,
+        root_path: root_path.to_string(),
+        imports,
+    })
+}
+
+fn load_imports(
+    import_defs: &[ast::ImportDef],
+    parent_path: &str,
+    visited: &mut HashSet<String>,
+) -> Result<HashMap<String, LoadedModule>> {
     let mut imports = HashMap::new();
     let mut canonical_to_alias: HashMap<String, String> = HashMap::new();
     let mut seen_aliases: HashSet<String> = HashSet::new();
 
-    let root_dir = Path::new(root_path)
+    let parent_dir = Path::new(parent_path)
         .parent()
         .unwrap_or_else(|| Path::new("."));
 
-    for import_def in &root.imports {
+    for import_def in import_defs {
         let alias = &import_def.alias;
 
         // Check duplicate aliases.
@@ -43,29 +64,29 @@ pub fn load(root_content: &str, root_path: &str) -> Result<LoadedModules> {
                 "{}",
                 import_def
                     .span
-                    .fmt_error(root_path, &format!("duplicate import alias '{alias}'"))
+                    .fmt_error(parent_path, &format!("duplicate import alias '{alias}'"))
             );
         }
 
-        // Resolve path relative to root file's directory.
-        let resolved = root_dir.join(&import_def.path.value);
+        // Resolve path relative to parent file's directory.
+        let resolved = parent_dir.join(&import_def.path.value);
         let canonical = std::fs::canonicalize(&resolved).map_err(|e| {
             anyhow::anyhow!(
                 "{}",
                 import_def.span.fmt_error(
-                    root_path,
+                    parent_path,
                     &format!("cannot resolve import '{}': {e}", import_def.path.value)
                 )
             )
         })?;
         let canonical_str = canonical.to_string_lossy().to_string();
 
-        // Check for diamond imports (same canonical path, different alias).
+        // Check for diamond imports (same canonical path, different alias within this module).
         if let Some(existing_alias) = canonical_to_alias.get(&canonical_str) {
             bail!(
                 "{}",
                 import_def.span.fmt_error(
-                    root_path,
+                    parent_path,
                     &format!(
                         "import '{}' resolves to the same file as alias '{existing_alias}'",
                         import_def.path.value
@@ -75,15 +96,13 @@ pub fn load(root_content: &str, root_path: &str) -> Result<LoadedModules> {
         }
         canonical_to_alias.insert(canonical_str.clone(), alias.clone());
 
-        // Check for cycle (importing self).
-        if let Ok(root_canonical) = std::fs::canonicalize(root_path)
-            && canonical == root_canonical
-        {
+        // Check for cycle (file already on the current import stack).
+        if visited.contains(&canonical_str) {
             bail!(
                 "{}",
                 import_def
                     .span
-                    .fmt_error(root_path, "import creates a cycle (imports itself)")
+                    .fmt_error(parent_path, "import creates a cycle")
             );
         }
 
@@ -92,7 +111,7 @@ pub fn load(root_content: &str, root_path: &str) -> Result<LoadedModules> {
             anyhow::anyhow!(
                 "{}",
                 import_def.span.fmt_error(
-                    root_path,
+                    parent_path,
                     &format!("cannot read import '{}': {e}", import_def.path.value)
                 )
             )
@@ -110,16 +129,10 @@ pub fn load(root_content: &str, root_path: &str) -> Result<LoadedModules> {
             );
         }
 
-        // Validate: no nested imports.
-        if let Some(nested_import) = imported_file.imports.first() {
-            bail!(
-                "{}",
-                nested_import.span.fmt_error(
-                    &canonical_str,
-                    "nested imports are not supported (imported files cannot import other files)"
-                )
-            );
-        }
+        // Recursively load nested imports (with cycle detection via visited set).
+        visited.insert(canonical_str.clone());
+        let sub_imports = load_imports(&imported_file.imports, &canonical_str, visited)?;
+        visited.remove(&canonical_str);
 
         imports.insert(
             alias.clone(),
@@ -128,15 +141,12 @@ pub fn load(root_content: &str, root_path: &str) -> Result<LoadedModules> {
                 path: canonical_str,
                 alias: alias.clone(),
                 bindings: import_def.bindings.clone(),
+                imports: sub_imports,
             },
         );
     }
 
-    Ok(LoadedModules {
-        root,
-        root_path: root_path.to_string(),
-        imports,
-    })
+    Ok(imports)
 }
 
 #[cfg(test)]
@@ -371,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn load_nested_import_rejected() {
+    fn load_nested_import_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         let inner_path = dir.path().join("inner.pman");
         std::fs::write(&inner_path, r#"job inner { run "inner" }"#).unwrap();
@@ -397,10 +407,127 @@ mod tests {
         .unwrap();
 
         let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = load(&content, root_path.to_str().unwrap()).unwrap();
+        assert_eq!(modules.imports.len(), 1);
+        assert!(modules.imports.contains_key("lib"));
+        let lib = &modules.imports["lib"];
+        assert_eq!(lib.imports.len(), 1);
+        assert!(lib.imports.contains_key("inner"));
+        assert_eq!(lib.imports["inner"].file.jobs.len(), 1);
+    }
+
+    #[test]
+    fn load_transitive_cycle_detected() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // A -> B -> C -> A
+        let a_path = dir.path().join("a.pman");
+        let b_path = dir.path().join("b.pman");
+        let c_path = dir.path().join("c.pman");
+
+        std::fs::write(
+            &a_path,
+            r#"
+            import "b.pman" as b
+            job a { run "a" }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &b_path,
+            r#"
+            import "c.pman" as c
+            job b { run "b" }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            &c_path,
+            r#"
+            import "a.pman" as a
+            job c { run "c" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&a_path).unwrap();
+        let err = load(&content, a_path.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("cycle"), "got: {err}");
+    }
+
+    #[test]
+    fn load_nested_diamond_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared_path = dir.path().join("shared.pman");
+        std::fs::write(&shared_path, r#"job shared { run "shared" }"#).unwrap();
+
+        // lib.pman imports shared twice under different aliases.
+        let lib_path = dir.path().join("lib.pman");
+        std::fs::write(
+            &lib_path,
+            r#"
+            import "shared.pman" as s1
+            import "shared.pman" as s2
+            job lib { run "lib" }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "lib.pman" as lib
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
         let err = load(&content, root_path.to_str().unwrap()).unwrap_err();
-        assert!(
-            err.to_string().contains("nested imports are not supported"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("same file"), "got: {err}");
+    }
+
+    #[test]
+    fn load_same_file_different_parents_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared_path = dir.path().join("shared.pman");
+        std::fs::write(&shared_path, r#"job shared { run "shared" }"#).unwrap();
+
+        // Both a.pman and b.pman import shared.pman independently.
+        let a_path = dir.path().join("a.pman");
+        std::fs::write(
+            &a_path,
+            r#"
+            import "shared.pman" as shared
+            job a { run "a" }
+            "#,
+        )
+        .unwrap();
+        let b_path = dir.path().join("b.pman");
+        std::fs::write(
+            &b_path,
+            r#"
+            import "shared.pman" as shared
+            job b { run "b" }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "a.pman" as a
+            import "b.pman" as b
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = load(&content, root_path.to_str().unwrap()).unwrap();
+        assert!(modules.imports["a"].imports.contains_key("shared"));
+        assert!(modules.imports["b"].imports.contains_key("shared"));
     }
 }
