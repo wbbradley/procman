@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.21.0] - 2026-03-30
+
+### Breaking Changes
+- `arg` declarations must now appear at the top level, outside the `config { }` block. Placing `arg` inside `config` is now a parse error.
+- `env` declarations must now appear at the top level, outside the `config { }` block. Placing `env` inside `config` is now a parse error.
+- The `config { }` block now only accepts `logs` and `log_time` settings.
+
+### Added
+- **Module imports:** `.pman` files can import other `.pman` files using `import "path.pman" as alias`. Imported entities are namespaced under the alias (e.g., `db::migrate`) in logs, dependency references, and runtime process names.
+- **Parameterized imports:** Import statements accept bindings to configure the imported module's args: `import "db.pman" as db { url = "postgres://..." }`. Binding expressions are evaluated in the importing file's context.
+- **Nested imports:** Imported files may themselves contain `import` statements. Each module's imports are private; transitive namespaces are not accessible from parent modules.
+- **Namespaced cross-module references:** `@alias::name` syntax for referencing imported entities in `after`, `on_fail spawn`, and `@job.KEY` output reference positions.
+- **Namespaced args refs:** `alias::args.name` syntax for referencing an imported module's resolved arg values in any expression position.
+- **CLI flags for imported module args:** Unbound imported args (no binding and no default) are automatically exposed as `--alias::arg-name` CLI flags. Bound or defaulted args can be overridden via the same syntax.
+- **Single-line env shorthand:** `env KEY = expr` is now accepted as a top-level statement alongside the block form `env { ... }`. Both forms can coexist.
+- Cross-module validation: import bindings, namespaced after/output/spawn refs, and namespaced args refs are all validated at parse time.
+- Diamond import detection: two imports resolving to the same canonical file within one module produce an error.
+- Import cycle detection across the full transitive import graph.
+
+### Changed
+- `-- --help` output now groups arguments by namespace, with imported module args shown in labeled sections.
+
+### Fixed
+- Test-only functions gated behind `#[cfg(test)]` to eliminate dead_code warnings.
+
 ## [0.20.0] - 2026-03-29
 
 ### Breaking Changes

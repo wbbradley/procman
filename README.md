@@ -38,7 +38,7 @@ procman myapp.pman --debug                     # pause before shutdown on failur
 procman myapp.pman --check                     # validate config and exit
 ```
 
-The first positional argument is the path to the config file (required). Arguments after `--` are parsed according to `config { arg ... { } }` definitions (see below).
+The first positional argument is the path to the config file (required). Arguments after `--` are parsed according to top-level `arg` definitions (see below).
 
 ### Dependency graph
 
@@ -71,7 +71,7 @@ Here `migrate` and `web` start immediately. `api` waits for `migrate` to exit su
 
 ### `-e` / `--env` — inject environment variables
 
-A repeatable `-e KEY=VALUE` flag for ad-hoc environment variable injection without modifying the config file. Precedence (lowest → highest): system env → CLI `-e` → global `config { env { } }` → per-job `env` → per-iteration `for` bindings.
+A repeatable `-e KEY=VALUE` flag for ad-hoc environment variable injection without modifying the config file. Precedence (lowest → highest): system env → CLI `-e` → global `env { }` → per-job `env` → per-iteration `for` bindings.
 
 ```bash
 procman myapp.pman -e PORT=3000 -e RUST_LOG=debug
@@ -100,30 +100,33 @@ procman myapp.pman --debug
 ~~~
 config {
   logs = "./my-logs"
-
-  env {
-    RUST_LOG = args.log_level
-  }
-
-  arg port {
-    type = string
-    default = "3000"
-    short = "p"
-    description = "Port to listen on"
-  }
-
-  arg log_level {
-    type = string
-    default = "info"
-    short = "r"
-    description = "RUST_LOG configuration"
-  }
-
-  arg enable_worker {
-    type = bool
-    default = false
-  }
+  log_time = true
 }
+
+env {
+  RUST_LOG = args.log_level
+}
+
+arg port {
+  type = string
+  default = "3000"
+  short = "p"
+  description = "Port to listen on"
+}
+
+arg log_level {
+  type = string
+  default = "info"
+  short = "r"
+  description = "RUST_LOG configuration"
+}
+
+arg enable_worker {
+  type = bool
+  default = false
+}
+
+import "db.pman" as db { url = "postgres://localhost/mydb" }
 
 job migrate {
   run """
@@ -205,17 +208,10 @@ event recovery {
 
 The config file contains top-level blocks in any order:
 
-- `config { }` (optional): global settings.
-  - `logs` (optional): custom log directory path (default: `logs/procman`). Recreated each run.
-  - `log_time` (optional, default `false`): when `true`, each log line is prefixed with elapsed time since procman started (e.g., `api 1.2s | listening on :3000`).
-  - `env { }` (optional): global environment variable bindings applied to all jobs and services. Overridable per-job/service.
-  - `arg name { }` (optional): user-defined CLI arguments parsed from argv after `--`. Underscores in names become dashes on the CLI (e.g. `log_level` → `--log-level`). Fields:
-    - `type` (optional, default `string`): `string` or `bool`. String args take a value (`--name VALUE`), bool args are flags (`--name` = true).
-    - `short` (optional): single-character shorthand for `-s` form.
-    - `description` (optional): help text shown with `-- --help`.
-    - `default` (optional): fallback value. Args without a default are required.
-  - Arg values are referenced in expressions as `args.name`. There is no `env` field on args — use `config { env { } }` to explicitly bind args to environment variables.
-  - Env precedence (lowest → highest): system env → CLI `-e` → global `config { env { } }` → per-job `env` → per-iteration `for` bindings.
+- `config { }` (optional): global settings — `logs` (log directory path, default `logs/procman`) and `log_time` (prefix lines with elapsed time, default `false`).
+- `arg name { }` (optional): user-defined CLI arguments parsed from argv after `--`. Underscores in names become dashes on the CLI (e.g. `log_level` → `--log-level`). Fields: `type` (`string` or `bool`), `short`, `description`, `default`. Args without a default are required. Referenced as `args.name` in expressions.
+- `env { }` / `env KEY = expr` (optional): global environment variable bindings applied to all jobs and services. Both block and single-binding forms can coexist. Env precedence (lowest → highest): system env → CLI `-e` → global `env` → per-job `env` → per-iteration `for` bindings.
+- `import "path" as alias` (optional): import another `.pman` file. Imported entities are namespaced under the alias (e.g., `db::migrate`). Imports support bindings (`import "db.pman" as db { url = "..." }`) and can be nested. See the [language design doc](https://wbbradley.github.io/procman/language-design.html) for details.
 - `job name { }` / `job name if expr { }` — one-shot process definitions (run to completion).
 - `service name { }` / `service name if expr { }` — long-running process definitions (daemons).
 - `event name { }` — dormant processes, only started via `on_fail spawn @name`.
@@ -239,6 +235,8 @@ Each job/service definition supports:
 - `watch name { }` (optional, services only): named runtime health checks that monitor the service after it starts. Each watch polls a condition (same types as `wait`) and takes an action when consecutive failures exceed the threshold.
 
 Jobs can write key-value pairs to `$PROCMAN_OUTPUT` for downstream resolution via `@job.KEY`.
+
+Watch options:
   - `initial_delay` (optional, default `0s`): time before the first check.
   - `poll` (optional, default `5s`): time between checks.
   - `threshold` (optional, default `3`): consecutive failures before triggering the action.
