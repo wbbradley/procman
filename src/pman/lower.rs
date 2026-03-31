@@ -10,7 +10,6 @@ use crate::{
     pman::{
         ast::{self, BinOp, Expr, RunSection, ShellBlock},
         loader::LoadedModules,
-        parser,
         validate,
     },
 };
@@ -329,12 +328,14 @@ fn lower_file_entities(
 }
 
 /// Backward-compatible wrapper used by tests.
+#[cfg(test)]
 pub fn lower(
     input: &str,
     path: &str,
     extra_env: &HashMap<String, String>,
     arg_values: &HashMap<String, String>,
 ) -> Result<(Vec<ProcessConfig>, Option<String>)> {
+    use crate::pman::parser;
     let file = parser::parse(input, path)?;
     let modules = LoadedModules {
         root: file,

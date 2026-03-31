@@ -13,6 +13,7 @@ use anyhow::Result;
 
 use crate::config;
 
+#[cfg(test)]
 pub fn parse(
     input: &str,
     path: &str,
