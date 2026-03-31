@@ -1836,6 +1836,126 @@ event recovery {
     }
 
     #[test]
+    fn lower_multiple_imports_separate_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string }
+            job migrate {
+                env { DB = args.url }
+                run "migrate"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let cache_path = dir.path().join("cache.pman");
+        std::fs::write(
+            &cache_path,
+            r#"
+            arg host { type = string }
+            service redis {
+                env { REDIS = args.host }
+                run "redis-cli"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db { url = "pg://db" }
+            import "cache.pman" as cache { host = "redis://cache" }
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
+        let redis = configs.iter().find(|c| c.name == "cache::redis").unwrap();
+        // Each module gets its own arg, no cross-contamination.
+        assert_eq!(migrate.env.get("DB").unwrap(), "pg://db");
+        assert_eq!(redis.env.get("REDIS").unwrap(), "redis://cache");
+        assert!(!migrate.env.contains_key("REDIS"));
+        assert!(!redis.env.contains_key("DB"));
+    }
+
+    #[test]
+    fn lower_import_multiple_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string }
+            arg pool_size { type = string }
+            job migrate {
+                env { DB = args.url POOL = args.pool_size }
+                run "migrate"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db { url = "pg://localhost" pool_size = "10" }
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
+        assert_eq!(migrate.env.get("DB").unwrap(), "pg://localhost");
+        assert_eq!(migrate.env.get("POOL").unwrap(), "10");
+    }
+
+    #[test]
+    fn lower_default_used_when_no_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string default = "pg://default" }
+            job migrate {
+                env { DB = args.url }
+                run "migrate"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
+        assert_eq!(migrate.env.get("DB").unwrap(), "pg://default");
+    }
+
+    #[test]
     fn lower_cli_override_beats_binding() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("db.pman");

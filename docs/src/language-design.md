@@ -71,12 +71,78 @@ The `@alias::name` syntax works in:
 
 Import paths are resolved relative to the importing file's directory.
 
+### Parameterized Imports
+
+Imports can supply argument bindings to the imported module, allowing the same module to be configured differently per import site:
+
+```
+import "db.pman" as db { url = "postgres://localhost/mydb" }
+```
+
+#### Arg Declarations in Imported Modules
+
+Imported modules declare their parameters with `arg` blocks, just like the root file:
+
+```
+# db.pman
+arg url { type = string }
+arg pool_size { type = string default = "5" }
+
+job migrate {
+  env DB_URL = args.url
+  run "migrate --pool $DB_URL"
+}
+```
+
+#### Import-Site Bindings
+
+Bindings appear inside `{ }` after the alias and provide values for the imported module's args. Binding expressions are evaluated in the root file's context, so they can reference the root file's own args:
+
+```
+arg db_url { type = string default = "postgres://localhost/mydb" }
+import "db.pman" as db { url = args.db_url pool_size = "10" }
+```
+
+#### Namespaced Args Refs
+
+The root file can reference an imported module's resolved arg values using `alias::args.name` syntax:
+
+```
+import "db.pman" as db { url = "postgres://localhost/mydb" }
+
+service api {
+  env DB_URL = db::args.url
+  run "serve"
+}
+```
+
+This works in any expression position: `env` values, `if` conditions, etc.
+
+#### CLI Overrides
+
+Unbound imported args (no binding and no default) are exposed as required CLI flags in the form `--alias::arg-name`. Args with bindings or defaults can still be overridden from the CLI:
+
+```
+pman run my.pman -- --db::url "postgres://prod/mydb"
+```
+
+#### Resolution Priority
+
+Imported module arg values resolve with three levels of priority (highest to lowest):
+
+1. **CLI flags** (`--alias::arg-name`) — always wins
+2. **Import-site bindings** (`import "..." as alias { name = expr }`)
+3. **Defaults** (`arg name { default = "..." }` in the imported module)
+
+If none of the three provides a value, the arg is required and surfaces as a CLI flag error.
+
 ### Restrictions
 
 - **Config block**: only the root file may contain a `config { }` block. Imported files with config blocks produce an error.
 - **Nested imports**: imported files cannot themselves contain `import` statements (reserved for a future phase).
 - **Alias uniqueness**: each import alias must be unique within the root file.
 - **Diamond imports**: two imports that resolve to the same canonical file path produce an error. Use a single import with one alias.
+- **Binding validation**: import-site bindings must reference args that are declared in the imported module. Binding an undefined arg is an error.
 
 ### Env Scoping
 

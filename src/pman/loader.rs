@@ -325,6 +325,52 @@ mod tests {
     }
 
     #[test]
+    fn load_diamond_import_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(&db_path, r#"job migrate { run "migrate" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            import "db.pman" as db2
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let err = load(&content, root_path.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("same file"), "got: {err}");
+    }
+
+    #[test]
+    fn load_diamond_import_via_relative_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let db_path = sub.join("db.pman");
+        std::fs::write(&db_path, r#"job migrate { run "migrate" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "sub/db.pman" as db
+            import "./sub/db.pman" as db2
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let err = load(&content, root_path.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("same file"), "got: {err}");
+    }
+
+    #[test]
     fn load_nested_import_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let inner_path = dir.path().join("inner.pman");
