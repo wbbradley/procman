@@ -11,6 +11,7 @@ pub enum ArgType {
 #[derive(Clone, Debug)]
 pub struct ArgDef {
     pub name: String,
+    pub namespace: Option<String>,
     pub short: Option<String>,
     pub description: Option<String>,
     pub arg_type: ArgType,

@@ -166,7 +166,15 @@ fn resolve_module_args(
         resolved.insert(binding.name.clone(), value);
     }
 
-    // Error on unbound args (no binding, no default).
+    // Override with CLI values (highest priority).
+    for arg_def in &module.file.args {
+        let cli_key = format!("{}::{}", module.alias, arg_def.name);
+        if let Some(value) = root_arg_values.get(&cli_key) {
+            resolved.insert(arg_def.name.clone(), value.clone());
+        }
+    }
+
+    // Error on unbound args (no binding, no default, no CLI override).
     for arg_def in &module.file.args {
         if !resolved.contains_key(&arg_def.name) {
             bail!(
@@ -282,7 +290,7 @@ pub fn lower(
     lower_modules(&modules, extra_env, arg_values)
 }
 
-pub fn lower_arg_def(arg: ast::ArgDef) -> Result<ArgDef> {
+pub fn lower_arg_def_ref(arg: &ast::ArgDef, namespace: Option<&str>) -> Result<ArgDef> {
     let default = match &arg.default {
         Some(expr) => Some(eval_expr_to_string(
             expr,
@@ -298,9 +306,16 @@ pub fn lower_arg_def(arg: ast::ArgDef) -> Result<ArgDef> {
         Some(ast::ArgType::String) | None => ArgType::String,
     };
     Ok(ArgDef {
-        name: arg.name,
-        short: arg.short.map(|s| s.value),
-        description: arg.description.map(|s| s.value),
+        name: arg.name.clone(),
+        namespace: namespace.map(|s| s.to_string()),
+        short: arg.short.as_ref().and_then(|s| {
+            if namespace.is_none() {
+                Some(s.value.clone())
+            } else {
+                None
+            }
+        }),
+        description: arg.description.as_ref().map(|s| s.value.clone()),
         arg_type,
         default,
         env: None,
@@ -1783,5 +1798,75 @@ event recovery {
         let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
         let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
         assert_eq!(migrate.env.get("DB").unwrap(), "new");
+    }
+
+    #[test]
+    fn lower_cli_override_unbound_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string }
+            job migrate {
+                env { DB = args.url }
+                run "migrate"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let mut arg_values = HashMap::new();
+        arg_values.insert("db::url".to_string(), "postgres://cli".to_string());
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &arg_values).unwrap();
+        let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
+        assert_eq!(migrate.env.get("DB").unwrap(), "postgres://cli");
+    }
+
+    #[test]
+    fn lower_cli_override_beats_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string }
+            job migrate {
+                env { DB = args.url }
+                run "migrate"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db { url = "from-binding" }
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let mut arg_values = HashMap::new();
+        arg_values.insert("db::url".to_string(), "from-cli".to_string());
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &arg_values).unwrap();
+        let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
+        assert_eq!(migrate.env.get("DB").unwrap(), "from-cli");
     }
 }

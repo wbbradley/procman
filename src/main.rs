@@ -87,10 +87,10 @@ fn run_supervisor(
         );
     }
 
-    // Phase 1: parse config header for arg definitions
+    // Phase 1: load all modules and collect arg definitions
     let content =
         std::fs::read_to_string(&config_path).with_context(|| format!("reading {config_path}"))?;
-    let header = pman::parse_header(&content, &config_path)?;
+    let (modules, header) = pman::load_header(&content, &config_path)?;
 
     // Phase 2: parse user args using definitions
     let arg_values = args::parse_user_args(&user_args, &header.arg_defs)?;
@@ -99,7 +99,8 @@ fn run_supervisor(
     // arg env vars (defaults + user overrides) < -e flags
     let mut merged_env = HashMap::new();
     for def in &header.arg_defs {
-        if let Some(ref env_name) = def.env
+        if def.namespace.is_none()
+            && let Some(ref env_name) = def.env
             && let Some(value) = arg_values.get(&def.name)
         {
             merged_env.insert(env_name.clone(), value.clone());
@@ -107,8 +108,8 @@ fn run_supervisor(
     }
     merged_env.extend(extra_env);
 
-    // Phase 4: full config parse with arg values for template resolution
-    let (configs, _) = pman::parse(&content, &config_path, &merged_env, &arg_values)?;
+    // Phase 4: lower with pre-loaded modules
+    let (configs, _) = pman::lower_loaded(&modules, &merged_env, &arg_values)?;
 
     if check {
         println!("{config_path}: ok");
@@ -237,5 +238,109 @@ mod tests {
         let config_path = root_path.to_str().unwrap().to_string();
         let result = run_supervisor(config_path, HashMap::new(), vec![], false, true);
         assert!(result.is_ok(), "got: {}", result.unwrap_err());
+    }
+
+    #[test]
+    fn check_flag_with_parameterized_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string }
+            job migrate {
+                env { DATABASE_URL = args.url }
+                run "migrate"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db { url = "postgres://localhost/mydb" }
+            service api {
+                wait { after @db::migrate }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let config_path = root_path.to_str().unwrap().to_string();
+        let result = run_supervisor(config_path, HashMap::new(), vec![], false, true);
+        assert!(result.is_ok(), "got: {}", result.unwrap_err());
+    }
+
+    #[test]
+    fn check_flag_with_unbound_import_arg_from_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string }
+            job migrate {
+                env { DATABASE_URL = args.url }
+                run "migrate"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            service api {
+                wait { after @db::migrate }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let config_path = root_path.to_str().unwrap().to_string();
+        let user_args = vec![
+            "--db::url".to_string(),
+            "postgres://localhost/mydb".to_string(),
+        ];
+        let result = run_supervisor(config_path, HashMap::new(), user_args, false, true);
+        assert!(result.is_ok(), "got: {}", result.unwrap_err());
+    }
+
+    #[test]
+    fn check_flag_with_unbound_import_arg_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.pman");
+        std::fs::write(
+            &db_path,
+            r#"
+            arg url { type = string }
+            job migrate { run "migrate" }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "db.pman" as db
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let config_path = root_path.to_str().unwrap().to_string();
+        let result = run_supervisor(config_path, HashMap::new(), vec![], false, true);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("required argument --db::url not provided"),
+            "unexpected error: {err}"
+        );
     }
 }
