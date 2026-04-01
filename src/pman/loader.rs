@@ -707,4 +707,126 @@ mod tests {
             modules.imports.keys().collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn load_check_mode_skips_unresolvable_parameterized_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "${args.dep_dir}/db.pman" as db
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let root = parser::parse(&content, root_path.to_str().unwrap()).unwrap();
+        // check_mode=true, no arg values: parameterized import should be skipped
+        let modules =
+            load_with_root(root, root_path.to_str().unwrap(), &HashMap::new(), true).unwrap();
+        assert!(modules.imports.is_empty());
+        assert_eq!(modules.root.jobs.len(), 1);
+    }
+
+    #[test]
+    fn load_check_mode_still_errors_on_literal_path_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "nonexistent.pman" as missing
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let root = parser::parse(&content, root_path.to_str().unwrap()).unwrap();
+        // check_mode=true, but literal path failure should still error
+        let err =
+            load_with_root(root, root_path.to_str().unwrap(), &HashMap::new(), true).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot resolve import"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_check_mode_mixed_literal_and_parameterized() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib_path = dir.path().join("lib.pman");
+        std::fs::write(&lib_path, r#"job setup { run "setup" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "lib.pman" as lib
+            import "${args.extra_dir}/extra.pman" as extra
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let root = parser::parse(&content, root_path.to_str().unwrap()).unwrap();
+        // check_mode=true: literal import loads normally, parameterized import skipped
+        let modules =
+            load_with_root(root, root_path.to_str().unwrap(), &HashMap::new(), true).unwrap();
+        assert!(modules.imports.contains_key("lib"));
+        assert!(!modules.imports.contains_key("extra"));
+    }
+
+    #[test]
+    fn load_check_mode_parameterized_resolves_when_arg_provided() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("deps");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("db.pman"), r#"job migrate { run "migrate" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "${args.dep_dir}/db.pman" as db
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let root = parser::parse(&content, root_path.to_str().unwrap()).unwrap();
+        let mut arg_values = HashMap::new();
+        arg_values.insert("dep_dir".to_string(), "deps".to_string());
+        // check_mode=true but arg is provided, so import should resolve normally
+        let modules = load_with_root(root, root_path.to_str().unwrap(), &arg_values, true).unwrap();
+        assert!(modules.imports.contains_key("db"));
+    }
+
+    #[test]
+    fn load_non_check_mode_errors_on_unresolvable_parameterized_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "${args.dep_dir}/db.pman" as db
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let root = parser::parse(&content, root_path.to_str().unwrap()).unwrap();
+        // check_mode=false: missing arg should be a hard error
+        let err =
+            load_with_root(root, root_path.to_str().unwrap(), &HashMap::new(), false).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown arg 'dep_dir'"),
+            "got: {err}"
+        );
+    }
 }

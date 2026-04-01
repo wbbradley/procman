@@ -416,4 +416,34 @@ mod tests {
         assert!(values.is_empty());
         assert_eq!(remaining, vec!["--db::url", "pg://host"]);
     }
+
+    #[test]
+    fn parse_root_args_lenient_skips_missing_required() {
+        let root_defs = vec![string_def("dep_dir", None, None)];
+        let (values, remaining) = parse_root_args(&args(&[]), &root_defs, true).unwrap();
+        assert!(!values.contains_key("dep_dir"));
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn parse_root_args_lenient_still_parses_provided() {
+        let root_defs = vec![
+            string_def("dep_dir", None, None),
+            string_def("log_level", None, Some("info")),
+        ];
+        let raw = args(&["--log-level", "debug"]);
+        let (values, remaining) = parse_root_args(&raw, &root_defs, true).unwrap();
+        assert_eq!(values.get("log_level").unwrap(), "debug");
+        assert!(!values.contains_key("dep_dir"));
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn parse_root_args_lenient_with_remaining_namespaced() {
+        let root_defs = vec![string_def("dep_dir", None, None)];
+        let raw = args(&["--db::url", "pg://host"]);
+        let (values, remaining) = parse_root_args(&raw, &root_defs, true).unwrap();
+        assert!(!values.contains_key("dep_dir"));
+        assert_eq!(remaining, vec!["--db::url", "pg://host"]);
+    }
 }
