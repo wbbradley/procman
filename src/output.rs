@@ -171,6 +171,7 @@ mod tests {
             for_each: None,
             autostart: true,
             watches: vec![],
+            is_task: false,
         }
     }
 

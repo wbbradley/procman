@@ -192,6 +192,13 @@ fn collect_skipped_jobs(
             skipped_jobs.insert(qualify_name(prefix, None, &service.name));
         }
     }
+    for task in &file.tasks {
+        if let Some(cond_expr) = &task.condition
+            && !eval_condition_expr(cond_expr, arg_values, path)?
+        {
+            skipped_jobs.insert(qualify_name(prefix, None, &task.name));
+        }
+    }
     Ok(())
 }
 
@@ -276,7 +283,8 @@ fn lower_file_entities(
             &qualified,
             &job.body,
             true,
-            true, // jobs default to once=true
+            true,  // jobs default to once=true
+            false, // not a task
             base_env,
             &global_env,
             arg_values,
@@ -297,6 +305,7 @@ fn lower_file_entities(
             &service.body,
             true,
             false, // services default to once=false
+            false, // not a task
             base_env,
             &global_env,
             arg_values,
@@ -314,6 +323,7 @@ fn lower_file_entities(
             &event.body,
             false,
             false, // events default to once=false
+            false, // not a task
             base_env,
             &global_env,
             arg_values,
@@ -322,6 +332,27 @@ fn lower_file_entities(
             path,
         )?;
         configs.append(&mut event_configs);
+    }
+
+    for task in &file.tasks {
+        let qualified = qualify_name(prefix, None, &task.name);
+        if skipped_jobs.contains(&qualified) {
+            continue;
+        }
+        let mut task_configs = lower_job_or_event(
+            &qualified,
+            &task.body,
+            false, // tasks do not autostart
+            true,  // tasks run to completion
+            true,  // is a task
+            base_env,
+            &global_env,
+            arg_values,
+            skipped_jobs,
+            prefix,
+            path,
+        )?;
+        configs.append(&mut task_configs);
     }
 
     Ok(())
@@ -786,6 +817,7 @@ fn lower_job_or_event(
     body: &ast::JobBody,
     autostart: bool,
     once_default: bool,
+    is_task: bool,
     base_env: &HashMap<String, String>,
     global_env: &HashMap<String, String>,
     arg_values: &HashMap<String, String>,
@@ -870,6 +902,7 @@ fn lower_job_or_event(
             for_each: None,
             autostart,
             watches,
+            is_task,
         }]),
         RunSection::ForLoop(fl) => match &fl.iterable {
             ast::Iterable::Glob(glob_lit) => {
@@ -896,6 +929,7 @@ fn lower_job_or_event(
                     }),
                     autostart,
                     watches,
+                    is_task,
                 }])
             }
             ast::Iterable::Array(items) => {
@@ -922,6 +956,7 @@ fn lower_job_or_event(
                         for_each: None,
                         autostart,
                         watches: watches.clone(),
+                        is_task,
                     });
                 }
                 Ok(configs)
@@ -949,6 +984,7 @@ fn lower_job_or_event(
                         for_each: None,
                         autostart,
                         watches: watches.clone(),
+                        is_task,
                     });
                 }
                 Ok(configs)
@@ -976,6 +1012,7 @@ fn lower_job_or_event(
                         for_each: None,
                         autostart,
                         watches: watches.clone(),
+                        is_task,
                     });
                 }
                 Ok(configs)
@@ -2154,5 +2191,15 @@ event recovery {
             err.to_string().contains("unknown import alias"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn lower_task_sets_flags() {
+        let (configs, _) = lower_str(r#"task test_a { run "echo test" }"#);
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "test_a");
+        assert!(!configs[0].autostart);
+        assert!(configs[0].once);
+        assert!(configs[0].is_task);
     }
 }

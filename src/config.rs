@@ -60,6 +60,7 @@ pub struct ProcessConfig {
     pub for_each: Option<ForEachConfig>,
     pub autostart: bool,
     pub watches: Vec<Watch>,
+    pub is_task: bool,
 }
 
 #[derive(Clone, Debug)]

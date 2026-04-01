@@ -272,6 +272,7 @@ impl<'a> Lexer<'a> {
             "job" => TokenKind::Job,
             "service" => TokenKind::Service,
             "event" => TokenKind::Event,
+            "task" => TokenKind::Task,
             "if" => TokenKind::If,
             "for" => TokenKind::For,
             "in" => TokenKind::In,
@@ -723,5 +724,10 @@ mod tests {
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].span.line, 5);
         assert_eq!(tokens[0].span.col, 10);
+    }
+
+    #[test]
+    fn lex_task_keyword() {
+        assert_eq!(kinds("task"), vec![TokenKind::Task]);
     }
 }

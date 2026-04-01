@@ -135,6 +135,7 @@ fn execute_action(
                 for_each: None,
                 autostart: true,
                 watches: vec![],
+                is_task: false,
             };
             let _ = tx.send(SupervisorCommand::Spawn(config));
             false

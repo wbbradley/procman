@@ -152,6 +152,7 @@ impl<'a> Parser<'a> {
             jobs: Vec::new(),
             services: Vec::new(),
             events: Vec::new(),
+            tasks: Vec::new(),
         };
 
         while !self.at_end() {
@@ -180,13 +181,16 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::Event) => {
                     file.events.push(self.parse_event_def()?);
                 }
+                Some(TokenKind::Task) => {
+                    file.tasks.push(self.parse_task_def()?);
+                }
                 Some(other) => {
                     bail!(
                         "{}",
                         self.fmt_error(
                             self.span(),
                             &format!(
-                                "expected 'import', 'config', 'arg', 'env', 'job', 'service', or 'event', got {:?}",
+                                "expected 'import', 'config', 'arg', 'env', 'job', 'service', 'event', or 'task', got {:?}",
                                 other
                             )
                         )
@@ -449,6 +453,25 @@ impl<'a> Parser<'a> {
         let end_span = self.expect(&TokenKind::RBrace)?.span;
         Ok(ast::EventDef {
             name,
+            body,
+            span: merge_spans(start_span, end_span),
+        })
+    }
+
+    fn parse_task_def(&mut self) -> Result<ast::TaskDef> {
+        let start_span = self.expect(&TokenKind::Task)?.span;
+        let (name, _) = self.expect_ident()?;
+        let condition = if self.eat(&TokenKind::If) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        self.expect(&TokenKind::LBrace)?;
+        let body = self.parse_job_body()?;
+        let end_span = self.expect(&TokenKind::RBrace)?.span;
+        Ok(ast::TaskDef {
+            name,
+            condition,
             body,
             span: merge_spans(start_span, end_span),
         })
@@ -1616,5 +1639,28 @@ mod tests {
         let file = parse(input, "test.pman").unwrap();
         assert_eq!(file.imports[0].alias, "db");
         assert!(file.imports[0].bindings.is_empty());
+    }
+
+    #[test]
+    fn parse_simple_task() {
+        let input = r#"task test_a { run "echo hello" }"#;
+        let file = parse(input, "test.pman").unwrap();
+        assert_eq!(file.tasks.len(), 1);
+        assert_eq!(file.tasks[0].name, "test_a");
+        assert!(file.tasks[0].condition.is_none());
+    }
+
+    #[test]
+    fn parse_task_with_wait() {
+        let input = r#"
+            job setup { run "setup" }
+            task test_a {
+                wait { after @setup }
+                run "test"
+            }
+        "#;
+        let file = parse(input, "test.pman").unwrap();
+        assert_eq!(file.tasks.len(), 1);
+        assert!(file.tasks[0].body.wait.is_some());
     }
 }

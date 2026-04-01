@@ -38,6 +38,9 @@ EXAMPLES:
     # Validate the config file and exit without starting processes
     procman myapp.pman --check
 
+    # Run specific tasks defined in the config file
+    procman tests.pman -t test_system_a -t test_system_b
+
 SIGNALS:
     On SIGINT or SIGTERM, all children receive SIGTERM. After a 2-second
     grace period, remaining processes are sent SIGKILL."
@@ -54,6 +57,9 @@ struct Cli {
     /// Validate the config file and exit without starting processes
     #[arg(long)]
     check: bool,
+    /// Task(s) to run (repeatable)
+    #[arg(short = 't', long = "task", value_name = "NAME")]
+    tasks: Vec<String>,
     /// Arguments for config-defined args (passed after --)
     #[arg(last = true)]
     user_args: Vec<String>,
@@ -77,6 +83,7 @@ fn run_supervisor(
     config_path: String,
     extra_env: HashMap<String, String>,
     user_args: Vec<String>,
+    task_names: Vec<String>,
     debug: bool,
     check: bool,
 ) -> Result<()> {
@@ -109,7 +116,32 @@ fn run_supervisor(
     merged_env.extend(extra_env);
 
     // Phase 4: lower with pre-loaded modules
-    let (configs, _) = pman::lower_loaded(&modules, &merged_env, &arg_values)?;
+    let (mut configs, _) = pman::lower_loaded(&modules, &merged_env, &arg_values)?;
+
+    // Phase 5: activate triggered tasks
+    for task_name in &task_names {
+        let found = configs
+            .iter_mut()
+            .find(|c| c.is_task && c.name == *task_name);
+        match found {
+            Some(config) => config.autostart = true,
+            None => {
+                let available: Vec<&str> = configs
+                    .iter()
+                    .filter(|c| c.is_task)
+                    .map(|c| c.name.as_str())
+                    .collect();
+                anyhow::bail!(
+                    "unknown task '{task_name}'. available tasks: {}",
+                    if available.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        available.join(", ")
+                    }
+                );
+            }
+        }
+    }
 
     if check {
         println!("{config_path}: ok");
@@ -133,12 +165,14 @@ fn run_supervisor(
 
     let (tx, rx) = mpsc::channel::<config::SupervisorCommand>();
 
+    let task_set: std::collections::HashSet<String> = task_names.into_iter().collect();
     let group = process::ProcessGroup::spawn(
         &configs,
         tx,
         Arc::clone(&shutdown),
         Arc::clone(&logger),
         debug,
+        task_set,
     )?;
     let exit_code = group.wait_and_shutdown(shutdown, signal_triggered, rx, Arc::clone(&logger));
 
@@ -153,7 +187,14 @@ fn run_supervisor(
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let extra_env = parse_env_args(&cli.env)?;
-    run_supervisor(cli.file, extra_env, cli.user_args, cli.debug, cli.check)
+    run_supervisor(
+        cli.file,
+        extra_env,
+        cli.user_args,
+        cli.tasks,
+        cli.debug,
+        cli.check,
+    )
 }
 
 #[cfg(test)]
@@ -202,7 +243,7 @@ mod tests {
         let path = dir.path().join("test.pman");
         std::fs::write(&path, r#"job web { run "echo hello" }"#).unwrap();
         let config_path = path.to_str().unwrap().to_string();
-        let result = run_supervisor(config_path, HashMap::new(), vec![], false, true);
+        let result = run_supervisor(config_path, HashMap::new(), vec![], vec![], false, true);
         assert!(result.is_ok());
     }
 
@@ -212,7 +253,7 @@ mod tests {
         let path = dir.path().join("bad.pman");
         std::fs::write(&path, "this is not valid pman syntax !!!").unwrap();
         let config_path = path.to_str().unwrap().to_string();
-        let result = run_supervisor(config_path, HashMap::new(), vec![], false, true);
+        let result = run_supervisor(config_path, HashMap::new(), vec![], vec![], false, true);
         assert!(result.is_err());
     }
 
@@ -236,7 +277,7 @@ mod tests {
         .unwrap();
 
         let config_path = root_path.to_str().unwrap().to_string();
-        let result = run_supervisor(config_path, HashMap::new(), vec![], false, true);
+        let result = run_supervisor(config_path, HashMap::new(), vec![], vec![], false, true);
         assert!(result.is_ok(), "got: {}", result.unwrap_err());
     }
 
@@ -270,7 +311,7 @@ mod tests {
         .unwrap();
 
         let config_path = root_path.to_str().unwrap().to_string();
-        let result = run_supervisor(config_path, HashMap::new(), vec![], false, true);
+        let result = run_supervisor(config_path, HashMap::new(), vec![], vec![], false, true);
         assert!(result.is_ok(), "got: {}", result.unwrap_err());
     }
 
@@ -308,7 +349,7 @@ mod tests {
             "--db::url".to_string(),
             "postgres://localhost/mydb".to_string(),
         ];
-        let result = run_supervisor(config_path, HashMap::new(), user_args, false, true);
+        let result = run_supervisor(config_path, HashMap::new(), user_args, vec![], false, true);
         assert!(result.is_ok(), "got: {}", result.unwrap_err());
     }
 
@@ -336,11 +377,40 @@ mod tests {
         .unwrap();
 
         let config_path = root_path.to_str().unwrap().to_string();
-        let result = run_supervisor(config_path, HashMap::new(), vec![], false, true);
+        let result = run_supervisor(config_path, HashMap::new(), vec![], vec![], false, true);
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("required argument --db::url not provided"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn check_flag_with_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.pman");
+        std::fs::write(&path, r#"task test_a { run "echo hello" }"#).unwrap();
+        let config_path = path.to_str().unwrap().to_string();
+        let result = run_supervisor(config_path, HashMap::new(), vec![], vec![], false, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn unknown_task_name_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.pman");
+        std::fs::write(&path, r#"task test_a { run "echo hello" }"#).unwrap();
+        let config_path = path.to_str().unwrap().to_string();
+        let result = run_supervisor(
+            config_path,
+            HashMap::new(),
+            vec![],
+            vec!["nonexistent".to_string()],
+            false,
+            false,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown task"), "got: {err}");
     }
 }

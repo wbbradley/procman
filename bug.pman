@@ -1,0 +1,3 @@
+job test {
+  run "echo hello world"
+}

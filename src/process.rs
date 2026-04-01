@@ -45,6 +45,7 @@ pub struct ProcessGroup {
     dormant: HashMap<String, ProcessConfig>,
     tx: Option<mpsc::Sender<SupervisorCommand>>,
     shutdown: Arc<AtomicBool>,
+    task_names: HashSet<String>,
 }
 
 fn build_command(resolved_run: &str, name: &str) -> Result<std::process::Command> {
@@ -245,6 +246,7 @@ impl ProcessGroup {
                 for_each: None,
                 autostart: true,
                 watches: instance_watches,
+                is_task: config.is_task,
             };
 
             logger.lock().unwrap().add_process(&instance_name).ok();
@@ -271,6 +273,7 @@ impl ProcessGroup {
         shutdown: Arc<AtomicBool>,
         logger: Arc<Mutex<Logger>>,
         debug: bool,
+        task_names: HashSet<String>,
     ) -> Result<Self> {
         let log_dir = logger.lock().unwrap().log_dir().to_path_buf();
         let mut group = Self {
@@ -286,6 +289,7 @@ impl ProcessGroup {
             dormant: HashMap::new(),
             tx: Some(tx),
             shutdown: Arc::clone(&shutdown),
+            task_names,
         };
 
         for cmd in commands {
@@ -434,6 +438,9 @@ impl ProcessGroup {
         let mut first_exit_code: Option<i32> = None;
         let mut shutdown_trigger: Option<String> = None;
         let mut remaining: Vec<Pid> = self.children.iter().map(|(pid, _, _, _)| *pid).collect();
+        let total_tasks = self.task_names.len();
+        let mut completed_tasks: usize = 0;
+        let mut task_exit_code: Option<i32> = None;
 
         loop {
             if shutdown.load(Ordering::Relaxed) || first_exit_code.is_some() {
@@ -477,15 +484,45 @@ impl ProcessGroup {
                                     .unwrap()
                                     .log_line(&template_name, "all fan-out instances completed");
                             }
+                            let is_task = self.task_names.contains(&name);
                             if code == 0 {
                                 logger.lock().unwrap().log_line(
                                     &name,
                                     &format!("[{pid}] completed after {elapsed:.1}s"),
                                 );
+                                if is_task {
+                                    completed_tasks += 1;
+                                    if completed_tasks == total_tasks {
+                                        first_exit_code = Some(task_exit_code.unwrap_or(0));
+                                        break;
+                                    }
+                                }
                                 if remaining.is_empty()
                                     && self.pending_deps.load(Ordering::Relaxed) == 0
                                 {
-                                    first_exit_code = Some(0);
+                                    first_exit_code = Some(if total_tasks > 0 {
+                                        task_exit_code.unwrap_or(0)
+                                    } else {
+                                        0
+                                    });
+                                    break;
+                                }
+                                continue;
+                            }
+                            // Non-zero exit code
+                            if is_task {
+                                logger.lock().unwrap().log_line(
+                                    &name,
+                                    &format!(
+                                        "[{pid}] task FAILED with code {code} after {elapsed:.1}s"
+                                    ),
+                                );
+                                if task_exit_code.is_none() {
+                                    task_exit_code = Some(code);
+                                }
+                                completed_tasks += 1;
+                                if completed_tasks == total_tasks {
+                                    first_exit_code = Some(task_exit_code.unwrap_or(0));
                                     break;
                                 }
                                 continue;
@@ -699,6 +736,7 @@ mod tests {
             dormant: HashMap::new(),
             tx: None,
             shutdown: Arc::new(AtomicBool::new(false)),
+            task_names: HashSet::new(),
         };
         (group, logger)
     }
@@ -763,6 +801,7 @@ mod tests {
                 variable: "CONFIG_PATH".to_string(),
             }),
             watches: vec![],
+            is_task: false,
         };
         group.expand_fan_out(&config, &logger).unwrap();
         assert_eq!(group.children.len(), 3);
@@ -800,6 +839,7 @@ mod tests {
                 variable: "CONFIG_PATH".to_string(),
             }),
             watches: vec![],
+            is_task: false,
         };
         let err = group.expand_fan_out(&config, &logger).unwrap_err();
         assert!(err.to_string().contains("matched zero files"), "{err}");
@@ -823,6 +863,7 @@ mod tests {
                 variable: "CONFIG_PATH".to_string(),
             }),
             watches: vec![],
+            is_task: false,
         };
         group.expand_fan_out(&config, &logger).unwrap();
         // Verify that the run strings got substituted
@@ -879,6 +920,7 @@ mod tests {
                 variable: "CONFIG_PATH".to_string(),
             }),
             watches: vec![],
+            is_task: false,
         };
         group.expand_fan_out(&config, &logger).unwrap();
         assert_eq!(group.children.len(), 2);
@@ -1005,6 +1047,7 @@ mod tests {
             for_each: None,
             autostart: true,
             watches: vec![],
+            is_task: false,
         }];
         let group = ProcessGroup::spawn(
             &configs,
@@ -1012,6 +1055,7 @@ mod tests {
             Arc::clone(&shutdown),
             Arc::clone(&logger),
             false,
+            HashSet::new(),
         )
         .unwrap();
         drop(rx);
@@ -1060,6 +1104,7 @@ mod tests {
                 for_each: None,
                 autostart: true,
                 watches: vec![],
+                is_task: false,
             },
             ProcessConfig {
                 name: "b".to_string(),
@@ -1071,6 +1116,7 @@ mod tests {
                 for_each: None,
                 autostart: true,
                 watches: vec![],
+                is_task: false,
             },
         ];
         let group = ProcessGroup::spawn(
@@ -1079,6 +1125,7 @@ mod tests {
             Arc::clone(&shutdown),
             Arc::clone(&logger),
             false,
+            HashSet::new(),
         )
         .unwrap();
         drop(rx);
@@ -1131,6 +1178,7 @@ mod tests {
                 for_each: None,
                 autostart: true,
                 watches: vec![],
+                is_task: false,
             },
             ProcessConfig {
                 name: "slow".to_string(),
@@ -1142,6 +1190,7 @@ mod tests {
                 for_each: None,
                 autostart: true,
                 watches: vec![],
+                is_task: false,
             },
         ];
         let group = ProcessGroup::spawn(
@@ -1150,6 +1199,7 @@ mod tests {
             Arc::clone(&shutdown),
             Arc::clone(&logger),
             false,
+            HashSet::new(),
         )
         .unwrap();
         drop(rx);
@@ -1210,6 +1260,7 @@ mod tests {
                 for_each: None,
                 autostart: true,
                 watches: vec![],
+                is_task: false,
             },
             ProcessConfig {
                 name: "crasher".to_string(),
@@ -1221,6 +1272,7 @@ mod tests {
                 for_each: None,
                 autostart: true,
                 watches: vec![],
+                is_task: false,
             },
         ];
         let group = ProcessGroup::spawn(
@@ -1229,6 +1281,7 @@ mod tests {
             Arc::clone(&shutdown),
             Arc::clone(&logger),
             true,
+            HashSet::new(),
         )
         .unwrap();
         drop(rx);
@@ -1265,6 +1318,7 @@ mod tests {
                 for_each: None,
                 autostart: false,
                 watches: vec![],
+                is_task: false,
             },
         );
 
@@ -1285,6 +1339,7 @@ mod tests {
             for_each: None,
             autostart: true,
             watches: vec![],
+            is_task: false,
         };
         tx.send(SupervisorCommand::Spawn(config)).unwrap();
         drop(tx);
@@ -1312,6 +1367,7 @@ mod tests {
             for_each: None,
             autostart: true,
             watches: vec![],
+            is_task: false,
         };
         logger.lock().unwrap().add_process("worker").ok();
         group.spawn_one(&config, &logger).unwrap();
@@ -1405,6 +1461,7 @@ mod tests {
             for_each: None,
             autostart: true,
             watches: vec![],
+            is_task: false,
         }];
         let group = ProcessGroup::spawn(
             &configs,
@@ -1412,6 +1469,7 @@ mod tests {
             Arc::clone(&shutdown),
             Arc::clone(&logger),
             false,
+            HashSet::new(),
         )
         .unwrap();
         assert!(group.children.is_empty());
@@ -1432,6 +1490,7 @@ mod tests {
             for_each: None,
             autostart: true,
             watches: vec![],
+            is_task: false,
         };
         logger.lock().unwrap().add_process("cond-pass").ok();
         group.spawn_one(&config, &logger).unwrap();
@@ -1467,6 +1526,7 @@ mod tests {
             for_each: None,
             autostart: true,
             watches: vec![],
+            is_task: false,
         }];
         let group = ProcessGroup::spawn(
             &configs,
@@ -1474,6 +1534,7 @@ mod tests {
             Arc::clone(&shutdown),
             Arc::clone(&logger),
             false,
+            HashSet::new(),
         )
         .unwrap();
         assert!(group.children.is_empty());

@@ -10,6 +10,7 @@ pub struct File {
     pub jobs: Vec<JobDef>,
     pub services: Vec<ServiceDef>,
     pub events: Vec<EventDef>,
+    pub tasks: Vec<TaskDef>,
 }
 
 #[derive(Debug)]
@@ -71,6 +72,14 @@ pub struct ServiceDef {
 #[derive(Debug)]
 pub struct EventDef {
     pub name: String,
+    pub body: JobBody,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub struct TaskDef {
+    pub name: String,
+    pub condition: Option<Expr>,
     pub body: JobBody,
     pub span: Span,
 }

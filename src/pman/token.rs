@@ -21,6 +21,7 @@ pub enum TokenKind {
     Job,      // job
     Service,  // service
     Event,    // event
+    Task,     // task
     If,       // if
     For,      // for
     In,       // in

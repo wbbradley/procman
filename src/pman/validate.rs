@@ -76,6 +76,16 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
             );
         }
     }
+    for task in &file.tasks {
+        // Tasks are once=true; register in once_jobs and job_names (like jobs).
+        once_jobs.insert(&task.name);
+        if !job_names.insert(&task.name) {
+            errors.push(
+                task.span
+                    .fmt_error(path, &format!("duplicate name '{}'", task.name)),
+            );
+        }
+    }
     for name in &job_names {
         if event_names.contains(name) {
             let event = file.events.iter().find(|e| e.name == *name).unwrap();
@@ -198,6 +208,41 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
         }
         after_edges.insert(event.name.as_str(), targets);
     }
+    for task in &file.tasks {
+        let mut targets = HashSet::new();
+        if let Some(wait) = &task.body.wait {
+            for cond in &wait.conditions {
+                if let ast::ConditionKind::After {
+                    namespace,
+                    job: target,
+                } = &cond.kind
+                {
+                    if namespace.is_some() {
+                        continue;
+                    }
+                    if !job_names.contains(target.as_str()) {
+                        errors.push(cond.span.fmt_error(
+                            path,
+                            &format!(
+                                "task '{}': after @{} references unknown job",
+                                task.name, target
+                            ),
+                        ));
+                    } else if !once_jobs.contains(target.as_str()) {
+                        errors.push(cond.span.fmt_error(
+                            path,
+                            &format!(
+                                "task '{}': after @{} target must be a job",
+                                task.name, target
+                            ),
+                        ));
+                    }
+                    targets.insert(target.as_str());
+                }
+            }
+        }
+        after_edges.insert(task.name.as_str(), targets);
+    }
 
     // Early return if after-references are invalid.
     if !errors.is_empty() {
@@ -235,6 +280,15 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
             path,
         ));
     }
+    for task in &file.tasks {
+        errors.extend(validate_output_refs(
+            &task.name,
+            &task.body,
+            &once_jobs,
+            &after_edges,
+            path,
+        ));
+    }
 
     // Step 5: Validate on_fail spawn references.
     for job in &file.jobs {
@@ -264,6 +318,15 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
             path,
         ));
     }
+    for task in &file.tasks {
+        errors.extend(validate_spawns(
+            &task.body,
+            &job_names,
+            &service_names,
+            &event_names,
+            path,
+        ));
+    }
 
     // Step 6: Variable shadowing.
     for job in &file.jobs {
@@ -274,6 +337,9 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
     }
     for event in &file.events {
         errors.extend(check_variable_shadowing(&event.body, path));
+    }
+    for task in &file.tasks {
+        errors.extend(check_variable_shadowing(&task.body, path));
     }
 
     // Step 7: Duplicate watch names.
@@ -286,6 +352,9 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
     for event in &file.events {
         errors.extend(check_duplicate_watches(&event.body, path));
     }
+    for task in &file.tasks {
+        errors.extend(check_duplicate_watches(&task.body, path));
+    }
 
     // Step 8: Empty run rejection.
     for job in &file.jobs {
@@ -296,6 +365,9 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
     }
     for event in &file.events {
         errors.extend(check_empty_run(&event.body, path));
+    }
+    for task in &file.tasks {
+        errors.extend(check_empty_run(&task.body, path));
     }
 
     if !errors.is_empty() {
@@ -563,6 +635,10 @@ fn build_module_entities(file: &ast::File) -> ModuleEntities<'_> {
     for event in &file.events {
         entities.events.insert(&event.name);
     }
+    for task in &file.tasks {
+        entities.jobs.insert(&task.name);
+        entities.once_jobs.insert(&task.name);
+    }
     entities
 }
 
@@ -777,6 +853,11 @@ fn validate_module_cross_refs(
         validate_namespaced_output_refs_in_body(&event.name, &event.body, &registry, path, errors);
         validate_namespaced_spawns_in_body(&event.body, &registry, path, errors);
     }
+    for task in &file.tasks {
+        validate_namespaced_after_refs_in_body(&task.name, &task.body, &registry, path, errors);
+        validate_namespaced_output_refs_in_body(&task.name, &task.body, &registry, path, errors);
+        validate_namespaced_spawns_in_body(&task.body, &registry, path, errors);
+    }
 
     // Recurse into sub-imports.
     for module in direct_imports.values() {
@@ -847,6 +928,30 @@ fn build_edges_for_file(
         };
         let mut targets = HashSet::new();
         if let Some(wait) = &event.body.wait {
+            for cond in &wait.conditions {
+                if let ast::ConditionKind::After {
+                    namespace,
+                    job: target,
+                } = &cond.kind
+                {
+                    targets.insert(match (prefix, namespace.as_deref()) {
+                        (Some(p), Some(ns)) => format!("{p}::{ns}::{target}"),
+                        (None, Some(ns)) => format!("{ns}::{target}"),
+                        (Some(p), None) => format!("{p}::{target}"),
+                        (None, None) => target.clone(),
+                    });
+                }
+            }
+        }
+        edges.insert(qualified, targets);
+    }
+    for task in &file.tasks {
+        let qualified = match prefix {
+            Some(p) => format!("{p}::{}", task.name),
+            None => task.name.clone(),
+        };
+        let mut targets = HashSet::new();
+        if let Some(wait) = &task.body.wait {
             for cond in &wait.conditions {
                 if let ast::ConditionKind::After {
                     namespace,
@@ -1402,5 +1507,48 @@ job web { run "other" }"#;
             validate(&module.file, &module.path).unwrap();
         }
         validate_cross_refs(&modules).unwrap();
+    }
+
+    #[test]
+    fn valid_simple_task() {
+        parse_and_validate(r#"task test_a { run "echo test" }"#).unwrap();
+    }
+
+    #[test]
+    fn duplicate_task_name_errors() {
+        let err = parse_and_validate(
+            r#"
+            task t { run "a" }
+            task t { run "b" }
+        "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate name"), "got: {err}");
+    }
+
+    #[test]
+    fn task_name_collides_with_job() {
+        let err = parse_and_validate(
+            r#"
+            job x { run "a" }
+            task x { run "b" }
+        "#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate name"), "got: {err}");
+    }
+
+    #[test]
+    fn task_with_after_valid() {
+        parse_and_validate(
+            r#"
+            job setup { run "setup" }
+            task test_a {
+                wait { after @setup }
+                run "test"
+            }
+        "#,
+        )
+        .unwrap();
     }
 }
