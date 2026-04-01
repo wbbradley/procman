@@ -94,15 +94,42 @@ fn run_supervisor(
         );
     }
 
-    // Phase 1: load all modules and collect arg definitions
     let content =
         std::fs::read_to_string(&config_path).with_context(|| format!("reading {config_path}"))?;
-    let (modules, header) = pman::load_header(&content, &config_path)?;
 
-    // Phase 2: parse user args using definitions
-    let arg_values = args::parse_user_args(&user_args, &header.arg_defs)?;
+    // Handle --help: use old-style full load (literal paths) to collect all defs.
+    if user_args.contains(&"--help".to_string()) {
+        let (_, header) = pman::load_header(&content, &config_path)?;
+        args::print_usage(&header.arg_defs);
+        std::process::exit(0);
+    }
 
-    // Phase 3: build env with correct precedence
+    // Phase 1: Parse root file only (no imports loaded yet)
+    let root = pman::parse_root(&content, &config_path)?;
+
+    // Phase 2: Collect root-level arg defs
+    let root_arg_defs = pman::collect_root_arg_defs(&root)?;
+
+    // Phase 3: Parse root args, collect remaining (namespaced) args for later
+    let (root_arg_values, remaining_args) = args::parse_root_args(&user_args, &root_arg_defs)?;
+
+    // Phase 4: Load imports with ${args.NAME} substitution in paths
+    let (modules, header) = pman::load_with_args(root, &config_path, &root_arg_values)?;
+
+    // Phase 5: Parse remaining args against imported module (namespaced) defs
+    let namespaced_defs: Vec<_> = header
+        .arg_defs
+        .iter()
+        .filter(|d| d.namespace.is_some())
+        .cloned()
+        .collect();
+    let namespaced_values = args::parse_user_args(&remaining_args, &namespaced_defs)?;
+
+    // Phase 6: Merge all arg values
+    let mut arg_values = root_arg_values;
+    arg_values.extend(namespaced_values);
+
+    // Phase 7: Build env with correct precedence
     // arg env vars (defaults + user overrides) < -e flags
     let mut merged_env = HashMap::new();
     for def in &header.arg_defs {
@@ -412,5 +439,32 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("unknown task"), "got: {err}");
+    }
+
+    #[test]
+    fn check_flag_with_args_in_import_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("deps");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("db.pman"), r#"job migrate { run "migrate" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            arg dep_dir { type = string }
+            import "${args.dep_dir}/db.pman" as db
+            service api {
+                wait { after @db::migrate }
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let config_path = root_path.to_str().unwrap().to_string();
+        let user_args = vec!["--dep-dir".to_string(), "deps".to_string()];
+        let result = run_supervisor(config_path, HashMap::new(), user_args, vec![], false, true);
+        assert!(result.is_ok(), "got: {}", result.unwrap_err());
     }
 }

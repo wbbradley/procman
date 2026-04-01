@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Result, bail};
 
-use crate::pman::{ast, parser};
+use crate::pman::{ast, parser, token::Span};
 
 #[derive(Debug)]
 pub struct LoadedModules {
@@ -26,14 +26,21 @@ pub struct LoadedModule {
 
 pub fn load(root_content: &str, root_path: &str) -> Result<LoadedModules> {
     let root = parser::parse(root_content, root_path)?;
+    load_with_root(root, root_path, &HashMap::new())
+}
 
-    // Seed the visited set with root's canonical path for cycle detection.
+/// Load imports given an already-parsed root file and root arg values for path substitution.
+pub fn load_with_root(
+    root: ast::File,
+    root_path: &str,
+    root_arg_values: &HashMap<String, String>,
+) -> Result<LoadedModules> {
     let root_canonical =
         std::fs::canonicalize(root_path).unwrap_or_else(|_| std::path::PathBuf::from(root_path));
     let mut visited = HashSet::new();
     visited.insert(root_canonical.to_string_lossy().to_string());
 
-    let imports = load_imports(&root.imports, root_path, &mut visited)?;
+    let imports = load_imports(&root.imports, root_path, &mut visited, root_arg_values)?;
 
     Ok(LoadedModules {
         root,
@@ -42,10 +49,58 @@ pub fn load(root_content: &str, root_path: &str) -> Result<LoadedModules> {
     })
 }
 
+/// Substitute `${args.NAME}` references in an import path string.
+fn substitute_args_in_path(
+    raw_path: &str,
+    arg_values: &HashMap<String, String>,
+    span: Span,
+    file_path: &str,
+) -> Result<String> {
+    let mut result = String::with_capacity(raw_path.len());
+    let mut rest = raw_path;
+    let prefix = "${args.";
+    while let Some(start) = rest.find(prefix) {
+        result.push_str(&rest[..start]);
+        let after_prefix = &rest[start + prefix.len()..];
+        let end = after_prefix.find('}').ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}",
+                span.fmt_error(file_path, "unterminated ${args.} reference in import path")
+            )
+        })?;
+        let name = &after_prefix[..end];
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            bail!(
+                "{}",
+                span.fmt_error(
+                    file_path,
+                    &format!("invalid arg name '{name}' in import path")
+                )
+            );
+        }
+        let value = arg_values.get(name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}",
+                span.fmt_error(
+                    file_path,
+                    &format!(
+                        "unknown arg '{name}' in import path; only root-level args can be used"
+                    )
+                )
+            )
+        })?;
+        result.push_str(value);
+        rest = &after_prefix[end + 1..];
+    }
+    result.push_str(rest);
+    Ok(result)
+}
+
 fn load_imports(
     import_defs: &[ast::ImportDef],
     parent_path: &str,
     visited: &mut HashSet<String>,
+    root_arg_values: &HashMap<String, String>,
 ) -> Result<HashMap<String, LoadedModule>> {
     let mut imports = HashMap::new();
     let mut canonical_to_alias: HashMap<String, String> = HashMap::new();
@@ -68,8 +123,16 @@ fn load_imports(
             );
         }
 
+        // Substitute ${args.NAME} references in import path.
+        let substituted_path = substitute_args_in_path(
+            &import_def.path.value,
+            root_arg_values,
+            import_def.span,
+            parent_path,
+        )?;
+
         // Resolve path relative to parent file's directory.
-        let resolved = parent_dir.join(&import_def.path.value);
+        let resolved = parent_dir.join(&substituted_path);
         let canonical = std::fs::canonicalize(&resolved).map_err(|e| {
             anyhow::anyhow!(
                 "{}",
@@ -131,7 +194,12 @@ fn load_imports(
 
         // Recursively load nested imports (with cycle detection via visited set).
         visited.insert(canonical_str.clone());
-        let sub_imports = load_imports(&imported_file.imports, &canonical_str, visited)?;
+        let sub_imports = load_imports(
+            &imported_file.imports,
+            &canonical_str,
+            visited,
+            &HashMap::new(),
+        )?;
         visited.remove(&canonical_str);
 
         imports.insert(
@@ -529,5 +597,81 @@ mod tests {
         let modules = load(&content, root_path.to_str().unwrap()).unwrap();
         assert!(modules.imports["a"].imports.contains_key("shared"));
         assert!(modules.imports["b"].imports.contains_key("shared"));
+    }
+
+    #[test]
+    fn load_import_with_args_in_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("libs");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("db.pman"), r#"job migrate { run "migrate" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "${args.lib_dir}/db.pman" as db
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let root = parser::parse(&content, root_path.to_str().unwrap()).unwrap();
+        let mut arg_values = HashMap::new();
+        arg_values.insert("lib_dir".to_string(), "libs".to_string());
+        let modules = load_with_root(root, root_path.to_str().unwrap(), &arg_values).unwrap();
+        assert!(modules.imports.contains_key("db"));
+    }
+
+    #[test]
+    fn load_import_unknown_arg_in_path_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "${args.nonexistent}/db.pman" as db
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let root = parser::parse(&content, root_path.to_str().unwrap()).unwrap();
+        let err = load_with_root(root, root_path.to_str().unwrap(), &HashMap::new()).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown arg 'nonexistent'"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_import_auto_alias_with_args_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("mydir");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("database.pman"), r#"job x { run "x" }"#).unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "${args.dir}/database.pman"
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let root = parser::parse(&content, root_path.to_str().unwrap()).unwrap();
+        let mut args = HashMap::new();
+        args.insert("dir".to_string(), "mydir".to_string());
+        let modules = load_with_root(root, root_path.to_str().unwrap(), &args).unwrap();
+        assert!(
+            modules.imports.contains_key("database"),
+            "got keys: {:?}",
+            modules.imports.keys().collect::<Vec<_>>()
+        );
     }
 }

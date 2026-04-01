@@ -24,13 +24,42 @@ pub fn parse(
     lower::lower_modules(&modules, extra_env, arg_values)
 }
 
+/// Parse a .pman file without loading imports.
+pub fn parse_root(input: &str, path: &str) -> Result<ast::File> {
+    parser::parse(input, path)
+}
+
+/// Collect root-level arg definitions (namespace=None) from a parsed file.
+pub fn collect_root_arg_defs(root: &ast::File) -> Result<Vec<config::ArgDef>> {
+    root.args
+        .iter()
+        .map(|a| lower::lower_arg_def_ref(a, None))
+        .collect()
+}
+
+/// Load imports with arg substitution in paths, then collect all arg defs.
+pub fn load_with_args(
+    root: ast::File,
+    path: &str,
+    root_arg_values: &HashMap<String, String>,
+) -> Result<(loader::LoadedModules, config::ConfigHeader)> {
+    let modules = loader::load_with_root(root, path, root_arg_values)?;
+    let header = build_config_header(&modules)?;
+    Ok((modules, header))
+}
+
 /// Load all modules and collect arg definitions (including unbound imported args).
+/// Uses literal import paths only (no arg substitution).
 pub fn load_header(
     input: &str,
     path: &str,
 ) -> Result<(loader::LoadedModules, config::ConfigHeader)> {
     let modules = loader::load(input, path)?;
+    let header = build_config_header(&modules)?;
+    Ok((modules, header))
+}
 
+fn build_config_header(modules: &loader::LoadedModules) -> Result<config::ConfigHeader> {
     let log_dir = modules
         .root
         .config
@@ -70,14 +99,11 @@ pub fn load_header(
         }
     }
 
-    Ok((
-        modules,
-        config::ConfigHeader {
-            log_dir,
-            log_time,
-            arg_defs,
-        },
-    ))
+    Ok(config::ConfigHeader {
+        log_dir,
+        log_time,
+        arg_defs,
+    })
 }
 
 /// Lower pre-loaded modules with resolved arg values.

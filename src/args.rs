@@ -90,7 +90,75 @@ pub fn parse_user_args(raw_args: &[String], defs: &[ArgDef]) -> Result<HashMap<S
     Ok(values)
 }
 
-fn print_usage(defs: &[ArgDef]) {
+/// Parse only root-level args (namespace=None) from raw_args.
+/// Returns (resolved_root_values, remaining_raw_args).
+/// Unmatched tokens are collected into remaining for a second parsing pass.
+pub fn parse_root_args(
+    raw_args: &[String],
+    root_defs: &[ArgDef],
+) -> Result<(HashMap<String, String>, Vec<String>)> {
+    let mut long_to_idx: HashMap<String, usize> = HashMap::new();
+    let mut short_to_idx: HashMap<String, usize> = HashMap::new();
+    for (i, def) in root_defs.iter().enumerate() {
+        long_to_idx.insert(long_flag(def), i);
+        if let Some(ref short) = def.short {
+            short_to_idx.insert(format!("-{short}"), i);
+        }
+    }
+
+    let mut values: HashMap<String, String> = HashMap::new();
+    let mut remaining: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < raw_args.len() {
+        let arg = &raw_args[i];
+
+        let idx = if let Some(&idx) = long_to_idx.get(arg) {
+            Some(idx)
+        } else if let Some(&idx) = short_to_idx.get(arg) {
+            Some(idx)
+        } else {
+            None
+        };
+
+        if let Some(idx) = idx {
+            let def = &root_defs[idx];
+            let key = value_key(def);
+            match def.arg_type {
+                ArgType::Bool => {
+                    values.insert(key, "true".to_string());
+                }
+                ArgType::String => {
+                    i += 1;
+                    if i >= raw_args.len() {
+                        let flag = long_flag(def);
+                        bail!("argument {flag} requires a value");
+                    }
+                    values.insert(key, raw_args[i].clone());
+                }
+            }
+        } else {
+            remaining.push(arg.clone());
+        }
+        i += 1;
+    }
+
+    // Apply defaults and check for missing required root args.
+    for def in root_defs {
+        let key = value_key(def);
+        if let std::collections::hash_map::Entry::Vacant(e) = values.entry(key) {
+            if let Some(ref default) = def.default {
+                e.insert(default.clone());
+            } else {
+                let flag = long_flag(def);
+                bail!("required argument {flag} not provided");
+            }
+        }
+    }
+
+    Ok((values, remaining))
+}
+
+pub fn print_usage(defs: &[ArgDef]) {
     use std::collections::BTreeMap;
 
     let root_defs: Vec<_> = defs.iter().filter(|d| d.namespace.is_none()).collect();
@@ -313,5 +381,38 @@ mod tests {
         let result = parse_user_args(&args(&["--db::url", "postgres://localhost"]), &defs).unwrap();
         assert_eq!(result.get("log_level").unwrap(), "info");
         assert_eq!(result.get("db::url").unwrap(), "postgres://localhost");
+    }
+
+    #[test]
+    fn parse_root_args_extracts_known_flags() {
+        let root_defs = vec![string_def("log_level", None, Some("info"))];
+        let raw = args(&["--log-level", "debug", "--db::url", "pg://host"]);
+        let (values, remaining) = parse_root_args(&raw, &root_defs).unwrap();
+        assert_eq!(values.get("log_level").unwrap(), "debug");
+        assert_eq!(remaining, vec!["--db::url", "pg://host"]);
+    }
+
+    #[test]
+    fn parse_root_args_applies_defaults() {
+        let root_defs = vec![string_def("log_level", None, Some("info"))];
+        let raw = args(&["--db::url", "pg://host"]);
+        let (values, remaining) = parse_root_args(&raw, &root_defs).unwrap();
+        assert_eq!(values.get("log_level").unwrap(), "info");
+        assert_eq!(remaining, vec!["--db::url", "pg://host"]);
+    }
+
+    #[test]
+    fn parse_root_args_missing_required_errors() {
+        let root_defs = vec![string_def("required_arg", None, None)];
+        let err = parse_root_args(&args(&[]), &root_defs).unwrap_err();
+        assert!(format!("{err}").contains("required argument"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_root_args_no_defs_passes_all_through() {
+        let raw = args(&["--db::url", "pg://host"]);
+        let (values, remaining) = parse_root_args(&raw, &[]).unwrap();
+        assert!(values.is_empty());
+        assert_eq!(remaining, vec!["--db::url", "pg://host"]);
     }
 }
