@@ -26,7 +26,7 @@ pub struct LoadedModule {
 
 pub fn load(root_content: &str, root_path: &str) -> Result<LoadedModules> {
     let root = parser::parse(root_content, root_path)?;
-    load_with_root(root, root_path, &HashMap::new())
+    load_with_root(root, root_path, &HashMap::new(), false)
 }
 
 /// Load imports given an already-parsed root file and root arg values for path substitution.
@@ -34,13 +34,20 @@ pub fn load_with_root(
     root: ast::File,
     root_path: &str,
     root_arg_values: &HashMap<String, String>,
+    check_mode: bool,
 ) -> Result<LoadedModules> {
     let root_canonical =
         std::fs::canonicalize(root_path).unwrap_or_else(|_| std::path::PathBuf::from(root_path));
     let mut visited = HashSet::new();
     visited.insert(root_canonical.to_string_lossy().to_string());
 
-    let imports = load_imports(&root.imports, root_path, &mut visited, root_arg_values)?;
+    let imports = load_imports(
+        &root.imports,
+        root_path,
+        &mut visited,
+        root_arg_values,
+        check_mode,
+    )?;
 
     Ok(LoadedModules {
         root,
@@ -101,6 +108,7 @@ fn load_imports(
     parent_path: &str,
     visited: &mut HashSet<String>,
     root_arg_values: &HashMap<String, String>,
+    check_mode: bool,
 ) -> Result<HashMap<String, LoadedModule>> {
     let mut imports = HashMap::new();
     let mut canonical_to_alias: HashMap<String, String> = HashMap::new();
@@ -123,25 +131,47 @@ fn load_imports(
             );
         }
 
+        let has_arg_ref = import_def.path.value.contains("${args.");
+
         // Substitute ${args.NAME} references in import path.
-        let substituted_path = substitute_args_in_path(
+        let substituted_path = match substitute_args_in_path(
             &import_def.path.value,
             root_arg_values,
             import_def.span,
             parent_path,
-        )?;
+        ) {
+            Ok(path) => path,
+            Err(e) if has_arg_ref && check_mode => {
+                eprintln!(
+                    "warning: skipping parameterized import '{}': {e}",
+                    import_def.path.value
+                );
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
 
         // Resolve path relative to parent file's directory.
         let resolved = parent_dir.join(&substituted_path);
-        let canonical = std::fs::canonicalize(&resolved).map_err(|e| {
-            anyhow::anyhow!(
-                "{}",
-                import_def.span.fmt_error(
-                    parent_path,
-                    &format!("cannot resolve import '{}': {e}", import_def.path.value)
-                )
-            )
-        })?;
+        let canonical = match std::fs::canonicalize(&resolved) {
+            Ok(c) => c,
+            Err(e) if has_arg_ref && check_mode => {
+                eprintln!(
+                    "warning: skipping parameterized import '{}': cannot resolve: {e}",
+                    import_def.path.value
+                );
+                continue;
+            }
+            Err(e) => {
+                bail!(
+                    "{}",
+                    import_def.span.fmt_error(
+                        parent_path,
+                        &format!("cannot resolve import '{}': {e}", import_def.path.value)
+                    )
+                );
+            }
+        };
         let canonical_str = canonical.to_string_lossy().to_string();
 
         // Check for diamond imports (same canonical path, different alias within this module).
@@ -199,6 +229,7 @@ fn load_imports(
             &canonical_str,
             visited,
             &HashMap::new(),
+            check_mode,
         )?;
         visited.remove(&canonical_str);
 
@@ -620,7 +651,8 @@ mod tests {
         let root = parser::parse(&content, root_path.to_str().unwrap()).unwrap();
         let mut arg_values = HashMap::new();
         arg_values.insert("lib_dir".to_string(), "libs".to_string());
-        let modules = load_with_root(root, root_path.to_str().unwrap(), &arg_values).unwrap();
+        let modules =
+            load_with_root(root, root_path.to_str().unwrap(), &arg_values, false).unwrap();
         assert!(modules.imports.contains_key("db"));
     }
 
@@ -639,7 +671,8 @@ mod tests {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let root = parser::parse(&content, root_path.to_str().unwrap()).unwrap();
-        let err = load_with_root(root, root_path.to_str().unwrap(), &HashMap::new()).unwrap_err();
+        let err =
+            load_with_root(root, root_path.to_str().unwrap(), &HashMap::new(), false).unwrap_err();
         assert!(
             err.to_string().contains("unknown arg 'nonexistent'"),
             "got: {err}"
@@ -667,7 +700,7 @@ mod tests {
         let root = parser::parse(&content, root_path.to_str().unwrap()).unwrap();
         let mut args = HashMap::new();
         args.insert("dir".to_string(), "mydir".to_string());
-        let modules = load_with_root(root, root_path.to_str().unwrap(), &args).unwrap();
+        let modules = load_with_root(root, root_path.to_str().unwrap(), &args, false).unwrap();
         assert!(
             modules.imports.contains_key("database"),
             "got keys: {:?}",

@@ -42,8 +42,9 @@ pub fn load_with_args(
     root: ast::File,
     path: &str,
     root_arg_values: &HashMap<String, String>,
+    check_mode: bool,
 ) -> Result<(loader::LoadedModules, config::ConfigHeader)> {
-    let modules = loader::load_with_root(root, path, root_arg_values)?;
+    let modules = loader::load_with_root(root, path, root_arg_values, check_mode)?;
     let header = build_config_header(&modules)?;
     Ok((modules, header))
 }

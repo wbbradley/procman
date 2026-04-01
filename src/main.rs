@@ -111,10 +111,11 @@ fn run_supervisor(
     let root_arg_defs = pman::collect_root_arg_defs(&root)?;
 
     // Phase 3: Parse root args, collect remaining (namespaced) args for later
-    let (root_arg_values, remaining_args) = args::parse_root_args(&user_args, &root_arg_defs)?;
+    let (root_arg_values, remaining_args) =
+        args::parse_root_args(&user_args, &root_arg_defs, check)?;
 
     // Phase 4: Load imports with ${args.NAME} substitution in paths
-    let (modules, header) = pman::load_with_args(root, &config_path, &root_arg_values)?;
+    let (modules, header) = pman::load_with_args(root, &config_path, &root_arg_values, check)?;
 
     // Phase 5: Parse remaining args against imported module (namespaced) defs
     let namespaced_defs: Vec<_> = header
@@ -465,6 +466,26 @@ mod tests {
         let config_path = root_path.to_str().unwrap().to_string();
         let user_args = vec!["--dep-dir".to_string(), "deps".to_string()];
         let result = run_supervisor(config_path, HashMap::new(), user_args, vec![], false, true);
+        assert!(result.is_ok(), "got: {}", result.unwrap_err());
+    }
+
+    #[test]
+    fn check_flag_with_parameterized_import_no_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            arg dep_dir { type = string }
+            import "${args.dep_dir}/db.pman" as db
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        // --check without providing --dep-dir should succeed (skip parameterized import)
+        let config_path = root_path.to_str().unwrap().to_string();
+        let result = run_supervisor(config_path, HashMap::new(), vec![], vec![], false, true);
         assert!(result.is_ok(), "got: {}", result.unwrap_err());
     }
 }
