@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.22.1] - 2026-04-01
+
+### Changed
+- Fan-out (`for` loops) over arrays, ranges, and globs now use a unified runtime expansion model. All iterable types produce a single config entry at parse time and are expanded into instances at spawn time. This means `-t task_name` works for fan-out tasks and `after @template_name` works uniformly across all loop types.
+- Service processes that exit with code 0 are now treated as failures (exit code 1) and log "exited unexpectedly." Services are expected to run indefinitely; use `job` or `task` for processes that complete normally.
+
+### Fixed
+- `-t` flag now correctly activates tasks that use `for` loops. Previously, array/range fan-out expanded task names at parse time (`task-0`, `task-1`, ...), making the template name unavailable for `-t` matching.
+- Fan-out task completion is now tracked at the group level. Procman exits immediately once all triggered tasks complete, instead of waiting for unrelated services to exit.
+
+### Added
+- `examples/tasks.pman` demonstrating jobs, services, and fan-out tasks together.
+
 ## [0.22.0] - 2026-04-01
 
 ### Added
