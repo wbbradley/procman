@@ -34,6 +34,10 @@ service worker if args.enable_worker {
   run "worker-service start"
 }
 
+task test_suite {
+  run "pytest tests/"
+}
+
 event recovery {
   run "./scripts/recover.sh"
 }
@@ -48,6 +52,8 @@ A `.pman` file may contain:
 - **`job name if expr { }`** — a conditionally evaluated one-shot job
 - **`service name { }`** — a long-running daemon process
 - **`service name if expr { }`** — a conditionally evaluated service
+- **`task name { }`** — an on-demand one-shot process (does not auto-start; triggered via `-t`/`--task`)
+- **`task name if expr { }`** — a conditionally evaluated task
 - **`event name { }`** — a dormant process, only started via `on_fail spawn`
 
 ## Identifiers
@@ -212,6 +218,29 @@ which other processes reference via `@job.KEY` expressions (see
 
 A `service` is a long-running daemon process. If a service exits, it triggers
 supervisor shutdown.
+
+### `task`
+
+A `task` is a one-shot process that does not auto-start. Tasks must be explicitly
+triggered via the `-t`/`--task` CLI flag. Like jobs, tasks run to completion —
+exit code 0 is success, non-zero triggers shutdown.
+
+Tasks are useful for operations that should only run on demand: test suites,
+database migrations, cleanup scripts, or any one-shot utility work.
+
+```
+task test_suite {
+  wait {
+    after @migrate
+  }
+  run "pytest tests/"
+}
+```
+
+Trigger with: `procman myapp.pman -t test_suite`
+
+Tasks share all the same fields as jobs and services (`run`, `env`, `wait`,
+`for`, `if`, `watch`).
 
 ### `wait` (optional)
 

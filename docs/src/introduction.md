@@ -1,5 +1,7 @@
 # Introduction
 
+> This documentation covers **procman v0.22.0**.
+
 **procman** is a Foreman-like process supervisor written in Rust. It reads a
 `.pman` configuration file, spawns all listed commands, and multiplexes
 their output to the terminal with right-aligned name prefixes. When any child
@@ -23,6 +25,9 @@ exits or a signal arrives, procman tears everything down cleanly.
   available as `args.name` expressions and flow into shell via env vars.
 - **Conditional job execution** — use `job name if expr { }` to evaluate an
   expression before spawning; falsy results skip the job entirely.
+- **On-demand tasks** — `task` blocks define one-shot processes that don't
+  auto-start; trigger them with `-t`/`--task` for test suites, migrations,
+  or other on-demand operations.
 - **Clean shutdown** — Ctrl-C sends SIGTERM to every child, waits 2 seconds,
   then sends SIGKILL to anything still running.
 

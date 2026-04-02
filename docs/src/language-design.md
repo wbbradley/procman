@@ -144,6 +144,20 @@ If none of the three provides a value, the arg is required and surfaces as a CLI
 - **Diamond imports**: two imports that resolve to the same canonical file path produce an error. Use a single import with one alias.
 - **Binding validation**: import-site bindings must reference args that are declared in the imported module. Binding an undefined arg is an error.
 
+### Path Variable Substitution
+
+Import paths can reference root-level CLI arguments using `${args.NAME}` syntax:
+
+```
+arg lib_dir { type = string }
+import "${args.lib_dir}/services.pman" as services
+```
+
+Root-level args are resolved before imports are loaded, so the substitution
+happens at parse time. During `--check` validation, if an argument reference
+is unresolved (no CLI value and no default), the import is skipped with a
+warning rather than failing.
+
 ### Env Scoping
 
 Each module's top-level `env { }` bindings apply only to entities defined in that module. The root file's env does not leak into imported modules, and vice versa. System env and CLI `-e` flags are shared across all modules.
@@ -168,6 +182,8 @@ A `.pman` file contains top-level blocks in any order:
 - `job name if expr { }` — conditionally evaluated one-shot job
 - `service name { }` — long-running daemon process
 - `service name if expr { }` — conditionally evaluated service
+- `task name { }` — on-demand one-shot process (does not auto-start)
+- `task name if expr { }` — conditionally evaluated task
 - `event name { }` — dormant process, only started via `on_fail spawn`
 
 ## Config Block
@@ -325,6 +341,30 @@ service worker if args.enable_worker {
 ```
 
 If the expression is falsy, the job/service is not evaluated at all — no dependency waiting, no env resolution. Skipped jobs still register as exited so `after @job` dependents can proceed.
+
+## Task Definitions
+
+A `task` is a one-shot process that does not auto-start. Tasks must be
+explicitly triggered via the `-t`/`--task` CLI flag. Like jobs, exit code 0 is
+success without triggering shutdown; non-zero triggers shutdown.
+
+Tasks share all fields with jobs and services (`run`, `env`, `wait`, `for`,
+`if`, `watch`).
+
+```
+task test_suite {
+  wait {
+    after @migrate
+  }
+  run "pytest tests/"
+}
+
+task cleanup if args.enable_cleanup {
+  run "./scripts/cleanup.sh"
+}
+```
+
+Invoke with: `procman config.pman -t test_suite -t cleanup`
 
 ## Fan-Out (`for`)
 
@@ -590,8 +630,8 @@ All parse-time and runtime errors include the source file path, line number, and
 ### Parse-Time
 
 - Syntax errors
-- Duplicate job, service, or event names
-- Jobs and services share a namespace — a service cannot have the same name as a job
+- Duplicate job, service, task, or event names
+- Jobs, services, and tasks share a namespace — a service cannot have the same name as a job or task
 - Duplicate watch names within a single job/service/event
 - Unknown identifiers (referencing an arg or job that doesn't exist)
 - `after @name` must target a `job` (not a `service`)
@@ -733,6 +773,13 @@ service web-watched {
     exists "/var/run/healthy"
     on_fail spawn @recovery
   }
+}
+
+task test_suite {
+  wait {
+    after @migrate
+  }
+  run "pytest tests/"
 }
 
 event recovery {

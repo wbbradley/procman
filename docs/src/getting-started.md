@@ -96,3 +96,29 @@ In this setup:
 This is the core pattern for dependency-aware startup — later chapters cover the
 full set of dependency types and more advanced features like fan-out and process
 output.
+
+## Tasks: On-Demand Operations
+
+Tasks are one-shot processes that don't auto-start. They're useful for
+operations you only want to run on demand — test suites, database migrations,
+cleanup scripts:
+
+```
+task test_suite {
+  wait {
+    after @migrate
+  }
+  run "pytest tests/"
+}
+
+task seed {
+  run "db-seed"
+}
+```
+
+Trigger them with the `-t` flag:
+
+```sh
+procman procman.pman -t test_suite
+procman procman.pman -t test_suite -t seed
+```

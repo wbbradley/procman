@@ -25,6 +25,21 @@ config file.
 procman myapp.pman -e PORT=3000 -e RUST_LOG=debug
 ```
 
+## `-t` / `--task` — Trigger tasks
+
+A repeatable `-t NAME` flag that activates one or more tasks by name. Tasks are
+one-shot processes defined with `task` blocks that don't auto-start — they must be
+explicitly triggered via this flag.
+
+```sh
+procman myapp.pman -t migrate
+procman myapp.pman -t test_a -t test_b
+```
+
+If a named task does not exist in the config, procman exits with an error and lists
+available tasks. A non-zero exit code from any task triggers shutdown of all
+processes.
+
 ## `-- [ARGS]` — User-defined arguments
 
 Arguments after `--` are parsed according to the `config.args` definitions in the config
