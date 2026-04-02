@@ -1,3 +1,7 @@
+config {
+  log_time = true
+}
+
 arg port {
   type = string
   default = "8080"
@@ -24,7 +28,7 @@ service web {
     after @migrate
   }
 
-  run "echo \"Serving on port $PORT with db $DB_URL\" && sleep 9"
+  run "echo \"Serving on port $PORT with db $DB_URL\" && sleep 10"
 }
 
 # On-demand task: only runs when triggered with -t test_suite.
