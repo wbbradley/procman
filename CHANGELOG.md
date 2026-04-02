@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.22.2] - 2026-04-02
+
+### Changed
+- `--check` no longer prints `<path>: ok` on success — silent exit with code 0.
+- `--check` warnings now use the standard `file:line:col: warning: description` format instead of free-form text.
+
+### Fixed
+- `--check` error message for unprovided args in import paths now says "arg 'foo' has no value; provide it via --foo" instead of incorrectly claiming the arg is unknown.
+
 ## [0.22.1] - 2026-04-01
 
 ### Changed
