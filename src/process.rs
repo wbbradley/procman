@@ -494,19 +494,32 @@ impl ProcessGroup {
                                     }
                                 }
                             }
-                            if let Some(template_name) = completed_group {
+                            if let Some(ref template_name) = completed_group {
                                 logger
                                     .lock()
                                     .unwrap()
-                                    .log_line(&template_name, "all fan-out instances completed");
+                                    .log_line(template_name, "all fan-out instances completed");
                             }
                             let is_task = self.task_names.contains(&name);
+                            // A fan-out task instance belongs to a task group
+                            // — completion is tracked at the group level.
+                            let is_fan_out_task_instance = !is_task
+                                && self.fan_out_groups.iter().any(|(template, instances)| {
+                                    instances.contains(&name) && self.task_names.contains(template)
+                                });
+                            // Check if a fan-out group just completed and it's a task.
+                            let task_group_just_completed =
+                                if let Some(ref template_name) = completed_group {
+                                    self.task_names.contains(template_name)
+                                } else {
+                                    false
+                                };
                             if code == 0 {
                                 logger.lock().unwrap().log_line(
                                     &name,
                                     &format!("[{pid}] completed after {elapsed:.1}s"),
                                 );
-                                if is_task {
+                                if task_group_just_completed || is_task {
                                     completed_tasks += 1;
                                     if completed_tasks == total_tasks {
                                         first_exit_code = Some(task_exit_code.unwrap_or(0));
@@ -526,7 +539,7 @@ impl ProcessGroup {
                                 continue;
                             }
                             // Non-zero exit code
-                            if is_task {
+                            if is_task || is_fan_out_task_instance {
                                 logger.lock().unwrap().log_line(
                                     &name,
                                     &format!(
@@ -536,7 +549,9 @@ impl ProcessGroup {
                                 if task_exit_code.is_none() {
                                     task_exit_code = Some(code);
                                 }
-                                completed_tasks += 1;
+                                if task_group_just_completed || is_task {
+                                    completed_tasks += 1;
+                                }
                                 if completed_tasks == total_tasks {
                                     first_exit_code = Some(task_exit_code.unwrap_or(0));
                                     break;
