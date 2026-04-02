@@ -41,11 +41,14 @@ pub fn load_with_root(
     let mut visited = HashSet::new();
     visited.insert(root_canonical.to_string_lossy().to_string());
 
+    let known_arg_names: HashSet<String> = root.args.iter().map(|a| a.name.clone()).collect();
+
     let imports = load_imports(
         &root.imports,
         root_path,
         &mut visited,
         root_arg_values,
+        &known_arg_names,
         check_mode,
     )?;
 
@@ -60,6 +63,7 @@ pub fn load_with_root(
 fn substitute_args_in_path(
     raw_path: &str,
     arg_values: &HashMap<String, String>,
+    known_arg_names: &HashSet<String>,
     span: Span,
     file_path: &str,
 ) -> Result<String> {
@@ -86,15 +90,15 @@ fn substitute_args_in_path(
             );
         }
         let value = arg_values.get(name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "{}",
-                span.fmt_error(
-                    file_path,
-                    &format!(
-                        "unknown arg '{name}' in import path; only root-level args can be used"
-                    )
+            let msg = if known_arg_names.contains(name) {
+                format!(
+                    "arg '{name}' has no value; provide it via --{}",
+                    name.replace('_', "-")
                 )
-            )
+            } else {
+                format!("unknown arg '{name}' in import path; only root-level args can be used")
+            };
+            anyhow::anyhow!("{}", span.fmt_error(file_path, &msg))
         })?;
         result.push_str(value);
         rest = &after_prefix[end + 1..];
@@ -108,6 +112,7 @@ fn load_imports(
     parent_path: &str,
     visited: &mut HashSet<String>,
     root_arg_values: &HashMap<String, String>,
+    known_arg_names: &HashSet<String>,
     check_mode: bool,
 ) -> Result<HashMap<String, LoadedModule>> {
     let mut imports = HashMap::new();
@@ -137,6 +142,7 @@ fn load_imports(
         let substituted_path = match substitute_args_in_path(
             &import_def.path.value,
             root_arg_values,
+            known_arg_names,
             import_def.span,
             parent_path,
         ) {
@@ -229,6 +235,7 @@ fn load_imports(
             &canonical_str,
             visited,
             &HashMap::new(),
+            &HashSet::new(),
             check_mode,
         )?;
         visited.remove(&canonical_str);
