@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.22.0] - 2026-04-01
+
+### Added
+- **`task` process type:** New `task` keyword for defining run-to-completion processes triggered via the `-t` / `--task` CLI flag. Tasks do not autostart and their failures do not tear down the supervisor — procman waits for all triggered tasks to complete and exits with the first non-zero task exit code (or 0 if all succeed). Designed for test harness orchestration.
+- **`-t` / `--task` CLI flag:** Repeatable flag to activate specific tasks by name (e.g., `procman tests.pman -t test_a -t test_b`).
+- **`${args.NAME}` in import paths:** Import paths can now reference root-level arg values (e.g., `import "${args.dep_dir}/db.pman" as db`). The compilation pipeline has been restructured to resolve root-level args before loading imports.
+
+### Changed
+- **`--check` mode is more lenient with parameterized imports:** When running `--check` without providing all required root args, parameterized imports (those containing `${args.NAME}`) are skipped with a warning instead of producing a hard error. Literal import path failures remain errors.
+
 ## [0.21.0] - 2026-03-30
 
 ### Breaking Changes

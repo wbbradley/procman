@@ -34,6 +34,7 @@ cargo install --path .
 procman myapp.pman                             # run all jobs
 procman myapp.pman -e PORT=3000 -e RUST_LOG=debug  # inject env vars
 procman myapp.pman -- --rust-log debug --verbose   # pass config-defined args
+procman myapp.pman -t test_a -t test_b         # run specific tasks
 procman myapp.pman --debug                     # pause before shutdown on failure
 procman myapp.pman --check                     # validate config and exit
 ```
@@ -86,6 +87,16 @@ started. Useful for editor integration and CI linting.
 ```bash
 procman myapp.pman --check
 ```
+
+### `-t` / `--task` — run specific tasks
+
+Activates one or more `task` definitions by name. Tasks are run-to-completion processes (like jobs) that do not autostart. Unlike jobs, a task failure does not tear down the supervisor — procman waits for all triggered tasks to complete and reports their results. The exit code is 0 if all tasks succeeded, non-zero if any failed.
+
+```bash
+procman tests.pman -t test_system_a -t test_system_b
+```
+
+This is designed for test harness orchestration: define services and jobs as scaffolding, then trigger tasks as the actual test runs.
 
 ### `--debug` — pause before shutdown
 
@@ -211,10 +222,11 @@ The config file contains top-level blocks in any order:
 - `config { }` (optional): global settings — `logs` (log directory path, default `logs/procman`) and `log_time` (prefix lines with elapsed time, default `false`).
 - `arg name { }` (optional): user-defined CLI arguments parsed from argv after `--`. Underscores in names become dashes on the CLI (e.g. `log_level` → `--log-level`). Fields: `type` (`string` or `bool`), `short`, `description`, `default`. Args without a default are required. Referenced as `args.name` in expressions.
 - `env { }` / `env KEY = expr` (optional): global environment variable bindings applied to all jobs and services. Both block and single-binding forms can coexist. Env precedence (lowest → highest): system env → CLI `-e` → global `env` → per-job `env` → per-iteration `for` bindings.
-- `import "path" as alias` (optional): import another `.pman` file. Imported entities are namespaced under the alias (e.g., `db::migrate`). Imports support bindings (`import "db.pman" as db { url = "..." }`) and can be nested. See the [language design doc](https://wbbradley.github.io/procman/language-design.html) for details.
+- `import "path" as alias` (optional): import another `.pman` file. Imported entities are namespaced under the alias (e.g., `db::migrate`). Imports support bindings (`import "db.pman" as db { url = "..." }`), can be nested, and can use `${args.NAME}` for parameterized paths (e.g., `import "${args.dep_dir}/db.pman" as db`). See the [language design doc](https://wbbradley.github.io/procman/language-design.html) for details.
 - `job name { }` / `job name if expr { }` — one-shot process definitions (run to completion).
 - `service name { }` / `service name if expr { }` — long-running process definitions (daemons).
 - `event name { }` — dormant processes, only started via `on_fail spawn @name`.
+- `task name { }` / `task name if expr { }` — run-to-completion processes triggered via `-t` CLI flag. Tasks do not autostart. When a task fails, it does not tear down the supervisor — failures are accumulated and the exit code reflects whether all triggered tasks passed.
 
 Each job/service definition supports:
 
