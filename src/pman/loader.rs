@@ -147,10 +147,16 @@ fn load_imports(
             parent_path,
         ) {
             Ok(path) => path,
-            Err(e) if has_arg_ref && check_mode => {
+            Err(_) if has_arg_ref && check_mode => {
                 eprintln!(
-                    "warning: skipping parameterized import '{}': {e}",
-                    import_def.path.value
+                    "{}",
+                    import_def.span.fmt_warning(
+                        parent_path,
+                        &format!(
+                            "skipping import with unresolved arg in '{}'",
+                            import_def.path.value
+                        )
+                    )
                 );
                 continue;
             }
@@ -163,8 +169,14 @@ fn load_imports(
             Ok(c) => c,
             Err(e) if has_arg_ref && check_mode => {
                 eprintln!(
-                    "warning: skipping parameterized import '{}': cannot resolve: {e}",
-                    import_def.path.value
+                    "{}",
+                    import_def.span.fmt_warning(
+                        parent_path,
+                        &format!(
+                            "skipping import '{}': cannot resolve: {e}",
+                            import_def.path.value
+                        )
+                    )
                 );
                 continue;
             }

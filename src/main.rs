@@ -172,7 +172,7 @@ fn run_supervisor(
     }
 
     if check {
-        println!("{config_path}: ok");
+        // Silent success — no output on valid config.
         return Ok(());
     }
 

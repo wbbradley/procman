@@ -12,6 +12,11 @@ impl Span {
     pub fn fmt_error(&self, path: &str, msg: &str) -> String {
         format!("{path}:{}:{}: error: {msg}", self.line, self.col)
     }
+
+    /// Format a warning message with file location.
+    pub fn fmt_warning(&self, path: &str, msg: &str) -> String {
+        format!("{path}:{}:{}: warning: {msg}", self.line, self.col)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
