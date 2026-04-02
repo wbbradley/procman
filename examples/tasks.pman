@@ -1,0 +1,41 @@
+arg port {
+  type = string
+  default = "8080"
+  short = "p"
+  description = "Port for the web server"
+}
+
+# One-shot job: runs to completion before services start.
+job migrate {
+  run """
+    echo "Running migrations..."
+    sleep 1
+    echo "DATABASE_URL=postgres://localhost/mydb" > $PROCMAN_OUTPUT
+    echo "Migrations complete."
+  """
+}
+
+# Long-running service: starts after migrate finishes.
+service web {
+  env PORT = args.port
+  env DB_URL = @migrate.DATABASE_URL
+
+  wait {
+    after @migrate
+  }
+
+  run "echo \"Serving on port $PORT with db $DB_URL\" && sleep 9"
+}
+
+# On-demand task: only runs when triggered with -t test_suite.
+task test_suite {
+  wait {
+    after @migrate
+  }
+
+  run """
+    echo "Running test suite..."
+    sleep 1
+    echo "All tests passed."
+  """
+}

@@ -528,14 +528,19 @@ impl ProcessGroup {
                                 continue;
                             }
                         }
-                        logger.lock().unwrap().log_line(
-                            &name,
-                            &format!("[{pid}] exited with code {code} after {elapsed:.1}s"),
-                        );
+                        // Services should never exit — treat code 0 as failure.
+                        let effective_code = if !once && code == 0 { 1 } else { code };
+                        let msg = if !once && code == 0 {
+                            format!("[{pid}] exited unexpectedly after {elapsed:.1}s")
+                        } else {
+                            format!("[{pid}] exited with code {code} after {elapsed:.1}s")
+                        };
+                        logger.lock().unwrap().log_line(&name, &msg);
                         if first_exit_code.is_none() {
-                            first_exit_code = Some(code);
-                            shutdown_trigger =
-                                Some(format!("{name} [pid {pid}] exited with code {code}"));
+                            first_exit_code = Some(effective_code);
+                            shutdown_trigger = Some(format!(
+                                "{name} [pid {pid}] exited with code {effective_code}"
+                            ));
                         }
                     }
                     // Unknown pid — ignore (don't influence exit code)
@@ -1539,5 +1544,132 @@ mod tests {
         .unwrap();
         assert!(group.children.is_empty());
         assert!(!group.exit_registry.lock().unwrap().contains_key("skipped"));
+    }
+
+    #[test]
+    fn service_exit_code_0_is_failure() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = mpsc::channel::<crate::config::SupervisorCommand>();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let signal_triggered = Arc::new(AtomicBool::new(false));
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let log_dir = std::env::temp_dir().join(format!(
+            "procman_service_exit0_test_{}_{id}",
+            std::process::id()
+        ));
+        let logger = Arc::new(Mutex::new(
+            Logger::new_for_test(&["procman".to_string(), "svc".to_string()], log_dir).unwrap(),
+        ));
+        let configs = vec![ProcessConfig {
+            name: "svc".to_string(),
+            env: std::env::vars().collect(),
+            run: "echo hello".to_string(),
+            condition: None,
+            depends: vec![],
+            once: false,
+            for_each: None,
+            autostart: true,
+            watches: vec![],
+            is_task: false,
+        }];
+        let group = ProcessGroup::spawn(
+            &configs,
+            tx,
+            Arc::clone(&shutdown),
+            Arc::clone(&logger),
+            false,
+            HashSet::new(),
+        )
+        .unwrap();
+        drop(rx);
+        let (done_tx, done_rx) = mpsc::channel();
+        let shutdown2 = Arc::clone(&shutdown);
+        let signal2 = Arc::clone(&signal_triggered);
+        let logger2 = Arc::clone(&logger);
+        let handle = thread::spawn(move || {
+            let (_, inner_rx) = mpsc::channel();
+            let code = group.wait_and_shutdown(shutdown2, signal2, inner_rx, logger2);
+            let _ = done_tx.send(code);
+        });
+        let code = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("wait_and_shutdown should not hang");
+        assert_eq!(
+            code, 1,
+            "service exiting with code 0 should produce exit code 1"
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn job_only_exits_cleanly() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = mpsc::channel::<crate::config::SupervisorCommand>();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let signal_triggered = Arc::new(AtomicBool::new(false));
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let log_dir =
+            std::env::temp_dir().join(format!("procman_job_only_test_{}_{id}", std::process::id()));
+        let logger = Arc::new(Mutex::new(
+            Logger::new_for_test(
+                &[
+                    "procman".to_string(),
+                    "job_a".to_string(),
+                    "job_b".to_string(),
+                ],
+                log_dir,
+            )
+            .unwrap(),
+        ));
+        let configs = vec![
+            ProcessConfig {
+                name: "job_a".to_string(),
+                env: std::env::vars().collect(),
+                run: "echo A".to_string(),
+                condition: None,
+                depends: vec![],
+                once: true,
+                for_each: None,
+                autostart: true,
+                watches: vec![],
+                is_task: false,
+            },
+            ProcessConfig {
+                name: "job_b".to_string(),
+                env: std::env::vars().collect(),
+                run: "echo B".to_string(),
+                condition: None,
+                depends: vec![],
+                once: true,
+                for_each: None,
+                autostart: true,
+                watches: vec![],
+                is_task: false,
+            },
+        ];
+        let group = ProcessGroup::spawn(
+            &configs,
+            tx,
+            Arc::clone(&shutdown),
+            Arc::clone(&logger),
+            false,
+            HashSet::new(),
+        )
+        .unwrap();
+        drop(rx);
+        let (done_tx, done_rx) = mpsc::channel();
+        let shutdown2 = Arc::clone(&shutdown);
+        let signal2 = Arc::clone(&signal_triggered);
+        let logger2 = Arc::clone(&logger);
+        let handle = thread::spawn(move || {
+            let (_, inner_rx) = mpsc::channel();
+            let code = group.wait_and_shutdown(shutdown2, signal2, inner_rx, logger2);
+            let _ = done_tx.send(code);
+        });
+        let code = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("wait_and_shutdown should not hang");
+        assert_eq!(code, 0, "job-only config should exit cleanly with code 0");
+        handle.join().unwrap();
     }
 }
