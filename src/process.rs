@@ -25,7 +25,7 @@ use nix::{
 };
 
 use crate::{
-    config::{ProcessConfig, SupervisorCommand},
+    config::{ForEachConfig, ProcessConfig, SupervisorCommand},
     dependency,
     log::Logger,
     output,
@@ -188,35 +188,54 @@ impl ProcessGroup {
         logger: &Arc<Mutex<Logger>>,
     ) -> Result<()> {
         let fe = config.for_each.as_ref().unwrap();
-        let glob_pattern = crate::config::expand_env_vars(&fe.glob, &config.env)?;
-        let mut matches: Vec<String> = glob::glob(&glob_pattern)
-            .with_context(|| format!("invalid glob pattern: {glob_pattern}"))?
-            .filter_map(|entry| entry.ok())
-            .map(|p| p.to_string_lossy().to_string())
-            .collect();
-        matches.sort();
+        let variable = fe.variable();
 
-        if matches.is_empty() {
-            anyhow::bail!(
-                "fan-out for '{}': glob '{}' matched zero files",
-                config.name,
-                glob_pattern
-            );
-        }
+        let items: Vec<String> = match fe {
+            ForEachConfig::Glob { pattern, .. } => {
+                let glob_pattern = crate::config::expand_env_vars(pattern, &config.env)?;
+                let mut matches: Vec<String> = glob::glob(&glob_pattern)
+                    .with_context(|| format!("invalid glob pattern: {glob_pattern}"))?
+                    .filter_map(|entry| entry.ok())
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect();
+                matches.sort();
+                if matches.is_empty() {
+                    anyhow::bail!(
+                        "fan-out for '{}': glob '{}' matched zero files",
+                        config.name,
+                        glob_pattern
+                    );
+                }
+                matches
+            }
+            ForEachConfig::Array { values, .. } => values.clone(),
+            ForEachConfig::Range {
+                start,
+                end,
+                inclusive,
+                ..
+            } => {
+                if *inclusive {
+                    (*start..=*end).map(|v: i64| v.to_string()).collect()
+                } else {
+                    (*start..*end).map(|v: i64| v.to_string()).collect()
+                }
+            }
+        };
 
         let mut instance_names = HashSet::new();
-        for (i, matched_path) in matches.iter().enumerate() {
+        for (i, item_value) in items.iter().enumerate() {
             let instance_name = format!("{}-{i}", config.name);
             instance_names.insert(instance_name.clone());
 
             let mut env = config.env.clone();
-            env.insert(fe.variable.clone(), matched_path.clone());
+            env.insert(variable.to_string(), item_value.clone());
             // Substitute loop variable in env values (e.g. env bindings
             // that reference the loop variable via placeholder).
             for val in env.values_mut() {
                 let replaced = val
-                    .replace(&format!("${}", fe.variable), matched_path)
-                    .replace(&format!("${{{}}}", fe.variable), matched_path);
+                    .replace(&format!("${variable}"), item_value)
+                    .replace(&format!("${{{variable}}}"), item_value);
                 if replaced != *val {
                     *val = replaced;
                 }
@@ -224,8 +243,8 @@ impl ProcessGroup {
 
             let run = config
                 .run
-                .replace(&format!("${}", fe.variable), matched_path)
-                .replace(&format!("${{{}}}", fe.variable), matched_path);
+                .replace(&format!("${variable}"), item_value)
+                .replace(&format!("${{{variable}}}"), item_value);
 
             let mut instance_watches = config.watches.clone();
             for w in &mut instance_watches {
@@ -233,7 +252,7 @@ impl ProcessGroup {
                     "{instance_name}.{}",
                     w.name.rsplit_once('.').map(|(_, s)| s).unwrap_or(&w.name)
                 );
-                w.check.substitute_var(&fe.variable, matched_path);
+                w.check.substitute_var(variable, item_value);
             }
 
             let instance_config = ProcessConfig {
@@ -258,11 +277,7 @@ impl ProcessGroup {
             .insert(config.name.clone(), instance_names);
         logger.lock().unwrap().log_line(
             &config.name,
-            &format!(
-                "fan-out: spawned {} instance(s) from glob '{}'",
-                matches.len(),
-                fe.glob
-            ),
+            &format!("fan-out: spawned {} instance(s)", items.len()),
         );
         Ok(())
     }
@@ -343,6 +358,7 @@ impl ProcessGroup {
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
                 SupervisorCommand::Spawn(config) => {
+                    let config = *config;
                     // Skip if already running
                     if self
                         .children
@@ -801,8 +817,8 @@ mod tests {
             depends: vec![],
             once: true,
             autostart: true,
-            for_each: Some(ForEachConfig {
-                glob: pattern,
+            for_each: Some(ForEachConfig::Glob {
+                pattern,
                 variable: "CONFIG_PATH".to_string(),
             }),
             watches: vec![],
@@ -839,8 +855,8 @@ mod tests {
             depends: vec![],
             once: true,
             autostart: true,
-            for_each: Some(ForEachConfig {
-                glob: "/tmp/procman_nonexistent_glob_pattern_*.xyz".to_string(),
+            for_each: Some(ForEachConfig::Glob {
+                pattern: "/tmp/procman_nonexistent_glob_pattern_*.xyz".to_string(),
                 variable: "CONFIG_PATH".to_string(),
             }),
             watches: vec![],
@@ -863,8 +879,8 @@ mod tests {
             depends: vec![],
             once: true,
             autostart: true,
-            for_each: Some(ForEachConfig {
-                glob: pattern,
+            for_each: Some(ForEachConfig::Glob {
+                pattern,
                 variable: "CONFIG_PATH".to_string(),
             }),
             watches: vec![],
@@ -920,8 +936,8 @@ mod tests {
             depends: vec![],
             once: true,
             autostart: true,
-            for_each: Some(ForEachConfig {
-                glob: "$TEST_DIR/node-*.yaml".to_string(),
+            for_each: Some(ForEachConfig::Glob {
+                pattern: "$TEST_DIR/node-*.yaml".to_string(),
                 variable: "CONFIG_PATH".to_string(),
             }),
             watches: vec![],
@@ -1346,7 +1362,7 @@ mod tests {
             watches: vec![],
             is_task: false,
         };
-        tx.send(SupervisorCommand::Spawn(config)).unwrap();
+        tx.send(SupervisorCommand::Spawn(Box::new(config))).unwrap();
         drop(tx);
 
         // The dormant config should be removed and env merged
@@ -1381,7 +1397,7 @@ mod tests {
         // Try to spawn again with the same name
         let (tx, rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
-        tx.send(SupervisorCommand::Spawn(config)).unwrap();
+        tx.send(SupervisorCommand::Spawn(Box::new(config))).unwrap();
         drop(tx);
 
         group.try_accept_new(&rx, &shutdown, &logger);
@@ -1671,5 +1687,84 @@ mod tests {
             .expect("wait_and_shutdown should not hang");
         assert_eq!(code, 0, "job-only config should exit cleanly with code 0");
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn expand_fan_out_array_creates_instances() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut group, logger) = make_test_group();
+        let config = ProcessConfig {
+            name: "batch".to_string(),
+            env: std::env::vars().collect(),
+            run: "true".to_string(),
+            condition: None,
+            depends: vec![],
+            once: true,
+            autostart: true,
+            for_each: Some(ForEachConfig::Array {
+                values: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                variable: "ITEM".to_string(),
+            }),
+            watches: vec![],
+            is_task: false,
+        };
+        group.expand_fan_out(&config, &logger).unwrap();
+        assert_eq!(group.children.len(), 3);
+        let names: Vec<&str> = group
+            .children
+            .iter()
+            .map(|(_, n, _, _)| n.as_str())
+            .collect();
+        assert!(names.contains(&"batch-0"));
+        assert!(names.contains(&"batch-1"));
+        assert!(names.contains(&"batch-2"));
+        assert!(group.fan_out_groups.contains_key("batch"));
+        assert_eq!(group.fan_out_groups["batch"].len(), 3);
+        for (pid, _, _, _) in &group.children {
+            let _ = waitpid(*pid, None);
+        }
+        for handle in std::mem::take(&mut group.reader_threads) {
+            let _ = handle.join();
+        }
+    }
+
+    #[test]
+    fn expand_fan_out_range_creates_instances() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut group, logger) = make_test_group();
+        let config = ProcessConfig {
+            name: "workers".to_string(),
+            env: std::env::vars().collect(),
+            run: "true".to_string(),
+            condition: None,
+            depends: vec![],
+            once: true,
+            autostart: true,
+            for_each: Some(ForEachConfig::Range {
+                start: 0,
+                end: 3,
+                inclusive: false,
+                variable: "ID".to_string(),
+            }),
+            watches: vec![],
+            is_task: false,
+        };
+        group.expand_fan_out(&config, &logger).unwrap();
+        assert_eq!(group.children.len(), 3);
+        let names: Vec<&str> = group
+            .children
+            .iter()
+            .map(|(_, n, _, _)| n.as_str())
+            .collect();
+        assert!(names.contains(&"workers-0"));
+        assert!(names.contains(&"workers-1"));
+        assert!(names.contains(&"workers-2"));
+        assert!(group.fan_out_groups.contains_key("workers"));
+        for (pid, _, _, _) in &group.children {
+            let _ = waitpid(*pid, None);
+        }
+        for handle in std::mem::take(&mut group.reader_threads) {
+            let _ = handle.join();
+        }
     }
 }

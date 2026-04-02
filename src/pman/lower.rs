@@ -906,6 +906,10 @@ fn lower_job_or_event(
         }]),
         RunSection::ForLoop(fl) => match &fl.iterable {
             ast::Iterable::Glob(glob_lit) => {
+                let for_each = ForEachConfig::Glob {
+                    pattern: glob_lit.value.clone(),
+                    variable: fl.var.clone(),
+                };
                 // Evaluate for-loop env with the loop var mapped to a
                 // placeholder so that expand_fan_out can substitute the
                 // real value at runtime.
@@ -913,109 +917,108 @@ fn lower_job_or_event(
                 placeholder_vars.insert(fl.var.clone(), format!("${{{}}}", fl.var));
                 let for_env =
                     eval_env_bindings(&fl.env, arg_values, &placeholder_vars, prefix, path)?;
-                let mut glob_env = merged_env;
-                glob_env.extend(for_env);
+                let mut deferred_env = merged_env;
+                deferred_env.extend(for_env);
 
                 Ok(vec![ProcessConfig {
                     name: name.to_string(),
-                    env: glob_env,
+                    env: deferred_env,
                     run: extract_shell(&fl.run),
                     condition: None,
                     depends,
                     once,
-                    for_each: Some(ForEachConfig {
-                        glob: glob_lit.value.clone(),
-                        variable: fl.var.clone(),
-                    }),
+                    for_each: Some(for_each),
                     autostart,
                     watches,
                     is_task,
                 }])
             }
             ast::Iterable::Array(items) => {
-                let mut configs = Vec::new();
-                for (i, item_expr) in items.iter().enumerate() {
-                    let item_value =
-                        eval_expr_to_string(item_expr, arg_values, &local_vars, prefix, path)?;
-                    let mut iter_local_vars = HashMap::new();
-                    iter_local_vars.insert(fl.var.clone(), item_value);
+                let values: Vec<String> = items
+                    .iter()
+                    .map(|e| eval_expr_to_string(e, arg_values, &local_vars, prefix, path))
+                    .collect::<Result<_>>()?;
+                let for_each = ForEachConfig::Array {
+                    values,
+                    variable: fl.var.clone(),
+                };
+                let mut placeholder_vars = HashMap::new();
+                placeholder_vars.insert(fl.var.clone(), format!("${{{}}}", fl.var));
+                let for_env =
+                    eval_env_bindings(&fl.env, arg_values, &placeholder_vars, prefix, path)?;
+                let mut deferred_env = merged_env;
+                deferred_env.extend(for_env);
 
-                    // Evaluate for-loop env with the loop var in scope.
-                    let for_env =
-                        eval_env_bindings(&fl.env, arg_values, &iter_local_vars, prefix, path)?;
-                    let mut iter_env = merged_env.clone();
-                    iter_env.extend(for_env);
-
-                    configs.push(ProcessConfig {
-                        name: format!("{name}-{i}"),
-                        env: iter_env,
-                        run: extract_shell(&fl.run),
-                        condition: None,
-                        depends: depends.clone(),
-                        once,
-                        for_each: None,
-                        autostart,
-                        watches: watches.clone(),
-                        is_task,
-                    });
-                }
-                Ok(configs)
+                Ok(vec![ProcessConfig {
+                    name: name.to_string(),
+                    env: deferred_env,
+                    run: extract_shell(&fl.run),
+                    condition: None,
+                    depends,
+                    once,
+                    for_each: Some(for_each),
+                    autostart,
+                    watches,
+                    is_task,
+                }])
             }
             ast::Iterable::RangeExclusive(start_expr, end_expr) => {
                 let start = eval_expr_to_number(start_expr, path)? as i64;
                 let end = eval_expr_to_number(end_expr, path)? as i64;
-                let mut configs = Vec::new();
-                for (i, val) in (start..end).enumerate() {
-                    let mut iter_local_vars = HashMap::new();
-                    iter_local_vars.insert(fl.var.clone(), val.to_string());
+                let for_each = ForEachConfig::Range {
+                    start,
+                    end,
+                    inclusive: false,
+                    variable: fl.var.clone(),
+                };
+                let mut placeholder_vars = HashMap::new();
+                placeholder_vars.insert(fl.var.clone(), format!("${{{}}}", fl.var));
+                let for_env =
+                    eval_env_bindings(&fl.env, arg_values, &placeholder_vars, prefix, path)?;
+                let mut deferred_env = merged_env;
+                deferred_env.extend(for_env);
 
-                    let for_env =
-                        eval_env_bindings(&fl.env, arg_values, &iter_local_vars, prefix, path)?;
-                    let mut iter_env = merged_env.clone();
-                    iter_env.extend(for_env);
-
-                    configs.push(ProcessConfig {
-                        name: format!("{name}-{i}"),
-                        env: iter_env,
-                        run: extract_shell(&fl.run),
-                        condition: None,
-                        depends: depends.clone(),
-                        once,
-                        for_each: None,
-                        autostart,
-                        watches: watches.clone(),
-                        is_task,
-                    });
-                }
-                Ok(configs)
+                Ok(vec![ProcessConfig {
+                    name: name.to_string(),
+                    env: deferred_env,
+                    run: extract_shell(&fl.run),
+                    condition: None,
+                    depends,
+                    once,
+                    for_each: Some(for_each),
+                    autostart,
+                    watches,
+                    is_task,
+                }])
             }
             ast::Iterable::RangeInclusive(start_expr, end_expr) => {
                 let start = eval_expr_to_number(start_expr, path)? as i64;
                 let end = eval_expr_to_number(end_expr, path)? as i64;
-                let mut configs = Vec::new();
-                for (i, val) in (start..=end).enumerate() {
-                    let mut iter_local_vars = HashMap::new();
-                    iter_local_vars.insert(fl.var.clone(), val.to_string());
+                let for_each = ForEachConfig::Range {
+                    start,
+                    end,
+                    inclusive: true,
+                    variable: fl.var.clone(),
+                };
+                let mut placeholder_vars = HashMap::new();
+                placeholder_vars.insert(fl.var.clone(), format!("${{{}}}", fl.var));
+                let for_env =
+                    eval_env_bindings(&fl.env, arg_values, &placeholder_vars, prefix, path)?;
+                let mut deferred_env = merged_env;
+                deferred_env.extend(for_env);
 
-                    let for_env =
-                        eval_env_bindings(&fl.env, arg_values, &iter_local_vars, prefix, path)?;
-                    let mut iter_env = merged_env.clone();
-                    iter_env.extend(for_env);
-
-                    configs.push(ProcessConfig {
-                        name: format!("{name}-{i}"),
-                        env: iter_env,
-                        run: extract_shell(&fl.run),
-                        condition: None,
-                        depends: depends.clone(),
-                        once,
-                        for_each: None,
-                        autostart,
-                        watches: watches.clone(),
-                        is_task,
-                    });
-                }
-                Ok(configs)
+                Ok(vec![ProcessConfig {
+                    name: name.to_string(),
+                    env: deferred_env,
+                    run: extract_shell(&fl.run),
+                    condition: None,
+                    depends,
+                    once,
+                    for_each: Some(for_each),
+                    autostart,
+                    watches,
+                    is_task,
+                }])
             }
         },
     }
@@ -1253,7 +1256,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_for_array_expands_to_multiple_configs() {
+    fn lower_for_array_defers_expansion() {
         let (configs, _) = lower_str(
             r#"
             job multi {
@@ -1264,18 +1267,18 @@ mod tests {
             }
         "#,
         );
-        let multi_configs: Vec<_> = configs
-            .iter()
-            .filter(|c| c.name.starts_with("multi-"))
-            .collect();
-        assert_eq!(multi_configs.len(), 3);
-        assert_eq!(multi_configs[0].name, "multi-0");
-        assert_eq!(multi_configs[1].name, "multi-1");
-        assert_eq!(multi_configs[2].name, "multi-2");
+        let multi = configs.iter().find(|c| c.name == "multi").unwrap();
+        match multi.for_each.as_ref().unwrap() {
+            ForEachConfig::Array { values, variable } => {
+                assert_eq!(values, &["a", "b", "c"]);
+                assert_eq!(variable, "item");
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
     }
 
     #[test]
-    fn lower_for_range_expands_to_multiple_configs() {
+    fn lower_for_range_defers_expansion() {
         let (configs, _) = lower_str(
             r#"
             job workers {
@@ -1286,11 +1289,21 @@ mod tests {
             }
         "#,
         );
-        let worker_configs: Vec<_> = configs
-            .iter()
-            .filter(|c| c.name.starts_with("workers-"))
-            .collect();
-        assert_eq!(worker_configs.len(), 3);
+        let workers = configs.iter().find(|c| c.name == "workers").unwrap();
+        match workers.for_each.as_ref().unwrap() {
+            ForEachConfig::Range {
+                start,
+                end,
+                inclusive,
+                variable,
+            } => {
+                assert_eq!(*start, 0);
+                assert_eq!(*end, 3);
+                assert!(!inclusive);
+                assert_eq!(variable, "i");
+            }
+            other => panic!("expected Range, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1306,9 +1319,9 @@ mod tests {
             }
         "#,
         );
-        for c in configs.iter().filter(|c| c.name.starts_with("nodes-")) {
-            assert_eq!(c.env.get("CLUSTER").unwrap(), "prod");
-        }
+        let nodes = configs.iter().find(|c| c.name == "nodes").unwrap();
+        assert_eq!(nodes.env.get("CLUSTER").unwrap(), "prod");
+        assert!(nodes.for_each.is_some());
     }
 
     #[test]

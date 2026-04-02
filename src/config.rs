@@ -26,9 +26,31 @@ pub struct ConfigHeader {
 }
 
 #[derive(Clone, Debug)]
-pub struct ForEachConfig {
-    pub glob: String,
-    pub variable: String,
+pub enum ForEachConfig {
+    Glob {
+        pattern: String,
+        variable: String,
+    },
+    Array {
+        values: Vec<String>,
+        variable: String,
+    },
+    Range {
+        start: i64,
+        end: i64,
+        inclusive: bool,
+        variable: String,
+    },
+}
+
+impl ForEachConfig {
+    pub fn variable(&self) -> &str {
+        match self {
+            ForEachConfig::Glob { variable, .. }
+            | ForEachConfig::Array { variable, .. }
+            | ForEachConfig::Range { variable, .. } => variable,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -215,7 +237,7 @@ pub(crate) fn expand_env_vars(s: &str, env: &HashMap<String, String>) -> Result<
 }
 
 pub enum SupervisorCommand {
-    Spawn(ProcessConfig),
+    Spawn(Box<ProcessConfig>),
     Shutdown { message: String },
     DebugPause { message: String },
 }

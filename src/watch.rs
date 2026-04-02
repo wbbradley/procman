@@ -137,7 +137,7 @@ fn execute_action(
                 watches: vec![],
                 is_task: false,
             };
-            let _ = tx.send(SupervisorCommand::Spawn(config));
+            let _ = tx.send(SupervisorCommand::Spawn(Box::new(config)));
             false
         }
     }

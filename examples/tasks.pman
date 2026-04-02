@@ -33,8 +33,24 @@ task test_suite {
     after @migrate
   }
 
+  for thing in ["test1", "test2", "test3"] {
+    env THING = thing
+    run """
+      echo "Running test $THING..."
+      sleep 1
+      echo "Test passed."
+    """
+  }
+}
+
+# On-demand task: only runs when triggered with -t test_suite.
+task test_suite_2 {
+  wait {
+    after @migrate
+  }
+
   run """
-    echo "Running test suite..."
+    echo "Running test suite 2..."
     sleep 1
     echo "All tests passed."
   """

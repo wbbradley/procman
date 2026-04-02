@@ -138,7 +138,7 @@ pub fn spawn_waiter(
                         .log_line(&name, "all dependencies satisfied, starting");
                     let mut config = config;
                     config.env.extend(dep_env);
-                    let _ = tx.send(SupervisorCommand::Spawn(config));
+                    let _ = tx.send(SupervisorCommand::Spawn(Box::new(config)));
                 }
                 Err(e) => {
                     logger
