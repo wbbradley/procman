@@ -1663,4 +1663,40 @@ mod tests {
         assert_eq!(file.tasks.len(), 1);
         assert!(file.tasks[0].body.wait.is_some());
     }
+
+    #[test]
+    fn arg_named_module_rejected() {
+        let err = parse(r#"arg module { type = string }"#, "test.pman").unwrap_err();
+        assert!(
+            err.to_string().contains("expected identifier"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn arg_named_procman_rejected() {
+        let err = parse(r#"arg procman { type = string }"#, "test.pman").unwrap_err();
+        assert!(
+            err.to_string().contains("expected identifier"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn job_named_module_rejected() {
+        let err = parse(r#"job module { run "echo" }"#, "test.pman").unwrap_err();
+        assert!(
+            err.to_string().contains("expected identifier"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn job_named_procman_rejected() {
+        let err = parse(r#"job procman { run "echo" }"#, "test.pman").unwrap_err();
+        assert!(
+            err.to_string().contains("expected identifier"),
+            "got: {err}"
+        );
+    }
 }
