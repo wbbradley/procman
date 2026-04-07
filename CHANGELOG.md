@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.23.0] - 2026-04-07
+
+### Breaking Changes
+- `module` and `procman` are now reserved keywords. Existing `.pman` files that use `module` or `procman` as identifiers (job names, arg names, etc.) must be renamed.
+
+### Added
+- **`module.dir` built-in reference:** resolves to the directory of the current `.pman` file. In the root file this is the root directory; in an imported module it is that module's directory.
+- **`procman.dir` built-in reference:** resolves to the directory of the root `.pman` file (the one passed to the CLI). Same value in every module.
+- **`ns::module.dir` namespaced reference:** resolves to the directory of the `.pman` file for the module imported as `ns`.
+
 ## [0.22.2] - 2026-04-02
 
 ### Changed
