@@ -746,7 +746,8 @@ fn collect_namespaced_output_refs(
                 ));
             }
             Some(entities) => {
-                if !entities.args.contains(name.as_str()) {
+                // Synthetic keys (e.g. __module_dir__) are injected at lowering time, not declared.
+                if !name.starts_with("__") && !entities.args.contains(name.as_str()) {
                     errors.push(span.fmt_error(
                         path,
                         &format!(

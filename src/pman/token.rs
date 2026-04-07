@@ -49,6 +49,8 @@ pub enum TokenKind {
     True,     // true
     False,    // false
     None,     // none
+    Module,   // module
+    Procman,  // procman
 
     // Literals
     String(String),       // "..." (contents, escapes resolved)

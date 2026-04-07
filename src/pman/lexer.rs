@@ -296,6 +296,8 @@ impl<'a> Lexer<'a> {
             "false" => TokenKind::False,
             "none" => TokenKind::None,
             "args" => TokenKind::Args,
+            "module" => TokenKind::Module,
+            "procman" => TokenKind::Procman,
             _ => TokenKind::Ident(word.to_string()),
         };
 
@@ -729,5 +731,29 @@ mod tests {
     #[test]
     fn lex_task_keyword() {
         assert_eq!(kinds("task"), vec![TokenKind::Task]);
+    }
+
+    #[test]
+    fn lex_module_keyword() {
+        assert_eq!(
+            kinds("module.dir"),
+            vec![
+                TokenKind::Module,
+                TokenKind::Dot,
+                TokenKind::Ident("dir".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_procman_keyword() {
+        assert_eq!(
+            kinds("procman.dir"),
+            vec![
+                TokenKind::Procman,
+                TokenKind::Dot,
+                TokenKind::Ident("dir".into()),
+            ]
+        );
     }
 }

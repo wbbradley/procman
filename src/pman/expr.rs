@@ -81,6 +81,47 @@ impl<'a> ExprParser<'a> {
         Ok(tok)
     }
 
+    /// Expect an identifier after `keyword.` and validate it's one of the allowed fields.
+    /// Returns the span of the field identifier.
+    fn expect_keyword_field(&mut self, keyword: &str, allowed: &[&str]) -> Result<Span> {
+        if self.at_end() {
+            bail!(
+                "{}",
+                self.span().fmt_error(
+                    self.path,
+                    &format!("expected identifier after '{keyword}.'")
+                )
+            );
+        }
+        match self.peek().unwrap().clone() {
+            TokenKind::Ident(field) => {
+                let span = self.advance().span;
+                if !allowed.contains(&field.as_str()) {
+                    bail!(
+                        "{}",
+                        span.fmt_error(
+                            self.path,
+                            &format!(
+                                "unknown {keyword} field '{field}'; expected one of: {}",
+                                allowed.join(", ")
+                            )
+                        )
+                    );
+                }
+                Ok(span)
+            }
+            other => {
+                bail!(
+                    "{}",
+                    self.span().fmt_error(
+                        self.path,
+                        &format!("expected identifier after '{keyword}.', got {:?}", other)
+                    )
+                );
+            }
+        }
+    }
+
     // Precedence level 1: ||
     fn parse_or(&mut self) -> Result<Expr> {
         let mut left = self.parse_and()?;
@@ -172,6 +213,26 @@ impl<'a> ExprParser<'a> {
             TokenKind::None => {
                 let span = self.advance().span;
                 Ok(Expr::NoneLit(span))
+            }
+            // module.dir → ArgsRef("__module_dir__")
+            TokenKind::Module => {
+                let start_span = self.advance().span;
+                self.expect(&TokenKind::Dot)?;
+                let end_span = self.expect_keyword_field("module", &["dir"])?;
+                Ok(Expr::ArgsRef(
+                    "__module_dir__".to_string(),
+                    merge_spans(start_span, end_span),
+                ))
+            }
+            // procman.dir → ArgsRef("__procman_dir__")
+            TokenKind::Procman => {
+                let start_span = self.advance().span;
+                self.expect(&TokenKind::Dot)?;
+                let end_span = self.expect_keyword_field("procman", &["dir"])?;
+                Ok(Expr::ArgsRef(
+                    "__procman_dir__".to_string(),
+                    merge_spans(start_span, end_span),
+                ))
             }
             // args.name
             TokenKind::Args => {
@@ -280,34 +341,46 @@ impl<'a> ExprParser<'a> {
                 self.expect(&TokenKind::RParen)?;
                 Ok(inner)
             }
-            // local variable or namespaced args ref (ns::args.name)
+            // local variable, ns::args.name, or ns::module.dir
             TokenKind::Ident(name) => {
                 let start_span = self.advance().span;
-                if self.peek() == Some(&TokenKind::ColonColon)
-                    && self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::Args)
-                {
-                    self.advance(); // ::
-                    self.advance(); // args
-                    self.expect(&TokenKind::Dot)?;
-                    match self.peek().cloned() {
-                        Some(TokenKind::Ident(arg_name)) => {
-                            let end_span = self.advance().span;
-                            return Ok(Expr::NamespacedArgsRef(
-                                name,
-                                arg_name,
-                                merge_spans(start_span, end_span),
-                            ));
-                        }
-                        other => bail!(
-                            "{}",
-                            self.span().fmt_error(
-                                self.path,
-                                &format!(
-                                    "expected identifier after '{}::args.', got {:?}",
-                                    name, other
+                if self.peek() == Some(&TokenKind::ColonColon) {
+                    let next_kind = self.tokens.get(self.pos + 1).map(|t| &t.kind);
+                    if next_kind == Some(&TokenKind::Args) {
+                        self.advance(); // ::
+                        self.advance(); // args
+                        self.expect(&TokenKind::Dot)?;
+                        match self.peek().cloned() {
+                            Some(TokenKind::Ident(arg_name)) => {
+                                let end_span = self.advance().span;
+                                return Ok(Expr::NamespacedArgsRef(
+                                    name,
+                                    arg_name,
+                                    merge_spans(start_span, end_span),
+                                ));
+                            }
+                            other => bail!(
+                                "{}",
+                                self.span().fmt_error(
+                                    self.path,
+                                    &format!(
+                                        "expected identifier after '{}::args.', got {:?}",
+                                        name, other
+                                    )
                                 )
-                            )
-                        ),
+                            ),
+                        }
+                    } else if next_kind == Some(&TokenKind::Module) {
+                        // ns::module.dir → NamespacedArgsRef(ns, "__module_dir__")
+                        self.advance(); // ::
+                        self.advance(); // module
+                        self.expect(&TokenKind::Dot)?;
+                        let end_span = self.expect_keyword_field("module", &["dir"])?;
+                        return Ok(Expr::NamespacedArgsRef(
+                            name,
+                            "__module_dir__".to_string(),
+                            merge_spans(start_span, end_span),
+                        ));
                     }
                 }
                 Ok(Expr::LocalVar(name, start_span))
@@ -492,6 +565,46 @@ mod tests {
         let expr = parse("my_cache::args.port");
         assert!(
             matches!(expr, Expr::NamespacedArgsRef(ref ns, ref name, _) if ns == "my_cache" && name == "port")
+        );
+    }
+
+    #[test]
+    fn module_dir_ref() {
+        let expr = parse("module.dir");
+        assert!(matches!(expr, Expr::ArgsRef(ref name, _) if name == "__module_dir__"));
+    }
+
+    #[test]
+    fn procman_dir_ref() {
+        let expr = parse("procman.dir");
+        assert!(matches!(expr, Expr::ArgsRef(ref name, _) if name == "__procman_dir__"));
+    }
+
+    #[test]
+    fn namespaced_module_dir_ref() {
+        let expr = parse("db::module.dir");
+        assert!(
+            matches!(expr, Expr::NamespacedArgsRef(ref ns, ref name, _) if ns == "db" && name == "__module_dir__")
+        );
+    }
+
+    #[test]
+    fn module_unknown_field_rejected() {
+        let tokens = lex("module.foo", 1, 1, "test.pman").unwrap();
+        let err = parse_expr(&tokens, "test.pman").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown module field"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn procman_unknown_field_rejected() {
+        let tokens = lex("procman.foo", 1, 1, "test.pman").unwrap();
+        let err = parse_expr(&tokens, "test.pman").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown procman field"),
+            "got: {err}"
         );
     }
 }

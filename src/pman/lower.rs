@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    path::Path,
     time::Duration,
 };
 
@@ -13,6 +14,14 @@ use crate::{
         validate,
     },
 };
+
+fn parent_dir_of(path: &str) -> String {
+    Path::new(path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| ".".to_string())
+}
 
 fn qualify_name(prefix: Option<&str>, namespace: Option<&str>, name: &str) -> String {
     match (prefix, namespace) {
@@ -43,7 +52,10 @@ fn collect_modules_and_resolve_args<'a>(
     per_module_args: &mut HashMap<String, HashMap<String, String>>,
     all_modules: &mut Vec<(String, &'a crate::pman::loader::LoadedModule)>,
 ) -> Result<()> {
-    let resolved = resolve_module_args(module, parent_arg_values, parent_path)?;
+    let mut resolved = resolve_module_args(module, parent_arg_values, parent_path)?;
+
+    // Inject __module_dir__: directory of this module's .pman file.
+    resolved.insert("__module_dir__".to_string(), parent_dir_of(&module.path));
 
     // Recurse into sub-imports, using this module's resolved args as parent context.
     for (sub_alias, sub_module) in &module.imports {
@@ -105,12 +117,20 @@ pub fn lower_modules(
 
     // Build extended root args (includes namespaced entries for direct imports only).
     let mut root_args = arg_values.clone();
+    let root_dir = parent_dir_of(&modules.root_path);
+    root_args.insert("__procman_dir__".to_string(), root_dir.clone());
+    root_args.insert("__module_dir__".to_string(), root_dir.clone());
     for alias in modules.imports.keys() {
         if let Some(mod_args) = per_module_args.get(alias.as_str()) {
             for (name, value) in mod_args {
                 root_args.insert(format!("{alias}::{name}"), value.clone());
             }
         }
+    }
+
+    // Inject __procman_dir__ into every imported module's arg map.
+    for args in per_module_args.values_mut() {
+        args.insert("__procman_dir__".to_string(), root_dir.clone());
     }
 
     let log_dir = modules
@@ -2214,5 +2234,110 @@ event recovery {
         assert!(!configs[0].autostart);
         assert!(configs[0].once);
         assert!(configs[0].is_task);
+    }
+
+    #[test]
+    fn lower_module_dir_in_root() {
+        let (configs, _) = lower_str(
+            r#"
+            job web {
+                env DIR = module.dir
+                run "serve"
+            }
+            "#,
+        );
+        // test.pman → parent is "."
+        assert_eq!(configs[0].env.get("DIR").unwrap(), ".");
+    }
+
+    #[test]
+    fn lower_procman_dir_in_root() {
+        let (configs, _) = lower_str(
+            r#"
+            job web {
+                env DIR = procman.dir
+                run "serve"
+            }
+            "#,
+        );
+        assert_eq!(configs[0].env.get("DIR").unwrap(), ".");
+    }
+
+    #[test]
+    fn lower_module_dir_in_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub_dir = dir.path().join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        std::fs::write(
+            sub_dir.join("lib.pman"),
+            r#"
+            job setup {
+                env MY_DIR = module.dir
+                env ROOT_DIR = procman.dir
+                run "echo dirs"
+            }
+            "#,
+        )
+        .unwrap();
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "sub/lib.pman" as lib
+            job web { run "serve" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+
+        let lib_setup = configs.iter().find(|c| c.name == "lib::setup").unwrap();
+        let my_dir = lib_setup.env.get("MY_DIR").unwrap();
+        let root_dir = lib_setup.env.get("ROOT_DIR").unwrap();
+
+        // module.dir should point to the sub directory
+        assert!(
+            my_dir.ends_with("/sub"),
+            "expected module.dir to end with /sub, got: {my_dir}"
+        );
+        // procman.dir should point to the root directory
+        assert_eq!(
+            root_dir,
+            dir.path().to_str().unwrap(),
+            "expected procman.dir to be root dir"
+        );
+    }
+
+    #[test]
+    fn lower_namespaced_module_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub_dir = dir.path().join("sub");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        std::fs::write(sub_dir.join("lib.pman"), r#"job setup { run "echo ok" }"#).unwrap();
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "sub/lib.pman" as lib
+            job web {
+                env LIB_DIR = lib::module.dir
+                run "serve"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+
+        let web = configs.iter().find(|c| c.name == "web").unwrap();
+        let lib_dir = web.env.get("LIB_DIR").unwrap();
+        assert!(
+            lib_dir.ends_with("/sub"),
+            "expected lib::module.dir to end with /sub, got: {lib_dir}"
+        );
     }
 }

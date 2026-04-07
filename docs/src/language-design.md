@@ -118,6 +118,25 @@ service api {
 
 This works in any expression position: `env` values, `if` conditions, etc.
 
+### Built-in Directory References
+
+Two built-in keyword namespaces provide access to file system paths:
+
+- **`module.dir`** — directory of the current `.pman` file. In the root file, this is the root file's directory. In an imported module, it is the imported file's directory.
+- **`procman.dir`** — directory of the root `.pman` file (the one invoked by the CLI). Always the same value in every module.
+- **`ns::module.dir`** — directory of the imported module aliased as `ns`.
+
+```
+# In an imported module (db/migrations.pman):
+job migrate {
+  env MIGRATION_DIR = module.dir     # directory of this file
+  env ROOT_DIR = procman.dir         # root project directory
+  run "$MIGRATION_DIR/run.sh"
+}
+```
+
+In the root file, `module.dir == procman.dir`. Only `module.dir` supports the namespaced form (`ns::module.dir`); `procman.dir` always refers to the root.
+
 #### CLI Overrides
 
 Unbound imported args (no binding and no default) are exposed as required CLI flags in the form `--alias::arg-name`. Args with bindings or defaults can still be overridden from the CLI:
@@ -579,6 +598,9 @@ Expressions appear in `if` conditions, `env` value positions, and `var` bindings
 | `args.name` | CLI arg value |
 | `@job.KEY` | Output from a job's `PROCMAN_OUTPUT` |
 | `local_var` | Job-scoped variable (from `for` or `var` binding) |
+| `module.dir` | Directory of the current `.pman` file |
+| `ns::module.dir` | Directory of the imported module's `.pman` file |
+| `procman.dir` | Directory of the root `.pman` file |
 
 ### Literals
 
