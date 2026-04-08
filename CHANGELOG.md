@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.23.1] - 2026-04-07
+
+### Added
+- `+` operator for string concatenation in `.pman` expressions (e.g., `procman.dir + "/subdir"`).
+- Arg defaults can now reference `procman.dir`, `module.dir`, and other args via `args.name`.
+- Inter-arg default references are resolved in dependency order with cycle detection; cyclical references produce a parse-time error.
+
+### Fixed
+- Arg defaults in imported modules are now evaluated with `procman.dir`/`module.dir` already injected, so directory references work correctly in default expressions.
+
 ## [0.23.0] - 2026-04-07
 
 ### Breaking Changes
