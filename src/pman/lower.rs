@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::Path,
     time::Duration,
 };
@@ -15,12 +15,17 @@ use crate::{
     },
 };
 
-fn parent_dir_of(path: &str) -> String {
-    Path::new(path)
+pub type ModuleArgsReport = Vec<(String, BTreeMap<String, String>)>;
+
+pub fn parent_dir_of(path: &str) -> String {
+    let parent = Path::new(path)
         .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| ".".to_string())
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::canonicalize(parent)
+        .unwrap_or_else(|_| parent.to_path_buf())
+        .to_string_lossy()
+        .to_string()
 }
 
 fn qualify_name(prefix: Option<&str>, namespace: Option<&str>, name: &str) -> String {
@@ -49,13 +54,11 @@ fn collect_modules_and_resolve_args<'a>(
     prefix: &str,
     parent_arg_values: &HashMap<String, String>,
     parent_path: &str,
+    procman_dir: &str,
     per_module_args: &mut HashMap<String, HashMap<String, String>>,
     all_modules: &mut Vec<(String, &'a crate::pman::loader::LoadedModule)>,
 ) -> Result<()> {
-    let mut resolved = resolve_module_args(module, parent_arg_values, parent_path)?;
-
-    // Inject __module_dir__: directory of this module's .pman file.
-    resolved.insert("__module_dir__".to_string(), parent_dir_of(&module.path));
+    let resolved = resolve_module_args(module, parent_arg_values, parent_path, procman_dir)?;
 
     // Recurse into sub-imports, using this module's resolved args as parent context.
     for (sub_alias, sub_module) in &module.imports {
@@ -65,6 +68,7 @@ fn collect_modules_and_resolve_args<'a>(
             &sub_prefix,
             &resolved,
             &module.path,
+            procman_dir,
             per_module_args,
             all_modules,
         )?;
@@ -92,7 +96,7 @@ pub fn lower_modules(
     modules: &LoadedModules,
     extra_env: &HashMap<String, String>,
     arg_values: &HashMap<String, String>,
-) -> Result<(Vec<ProcessConfig>, Option<String>)> {
+) -> Result<(Vec<ProcessConfig>, Option<String>, ModuleArgsReport)> {
     // Validate root and all imported files recursively.
     validate::validate(&modules.root, &modules.root_path)?;
     for module in modules.imports.values() {
@@ -102,6 +106,7 @@ pub fn lower_modules(
     validate::validate_cross_refs(modules)?;
 
     // Flatten all imports recursively, resolving args at each level.
+    let root_dir = parent_dir_of(&modules.root_path);
     let mut per_module_args: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut all_modules: Vec<(String, &crate::pman::loader::LoadedModule)> = Vec::new();
     for (alias, module) in &modules.imports {
@@ -110,6 +115,7 @@ pub fn lower_modules(
             alias,
             arg_values,
             &modules.root_path,
+            &root_dir,
             &mut per_module_args,
             &mut all_modules,
         )?;
@@ -117,7 +123,6 @@ pub fn lower_modules(
 
     // Build extended root args (includes namespaced entries for direct imports only).
     let mut root_args = arg_values.clone();
-    let root_dir = parent_dir_of(&modules.root_path);
     root_args.insert("__procman_dir__".to_string(), root_dir.clone());
     root_args.insert("__module_dir__".to_string(), root_dir.clone());
     for alias in modules.imports.keys() {
@@ -188,7 +193,25 @@ pub fn lower_modules(
         )?;
     }
 
-    Ok((configs, log_dir))
+    // Build sorted module args report (excluding namespaced forwarding entries).
+    let mut module_args_report: Vec<(String, BTreeMap<String, String>)> = Vec::new();
+    let root_report: BTreeMap<String, String> = root_args
+        .iter()
+        .filter(|(k, _)| !k.contains("::"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    module_args_report.push(("(root)".to_string(), root_report));
+    for (prefix, args) in &per_module_args {
+        let report: BTreeMap<String, String> = args
+            .iter()
+            .filter(|(k, _)| !k.contains("::"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        module_args_report.push((prefix.clone(), report));
+    }
+    module_args_report.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    Ok((configs, log_dir, module_args_report))
 }
 
 fn collect_skipped_jobs(
@@ -222,23 +245,96 @@ fn collect_skipped_jobs(
     Ok(())
 }
 
+fn collect_arg_deps(expr: &Expr, deps: &mut HashSet<String>) {
+    match expr {
+        Expr::ArgsRef(name, _) => {
+            if !name.starts_with("__") {
+                deps.insert(name.clone());
+            }
+        }
+        Expr::BinOp(lhs, _, rhs, _) => {
+            collect_arg_deps(lhs, deps);
+            collect_arg_deps(rhs, deps);
+        }
+        Expr::UnaryNot(inner, _) => collect_arg_deps(inner, deps),
+        _ => {}
+    }
+}
+
+pub fn topo_sort_args(args: &[ast::ArgDef]) -> Result<Vec<usize>> {
+    let name_to_idx: HashMap<&str, usize> = args
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (a.name.as_str(), i))
+        .collect();
+
+    let deps: Vec<HashSet<usize>> = args
+        .iter()
+        .map(|arg| {
+            arg.default
+                .as_ref()
+                .map(|expr| {
+                    let mut names = HashSet::new();
+                    collect_arg_deps(expr, &mut names);
+                    names
+                        .iter()
+                        .filter_map(|name| name_to_idx.get(name.as_str()).copied())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+
+    let mut order = Vec::with_capacity(args.len());
+    let mut state = vec![0u8; args.len()]; // 0=unvisited, 1=visiting, 2=done
+
+    fn dfs(
+        idx: usize,
+        deps: &[HashSet<usize>],
+        state: &mut [u8],
+        order: &mut Vec<usize>,
+        args: &[ast::ArgDef],
+    ) -> Result<()> {
+        if state[idx] == 2 {
+            return Ok(());
+        }
+        if state[idx] == 1 {
+            bail!("cyclical arg defaults involving '{}'", args[idx].name);
+        }
+        state[idx] = 1;
+        for &dep in &deps[idx] {
+            dfs(dep, deps, state, order, args)?;
+        }
+        state[idx] = 2;
+        order.push(idx);
+        Ok(())
+    }
+
+    for i in 0..args.len() {
+        dfs(i, &deps, &mut state, &mut order, args)?;
+    }
+    Ok(order)
+}
+
 fn resolve_module_args(
     module: &crate::pman::loader::LoadedModule,
     root_arg_values: &HashMap<String, String>,
     root_path: &str,
+    procman_dir: &str,
 ) -> Result<HashMap<String, String>> {
     let mut resolved = HashMap::new();
 
-    // Apply defaults from module's arg definitions.
-    for arg_def in &module.file.args {
+    // Inject dir vars so defaults can reference them.
+    resolved.insert("__module_dir__".to_string(), parent_dir_of(&module.path));
+    resolved.insert("__procman_dir__".to_string(), procman_dir.to_string());
+
+    // Apply defaults in topological order so inter-arg refs work.
+    let sorted = topo_sort_args(&module.file.args)?;
+    for idx in sorted {
+        let arg_def = &module.file.args[idx];
         if let Some(ref default_expr) = arg_def.default {
-            let value = eval_expr_to_string(
-                default_expr,
-                &HashMap::new(),
-                &HashMap::new(),
-                None,
-                &module.path,
-            )?;
+            let value =
+                eval_expr_to_string(default_expr, &resolved, &HashMap::new(), None, &module.path)?;
             resolved.insert(arg_def.name.clone(), value);
         }
     }
@@ -393,14 +489,19 @@ pub fn lower(
         root_path: path.to_string(),
         imports: HashMap::new(),
     };
-    lower_modules(&modules, extra_env, arg_values)
+    let (configs, log_dir, _) = lower_modules(&modules, extra_env, arg_values)?;
+    Ok((configs, log_dir))
 }
 
-pub fn lower_arg_def_ref(arg: &ast::ArgDef, namespace: Option<&str>) -> Result<ArgDef> {
+pub fn lower_arg_def_ref(
+    arg: &ast::ArgDef,
+    namespace: Option<&str>,
+    dir_context: &HashMap<String, String>,
+) -> Result<ArgDef> {
     let default = match &arg.default {
         Some(expr) => Some(eval_expr_to_string(
             expr,
-            &HashMap::new(),
+            dir_context,
             &HashMap::new(),
             None,
             "",
@@ -483,6 +584,11 @@ fn eval_expr_to_string(
                 span.fmt_error(path, &format!("undefined local variable: {name}"))
             ),
         },
+        Expr::BinOp(lhs, BinOp::Concat, rhs, _) => {
+            let l = eval_expr_to_string(lhs, arg_values, local_vars, prefix, path)?;
+            let r = eval_expr_to_string(rhs, arg_values, local_vars, prefix, path)?;
+            Ok(l + &r)
+        }
         Expr::BinOp(_, _, _, span) => bail!(
             "{}",
             span.fmt_error(path, "binary expression not valid in env context")
@@ -512,12 +618,22 @@ fn eval_condition_expr(
             Ok(v != "false" && v != "0" && !v.is_empty())
         }
         Expr::UnaryNot(inner, _) => Ok(!eval_condition_expr(inner, arg_values, path)?),
-        Expr::BinOp(lhs, op, rhs, _) => {
+        Expr::BinOp(lhs, op, rhs, span) => {
             match op {
                 BinOp::And => Ok(eval_condition_expr(lhs, arg_values, path)?
                     && eval_condition_expr(rhs, arg_values, path)?),
                 BinOp::Or => Ok(eval_condition_expr(lhs, arg_values, path)?
                     || eval_condition_expr(rhs, arg_values, path)?),
+                BinOp::Concat => {
+                    let s = eval_expr_to_string(
+                        &Expr::BinOp(lhs.clone(), BinOp::Concat, rhs.clone(), *span),
+                        arg_values,
+                        &HashMap::new(),
+                        None,
+                        path,
+                    )?;
+                    Ok(!s.is_empty())
+                }
                 _ => {
                     // Comparison operators: evaluate both sides as strings and compare.
                     let l = eval_expr_to_string(lhs, arg_values, &HashMap::new(), None, path)?;
@@ -529,7 +645,7 @@ fn eval_condition_expr(
                         BinOp::Gt => l > r,
                         BinOp::Le => l <= r,
                         BinOp::Ge => l >= r,
-                        BinOp::And | BinOp::Or => unreachable!(),
+                        BinOp::And | BinOp::Or | BinOp::Concat => unreachable!(),
                     })
                 }
             }
@@ -1555,7 +1671,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
         let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"web"), "names: {names:?}");
         assert!(names.contains(&"db::migrate"), "names: {names:?}");
@@ -1582,7 +1698,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
         let api = configs.iter().find(|c| c.name == "api").unwrap();
         assert_eq!(api.depends.len(), 1);
         match &api.depends[0] {
@@ -1615,7 +1731,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
         let api = configs.iter().find(|c| c.name == "api").unwrap();
         assert_eq!(
             api.env.get("DB_URL").unwrap(),
@@ -1649,7 +1765,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
         let web = configs.iter().find(|c| c.name == "web").unwrap();
         let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
         // Root job has ROOT_VAR but not MODULE_VAR.
@@ -1690,7 +1806,7 @@ event recovery {
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
         let args = HashMap::from([("enabled".to_string(), "false".to_string())]);
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &args).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &args).unwrap();
         let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
         // migrate is skipped; api still exists but without the after dep.
         assert!(!names.contains(&"db::migrate"));
@@ -1728,7 +1844,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
         let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
         assert_eq!(migrate.env.get("DB").unwrap(), "pg://localhost");
     }
@@ -1763,7 +1879,7 @@ event recovery {
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
         let args = HashMap::from([("db_url".to_string(), "pg://mydb".to_string())]);
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &args).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &args).unwrap();
         let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
         assert_eq!(migrate.env.get("DB").unwrap(), "pg://mydb");
     }
@@ -1796,7 +1912,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
         let api = configs.iter().find(|c| c.name == "api").unwrap();
         assert_eq!(api.env.get("DB").unwrap(), "pg://x");
     }
@@ -1826,7 +1942,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
         let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
         assert!(
             !names.contains(&"api"),
@@ -1895,7 +2011,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
         let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
         assert_eq!(migrate.env.get("DB").unwrap(), "new");
     }
@@ -1930,7 +2046,7 @@ event recovery {
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
         let mut arg_values = HashMap::new();
         arg_values.insert("db::url".to_string(), "postgres://cli".to_string());
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &arg_values).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &arg_values).unwrap();
         let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
         assert_eq!(migrate.env.get("DB").unwrap(), "postgres://cli");
     }
@@ -1977,7 +2093,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
         let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
         let redis = configs.iter().find(|c| c.name == "cache::redis").unwrap();
         // Each module gets its own arg, no cross-contamination.
@@ -2016,7 +2132,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
         let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
         assert_eq!(migrate.env.get("DB").unwrap(), "pg://localhost");
         assert_eq!(migrate.env.get("POOL").unwrap(), "10");
@@ -2050,7 +2166,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
         let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
         assert_eq!(migrate.env.get("DB").unwrap(), "pg://default");
     }
@@ -2085,7 +2201,7 @@ event recovery {
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
         let mut arg_values = HashMap::new();
         arg_values.insert("db::url".to_string(), "from-cli".to_string());
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &arg_values).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &arg_values).unwrap();
         let migrate = configs.iter().find(|c| c.name == "db::migrate").unwrap();
         assert_eq!(migrate.env.get("DB").unwrap(), "from-cli");
     }
@@ -2124,7 +2240,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
         let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
         // Verify compound-prefixed runtime names.
         assert!(names.contains(&"lib::inner::setup"), "names: {names:?}");
@@ -2179,7 +2295,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
         let setup = configs
             .iter()
             .find(|c| c.name == "lib::inner::setup")
@@ -2246,8 +2362,11 @@ event recovery {
             }
             "#,
         );
-        // test.pman → parent is "."
-        assert_eq!(configs[0].env.get("DIR").unwrap(), ".");
+        let expected = std::fs::canonicalize(".").unwrap();
+        assert_eq!(
+            configs[0].env.get("DIR").unwrap(),
+            expected.to_str().unwrap()
+        );
     }
 
     #[test]
@@ -2260,7 +2379,11 @@ event recovery {
             }
             "#,
         );
-        assert_eq!(configs[0].env.get("DIR").unwrap(), ".");
+        let expected = std::fs::canonicalize(".").unwrap();
+        assert_eq!(
+            configs[0].env.get("DIR").unwrap(),
+            expected.to_str().unwrap()
+        );
     }
 
     #[test]
@@ -2291,7 +2414,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
 
         let lib_setup = configs.iter().find(|c| c.name == "lib::setup").unwrap();
         let my_dir = lib_setup.env.get("MY_DIR").unwrap();
@@ -2302,10 +2425,11 @@ event recovery {
             my_dir.ends_with("/sub"),
             "expected module.dir to end with /sub, got: {my_dir}"
         );
-        // procman.dir should point to the root directory
+        // procman.dir should point to the root directory (canonicalized)
+        let expected_root = std::fs::canonicalize(dir.path()).unwrap();
         assert_eq!(
             root_dir,
-            dir.path().to_str().unwrap(),
+            expected_root.to_str().unwrap(),
             "expected procman.dir to be root dir"
         );
     }
@@ -2331,7 +2455,7 @@ event recovery {
 
         let content = std::fs::read_to_string(&root_path).unwrap();
         let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
-        let (configs, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
 
         let web = configs.iter().find(|c| c.name == "web").unwrap();
         let lib_dir = web.env.get("LIB_DIR").unwrap();
@@ -2339,5 +2463,189 @@ event recovery {
             lib_dir.ends_with("/sub"),
             "expected lib::module.dir to end with /sub, got: {lib_dir}"
         );
+    }
+
+    #[test]
+    fn lower_concat_strings() {
+        let (configs, _) = lower_str(
+            r#"
+            job web {
+                env X = "hello" + " world"
+                run "echo"
+            }
+            "#,
+        );
+        assert_eq!(configs[0].env.get("X").unwrap(), "hello world");
+    }
+
+    #[test]
+    fn lower_concat_with_args_ref() {
+        let (configs, _) = lower_with_args(
+            r#"
+            arg base { type = string default = "/opt" }
+            job web {
+                env X = args.base + "/sub"
+                run "echo"
+            }
+            "#,
+            &[("base", "/opt")],
+        );
+        assert_eq!(configs[0].env.get("X").unwrap(), "/opt/sub");
+    }
+
+    /// Simulate the full pipeline: parse root, collect arg defs with defaults,
+    /// fill defaults into arg_values, then lower.
+    fn lower_full_pipeline(root_path: &std::path::Path) -> (Vec<ProcessConfig>, Option<String>) {
+        let content = std::fs::read_to_string(root_path).unwrap();
+        let path_str = root_path.to_str().unwrap();
+        let root = crate::pman::parser::parse(&content, path_str).unwrap();
+        let root_arg_defs = crate::pman::collect_root_arg_defs(&root, path_str).unwrap();
+        let mut arg_values = HashMap::new();
+        for def in &root_arg_defs {
+            if let Some(ref default) = def.default {
+                arg_values.insert(def.name.clone(), default.clone());
+            }
+        }
+        let modules =
+            crate::pman::loader::load_with_root(root, path_str, &arg_values, false).unwrap();
+        let (configs, log_dir, _) = lower_modules(&modules, &HashMap::new(), &arg_values).unwrap();
+        (configs, log_dir)
+    }
+
+    #[test]
+    fn lower_procman_dir_in_arg_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            arg working_dir { type = string default = procman.dir + "/wd" }
+            job web {
+                env WD = args.working_dir
+                run "echo"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let (configs, _) = lower_full_pipeline(&root_path);
+        let wd = configs[0].env.get("WD").unwrap();
+        let canonical_dir = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(wd, &format!("{canonical_dir}/wd"));
+    }
+
+    #[test]
+    fn lower_module_dir_in_arg_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(
+            sub.join("mod.pman"),
+            r#"
+            arg data_dir { type = string default = module.dir + "/data" }
+            job worker {
+                env DATA = args.data_dir
+                run "echo"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            import "sub/mod.pman" as sub
+            job web { run "echo" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &HashMap::new()).unwrap();
+
+        let worker = configs.iter().find(|c| c.name == "sub::worker").unwrap();
+        let data = worker.env.get("DATA").unwrap();
+        let canonical_sub = std::fs::canonicalize(&sub)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(data, &format!("{canonical_sub}/data"));
+    }
+
+    #[test]
+    fn lower_arg_default_references_other_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            arg base { type = string default = "/opt" }
+            arg sub_dir { type = string default = args.base + "/sub" }
+            job web {
+                env X = args.sub_dir
+                run "echo"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let (configs, _) = lower_full_pipeline(&root_path);
+        assert_eq!(configs[0].env.get("X").unwrap(), "/opt/sub");
+    }
+
+    #[test]
+    fn lower_arg_default_cycle_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            arg a { type = string default = args.b }
+            arg b { type = string default = args.a }
+            job web { run "echo" }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let path_str = root_path.to_str().unwrap();
+        let root = crate::pman::parser::parse(&content, path_str).unwrap();
+        let result = crate::pman::collect_root_arg_defs(&root, path_str);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cyclical"),
+            "expected cyclical error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn lower_arg_default_cli_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = dir.path().join("root.pman");
+        std::fs::write(
+            &root_path,
+            r#"
+            arg base { type = string default = procman.dir + "/default" }
+            job web {
+                env X = args.base
+                run "echo"
+            }
+            "#,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&root_path).unwrap();
+        let modules = crate::pman::loader::load(&content, root_path.to_str().unwrap()).unwrap();
+        let mut arg_values = HashMap::new();
+        arg_values.insert("base".to_string(), "/override".to_string());
+        let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &arg_values).unwrap();
+
+        assert_eq!(configs[0].env.get("X").unwrap(), "/override");
     }
 }

@@ -10,6 +10,7 @@ mod validate;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
+pub use lower::ModuleArgsReport;
 
 use crate::config;
 
@@ -21,7 +22,8 @@ pub fn parse(
     arg_values: &HashMap<String, String>,
 ) -> Result<(Vec<crate::config::ProcessConfig>, Option<String>)> {
     let modules = loader::load(input, path)?;
-    lower::lower_modules(&modules, extra_env, arg_values)
+    let (configs, log_dir, _) = lower::lower_modules(&modules, extra_env, arg_values)?;
+    Ok((configs, log_dir))
 }
 
 /// Parse a .pman file without loading imports.
@@ -30,11 +32,24 @@ pub fn parse_root(input: &str, path: &str) -> Result<ast::File> {
 }
 
 /// Collect root-level arg definitions (namespace=None) from a parsed file.
-pub fn collect_root_arg_defs(root: &ast::File) -> Result<Vec<config::ArgDef>> {
-    root.args
-        .iter()
-        .map(|a| lower::lower_arg_def_ref(a, None))
-        .collect()
+pub fn collect_root_arg_defs(root: &ast::File, root_path: &str) -> Result<Vec<config::ArgDef>> {
+    let dir = lower::parent_dir_of(root_path);
+    let mut dir_context = HashMap::new();
+    dir_context.insert("__procman_dir__".to_string(), dir.clone());
+    dir_context.insert("__module_dir__".to_string(), dir);
+
+    // Topo-sort and evaluate defaults incrementally so inter-arg refs work.
+    let sorted = lower::topo_sort_args(&root.args)?;
+    let mut defs = vec![None; root.args.len()];
+    for idx in &sorted {
+        let arg = &root.args[*idx];
+        let def = lower::lower_arg_def_ref(arg, None, &dir_context)?;
+        if let Some(ref val) = def.default {
+            dir_context.insert(arg.name.clone(), val.clone());
+        }
+        defs[*idx] = Some(def);
+    }
+    Ok(defs.into_iter().map(|d| d.unwrap()).collect())
 }
 
 /// Load imports with arg substitution in paths, then collect all arg defs.
@@ -73,18 +88,31 @@ fn build_config_header(modules: &loader::LoadedModules) -> Result<config::Config
         .and_then(|c| c.log_time)
         .unwrap_or(false);
 
+    let root_dir = lower::parent_dir_of(&modules.root_path);
+    let mut root_dir_context = HashMap::new();
+    root_dir_context.insert("__procman_dir__".to_string(), root_dir.clone());
+    root_dir_context.insert("__module_dir__".to_string(), root_dir);
+
     // Root arg defs (namespace=None).
     let mut arg_defs: Vec<config::ArgDef> = modules
         .root
         .args
         .iter()
-        .map(|a| lower::lower_arg_def_ref(a, None))
+        .map(|a| lower::lower_arg_def_ref(a, None, &root_dir_context))
         .collect::<Result<_>>()?;
 
     // Imported module unbound arg defs (namespace=Some(alias)).
     for import_def in &modules.root.imports {
         let alias = &import_def.alias;
         if let Some(module) = modules.imports.get(alias) {
+            let module_dir = lower::parent_dir_of(&module.path);
+            let mut mod_dir_context = HashMap::new();
+            mod_dir_context.insert(
+                "__procman_dir__".to_string(),
+                root_dir_context["__procman_dir__"].clone(),
+            );
+            mod_dir_context.insert("__module_dir__".to_string(), module_dir);
+
             let bound_names: HashSet<&str> = import_def
                 .bindings
                 .iter()
@@ -94,7 +122,11 @@ fn build_config_header(modules: &loader::LoadedModules) -> Result<config::Config
                 let has_binding = bound_names.contains(arg_def.name.as_str());
                 let has_default = arg_def.default.is_some();
                 if !has_binding && !has_default {
-                    arg_defs.push(lower::lower_arg_def_ref(arg_def, Some(alias))?);
+                    arg_defs.push(lower::lower_arg_def_ref(
+                        arg_def,
+                        Some(alias),
+                        &mod_dir_context,
+                    )?);
                 }
             }
         }
@@ -112,6 +144,10 @@ pub fn lower_loaded(
     modules: &loader::LoadedModules,
     extra_env: &HashMap<String, String>,
     arg_values: &HashMap<String, String>,
-) -> Result<(Vec<crate::config::ProcessConfig>, Option<String>)> {
+) -> Result<(
+    Vec<crate::config::ProcessConfig>,
+    Option<String>,
+    ModuleArgsReport,
+)> {
     lower::lower_modules(modules, extra_env, arg_values)
 }

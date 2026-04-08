@@ -149,7 +149,7 @@ impl<'a> ExprParser<'a> {
 
     // Precedence level 3: ==, !=, <, >, <=, >=
     fn parse_comparison(&mut self) -> Result<Expr> {
-        let mut left = self.parse_unary()?;
+        let mut left = self.parse_concat()?;
         loop {
             let op = match self.peek() {
                 Some(TokenKind::Eq) => BinOp::Eq,
@@ -161,14 +161,26 @@ impl<'a> ExprParser<'a> {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_unary()?;
+            let right = self.parse_concat()?;
             let span = merge_spans(expr_span(&left), expr_span(&right));
             left = Expr::BinOp(Box::new(left), op, Box::new(right), span);
         }
         Ok(left)
     }
 
-    // Precedence level 4: ! (prefix unary not)
+    // Precedence level 4: + (string concatenation)
+    fn parse_concat(&mut self) -> Result<Expr> {
+        let mut left = self.parse_unary()?;
+        while self.peek() == Some(&TokenKind::Plus) {
+            self.advance();
+            let right = self.parse_unary()?;
+            let span = merge_spans(expr_span(&left), expr_span(&right));
+            left = Expr::BinOp(Box::new(left), BinOp::Concat, Box::new(right), span);
+        }
+        Ok(left)
+    }
+
+    // Precedence level 5: ! (prefix unary not)
     fn parse_unary(&mut self) -> Result<Expr> {
         if self.peek() == Some(&TokenKind::Not) {
             let start_span = self.advance().span;
@@ -586,6 +598,33 @@ mod tests {
         assert!(
             matches!(expr, Expr::NamespacedArgsRef(ref ns, ref name, _) if ns == "db" && name == "__module_dir__")
         );
+    }
+
+    #[test]
+    fn concat_two_strings() {
+        let expr = parse(r#""a" + "b""#);
+        assert!(matches!(
+            expr,
+            Expr::BinOp(ref lhs, BinOp::Concat, ref rhs, _)
+            if matches!(lhs.as_ref(), Expr::StringLit(s, _) if s == "a")
+            && matches!(rhs.as_ref(), Expr::StringLit(s, _) if s == "b")
+        ));
+    }
+
+    #[test]
+    fn concat_with_ref() {
+        let expr = parse(r#"procman.dir + "/x""#);
+        assert!(matches!(expr, Expr::BinOp(_, BinOp::Concat, _, _)));
+    }
+
+    #[test]
+    fn concat_precedence() {
+        // "a" + "b" == "ab" should parse as comparison of concat result
+        let expr = parse(r#""a" + "b" == "ab""#);
+        assert!(matches!(expr, Expr::BinOp(_, BinOp::Eq, _, _)));
+        if let Expr::BinOp(left, BinOp::Eq, _, _) = &expr {
+            assert!(matches!(left.as_ref(), Expr::BinOp(_, BinOp::Concat, _, _)));
+        }
     }
 
     #[test]

@@ -108,7 +108,7 @@ fn run_supervisor(
     let root = pman::parse_root(&content, &config_path)?;
 
     // Phase 2: Collect root-level arg defs
-    let root_arg_defs = pman::collect_root_arg_defs(&root)?;
+    let root_arg_defs = pman::collect_root_arg_defs(&root, &config_path)?;
 
     // Phase 3: Parse root args, collect remaining (namespaced) args for later
     let (root_arg_values, remaining_args) =
@@ -144,7 +144,7 @@ fn run_supervisor(
     merged_env.extend(extra_env);
 
     // Phase 4: lower with pre-loaded modules
-    let (mut configs, _) = pman::lower_loaded(&modules, &merged_env, &arg_values)?;
+    let (mut configs, _, module_args) = pman::lower_loaded(&modules, &merged_env, &arg_values)?;
 
     // Phase 5: activate triggered tasks
     for task_name in &task_names {
@@ -186,10 +186,16 @@ fn run_supervisor(
         header.log_time,
     )?));
 
-    logger
-        .lock()
-        .unwrap()
-        .log_line("procman", &format!("started with {} job(s)", configs.len()));
+    {
+        let mut lg = logger.lock().unwrap();
+        lg.log_line("procman", &format!("started with {} job(s)", configs.len()));
+        for (module_name, args) in &module_args {
+            lg.log_line("procman", &format!("args for {module_name}:"));
+            for (key, value) in args {
+                lg.log_line("procman", &format!("  {key} = {value}"));
+            }
+        }
+    }
 
     let (tx, rx) = mpsc::channel::<config::SupervisorCommand>();
 

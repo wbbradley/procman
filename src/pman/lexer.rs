@@ -472,6 +472,7 @@ impl<'a> Lexer<'a> {
             b',' => TokenKind::Comma,
             b'.' => TokenKind::Dot,
             b'@' => TokenKind::At,
+            b'+' => TokenKind::Plus,
             _ => bail!(
                 "{}:{}:{}: error: unexpected character '{}'",
                 self.path,
@@ -741,6 +742,18 @@ mod tests {
                 TokenKind::Module,
                 TokenKind::Dot,
                 TokenKind::Ident("dir".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_plus_operator() {
+        assert_eq!(
+            kinds(r#""a" + "b""#),
+            vec![
+                TokenKind::String("a".into()),
+                TokenKind::Plus,
+                TokenKind::String("b".into()),
             ]
         );
     }

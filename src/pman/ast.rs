@@ -249,4 +249,5 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    Concat,
 }

@@ -65,15 +65,16 @@ pub enum TokenKind {
     Args,          // args (keyword for args namespace)
 
     // Operators
-    Eq,  // ==
-    Ne,  // !=
-    Lt,  // <
-    Gt,  // >
-    Le,  // <=
-    Ge,  // >=
-    And, // &&
-    Or,  // ||
-    Not, // !
+    Eq,   // ==
+    Ne,   // !=
+    Lt,   // <
+    Gt,   // >
+    Le,   // <=
+    Ge,   // >=
+    And,  // &&
+    Or,   // ||
+    Not,  // !
+    Plus, // +
 
     // Punctuation
     Assign,     // =

@@ -277,6 +277,8 @@ Underscores become dashes on the CLI (`log_level` -> `--log-level`).
 
 Arg values are referenced in expressions as `args.name`. There is no `env` field on args — use a top-level `env { }` block to explicitly bind args to environment variables.
 
+Arg defaults may reference `procman.dir`, `module.dir`, other args, and use `+` for string concatenation. Defaults referencing other args are evaluated in dependency order; cyclical references are a parse-time error.
+
 ### Env Precedence
 
 Lowest to highest:
@@ -616,11 +618,12 @@ Expressions appear in `if` conditions, `env` value positions, and `var` bindings
 
 | Category | Operators |
 |----------|----------|
+| String | `+` (concatenation) |
 | Comparison | `==`, `!=`, `>`, `<`, `>=`, `<=` |
 | Logical | `&&`, `\|\|`, `!` |
 | Grouping | `( )` |
 
-No arithmetic in v1.
+No arithmetic in v1. `+` is string concatenation only.
 
 ### PROCMAN_OUTPUT Format
 
