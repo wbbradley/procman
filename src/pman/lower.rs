@@ -803,7 +803,7 @@ fn lower_wait_condition(
         (ast::ConditionKind::Http { url }, false) => {
             let code = eval_option_status(&opts.status, path)?;
             Ok(Dependency::HttpHealthCheck {
-                url: eval_string_lit_or_expr(url, arg_values, local_vars)?,
+                url: eval_string_lit_or_expr(url, arg_values, local_vars, path)?,
                 code,
                 poll_interval: poll,
                 timeout,
@@ -811,31 +811,31 @@ fn lower_wait_condition(
             })
         }
         (ast::ConditionKind::Connect { address }, false) => Ok(Dependency::TcpConnect {
-            address: eval_string_lit_or_expr(address, arg_values, local_vars)?,
+            address: eval_string_lit_or_expr(address, arg_values, local_vars, path)?,
             poll_interval: poll,
             timeout,
             retry,
         }),
         (ast::ConditionKind::Connect { address }, true) => Ok(Dependency::TcpNotListening {
-            address: eval_string_lit_or_expr(address, arg_values, local_vars)?,
+            address: eval_string_lit_or_expr(address, arg_values, local_vars, path)?,
             poll_interval: poll,
             timeout,
             retry,
         }),
         (ast::ConditionKind::Exists { path: p }, false) => Ok(Dependency::FileExists {
-            path: eval_string_lit_or_expr(p, arg_values, local_vars)?,
+            path: eval_string_lit_or_expr(p, arg_values, local_vars, path)?,
             poll_interval: poll,
             timeout,
             retry,
         }),
         (ast::ConditionKind::Exists { path: p }, true) => Ok(Dependency::FileNotExists {
-            path: eval_string_lit_or_expr(p, arg_values, local_vars)?,
+            path: eval_string_lit_or_expr(p, arg_values, local_vars, path)?,
             poll_interval: poll,
             timeout,
             retry,
         }),
         (ast::ConditionKind::Running { pattern }, true) => Ok(Dependency::ProcessNotRunning {
-            pattern: eval_string_lit_or_expr(pattern, arg_values, local_vars)?,
+            pattern: eval_string_lit_or_expr(pattern, arg_values, local_vars, path)?,
             poll_interval: poll,
             timeout,
             retry,
@@ -861,7 +861,7 @@ fn lower_wait_condition(
             let json_path = serde_json_path::JsonPath::parse(&key.value)
                 .map_err(|e| anyhow::anyhow!("invalid JSONPath {:?}: {e}", key.value))?;
             Ok(Dependency::FileContainsKey {
-                path: eval_string_lit_or_expr(p, arg_values, local_vars)?,
+                path: eval_string_lit_or_expr(p, arg_values, local_vars, path)?,
                 format: file_format,
                 key: json_path,
                 env: None, // Will be wired up in lower_job_or_event.
@@ -904,10 +904,57 @@ fn lower_wait_condition(
 
 fn eval_string_lit_or_expr(
     lit: &ast::StringLit,
-    _arg_values: &HashMap<String, String>,
+    arg_values: &HashMap<String, String>,
     _local_vars: &HashMap<String, String>,
+    path: &str,
 ) -> Result<String> {
-    Ok(lit.value.clone())
+    let raw = &lit.value;
+    let mut result = String::with_capacity(raw.len());
+    let mut rest = raw.as_str();
+    while let Some(start) = rest.find("${") {
+        result.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after.find('}').ok_or_else(|| {
+            anyhow::anyhow!("{}", lit.span.fmt_error(path, "unterminated ${} reference"))
+        })?;
+        let body = &after[..end];
+        let key = if let Some(name) = body.strip_prefix("args.") {
+            name.to_string()
+        } else if body == "module.dir" {
+            "__module_dir__".to_string()
+        } else if body == "procman.dir" {
+            "__procman_dir__".to_string()
+        } else if let Some((alias, tail)) = body.split_once("::") {
+            if let Some(name) = tail.strip_prefix("args.") {
+                format!("{alias}::{name}")
+            } else if tail == "module.dir" {
+                format!("{alias}::__module_dir__")
+            } else {
+                bail!(
+                    "{}",
+                    lit.span
+                        .fmt_error(path, &format!("unknown reference '${{{body}}}' in string"))
+                );
+            }
+        } else {
+            bail!(
+                "{}",
+                lit.span
+                    .fmt_error(path, &format!("unknown reference '${{{body}}}' in string"))
+            );
+        };
+        let value = arg_values.get(&key).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}",
+                lit.span
+                    .fmt_error(path, &format!("no value for '${{{body}}}' in string"))
+            )
+        })?;
+        result.push_str(value);
+        rest = &after[end + 1..];
+    }
+    result.push_str(rest);
+    Ok(result)
 }
 
 fn lower_watch(
@@ -2647,5 +2694,144 @@ event recovery {
         let (configs, _, _) = lower_modules(&modules, &HashMap::new(), &arg_values).unwrap();
 
         assert_eq!(configs[0].env.get("X").unwrap(), "/override");
+    }
+
+    #[test]
+    fn eval_string_lit_plain_string_unchanged() {
+        let (configs, _) = lower_str(
+            r#"
+            job api {
+                wait { connect "127.0.0.1:5432" }
+                run "start"
+            }
+        "#,
+        );
+        match &configs[0].depends[0] {
+            Dependency::TcpConnect { address, .. } => assert_eq!(address, "127.0.0.1:5432"),
+            other => panic!("expected TcpConnect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_string_lit_args_in_connect() {
+        let (configs, _) = lower_with_args(
+            r#"
+            arg host { type = string default = "localhost" }
+            arg port { type = string default = "5432" }
+            job api {
+                wait { connect "${args.host}:${args.port}" }
+                run "start"
+            }
+        "#,
+            &[("host", "db.example.com"), ("port", "3306")],
+        );
+        match &configs[0].depends[0] {
+            Dependency::TcpConnect { address, .. } => {
+                assert_eq!(address, "db.example.com:3306");
+            }
+            other => panic!("expected TcpConnect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_string_lit_args_in_exists() {
+        let (configs, _) = lower_with_args(
+            r#"
+            arg dir { type = string default = "/tmp" }
+            job api {
+                wait { exists "${args.dir}/config.yaml" }
+                run "start"
+            }
+        "#,
+            &[("dir", "/var/data")],
+        );
+        match &configs[0].depends[0] {
+            Dependency::FileExists { path, .. } => assert_eq!(path, "/var/data/config.yaml"),
+            other => panic!("expected FileExists, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_string_lit_args_in_http() {
+        let (configs, _) = lower_with_args(
+            r#"
+            arg port { type = string default = "8080" }
+            job api {
+                wait { http "http://localhost:${args.port}/health" }
+                run "start"
+            }
+        "#,
+            &[("port", "9090")],
+        );
+        match &configs[0].depends[0] {
+            Dependency::HttpHealthCheck { url, .. } => {
+                assert_eq!(url, "http://localhost:9090/health");
+            }
+            other => panic!("expected HttpHealthCheck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_string_lit_unterminated_ref_errors() {
+        let arg_values = HashMap::from([("port".to_string(), "5432".to_string())]);
+        let input = r#"
+            arg port { type = string default = "8080" }
+            job api {
+                wait { connect "${args.port" }
+                run "start"
+            }
+        "#;
+        let err = lower(input, "test.pman", &HashMap::new(), &arg_values).unwrap_err();
+        assert!(
+            format!("{err}").contains("unterminated"),
+            "expected 'unterminated' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn eval_string_lit_unknown_ref_errors() {
+        let arg_values = HashMap::from([("port".to_string(), "5432".to_string())]);
+        let input = r#"
+            arg port { type = string default = "8080" }
+            job api {
+                wait { connect "${bogus}" }
+                run "start"
+            }
+        "#;
+        let err = lower(input, "test.pman", &HashMap::new(), &arg_values).unwrap_err();
+        assert!(
+            format!("{err}").contains("unknown reference"),
+            "expected 'unknown reference' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn eval_string_lit_module_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let pman_path = dir.path().join("test.pman");
+        let input = r#"
+            job api {
+                wait { exists "${module.dir}/config.yaml" }
+                run "start"
+            }
+        "#;
+        std::fs::write(&pman_path, input).unwrap();
+        let canonical_dir = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let (configs, _) = lower(
+            input,
+            pman_path.to_str().unwrap(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        match &configs[0].depends[0] {
+            Dependency::FileExists { path, .. } => {
+                assert_eq!(path, &format!("{canonical_dir}/config.yaml"));
+            }
+            other => panic!("expected FileExists, got {other:?}"),
+        }
     }
 }

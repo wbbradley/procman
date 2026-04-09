@@ -512,6 +512,22 @@ wait {
 
 Use `timeout = none` to explicitly set an infinite wait.
 
+### String Interpolation in Wait Conditions
+
+String arguments to `connect`, `http`, `exists`, `contains`, and `!running` support `${args.NAME}` interpolation. The built-in variables `${module.dir}` and `${procman.dir}` are also available. For imported modules, use the `${alias::args.NAME}` and `${alias::module.dir}` forms.
+
+```
+arg working_dir { type = string default = "/tmp" }
+service api {
+  wait {
+    exists "${args.working_dir}/config.yaml"
+    connect "${args.host}:${args.port}"
+    http "http://localhost:${args.port}/health"
+  }
+  run "start"
+}
+```
+
 ### `var` Binding
 
 The `contains` condition can extract a value into a job-scoped variable:

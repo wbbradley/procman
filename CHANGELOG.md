@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.23.2] - 2026-04-09
+
+### Added
+- `${args.NAME}` interpolation in wait condition strings (`connect`, `http`, `exists`, `contains`, `!running`). Also supports `${module.dir}`, `${procman.dir}`, and namespaced forms like `${alias::args.NAME}` and `${alias::module.dir}`.
+
 ## [0.23.1] - 2026-04-07
 
 ### Added

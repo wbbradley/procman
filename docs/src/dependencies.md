@@ -211,6 +211,21 @@ wait {
 }
 ```
 
+## String Interpolation
+
+String arguments to wait conditions (`connect`, `http`, `exists`, `contains`,
+`!running`) support `${args.NAME}` interpolation. The built-in `${module.dir}`
+and `${procman.dir}` variables are also available. For imported modules, use
+`${alias::args.NAME}` and `${alias::module.dir}`.
+
+```
+arg working_dir { type = string default = "/tmp" }
+service api {
+  wait { exists "${args.working_dir}/config.yaml" }
+  run "start"
+}
+```
+
 ## `var` Binding
 
 The `contains` condition can extract a value into a job-scoped variable,
