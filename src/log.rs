@@ -23,8 +23,12 @@ impl Logger {
         let log_dir = PathBuf::from(custom_log_dir.unwrap_or("logs/procman"));
         let _ = fs::remove_dir_all(&log_dir);
         fs::create_dir_all(&log_dir).context("creating logs directory")?;
+        let log_dir = fs::canonicalize(&log_dir).context("canonicalizing logs directory")?;
+        eprintln!("procman: logs dir: {}", log_dir.display());
+        let combined_log_path = log_dir.join("procman.log");
+        eprintln!("procman: log file: {}", combined_log_path.display());
         let combined_log =
-            File::create(log_dir.join("procman.log")).context("creating combined log file")?;
+            File::create(&combined_log_path).context("creating combined log file")?;
         Self::with_options(names, log_dir, true, Some(combined_log), log_time)
     }
 
@@ -42,8 +46,11 @@ impl Logger {
             if name == "procman" {
                 continue;
             }
-            let file = File::create(log_dir.join(format!("{name}.log")))
-                .context("creating log file for {name}")?;
+            let log_path = log_dir.join(format!("{name}.log"));
+            if print_to_stdout {
+                eprintln!("procman: log file: {}", log_path.display());
+            }
+            let file = File::create(&log_path).context("creating log file for {name}")?;
             log_files.insert(name.clone(), file);
         }
         Ok(Self {
@@ -71,8 +78,12 @@ impl Logger {
             return Ok(());
         }
         self.max_name_len = self.max_name_len.max(name.len());
-        let file = File::create(self.log_dir.join(format!("{name}.log")))
-            .with_context(|| format!("creating log file for {name}"))?;
+        let log_path = self.log_dir.join(format!("{name}.log"));
+        if self.print_to_stdout {
+            eprintln!("procman: log file: {}", log_path.display());
+        }
+        let file =
+            File::create(&log_path).with_context(|| format!("creating log file for {name}"))?;
         self.log_files.insert(name.to_string(), file);
         Ok(())
     }
