@@ -917,7 +917,7 @@ fn eval_string_lit_or_expr(
         let end = after.find('}').ok_or_else(|| {
             anyhow::anyhow!("{}", lit.span.fmt_error(path, "unterminated ${} reference"))
         })?;
-        let body = &after[..end];
+        let body = after[..end].trim();
         let key = if let Some(name) = body.strip_prefix("args.") {
             name.to_string()
         } else if body == "module.dir" {
@@ -2803,6 +2803,24 @@ event recovery {
             format!("{err}").contains("unknown reference"),
             "expected 'unknown reference' in error, got: {err}"
         );
+    }
+
+    #[test]
+    fn eval_string_lit_args_with_spaces() {
+        let (configs, _) = lower_with_args(
+            r#"
+            arg dir { type = string default = "/tmp" }
+            job api {
+                wait { exists "${ args.dir }/config.yaml" }
+                run "start"
+            }
+        "#,
+            &[("dir", "/var/data")],
+        );
+        match &configs[0].depends[0] {
+            Dependency::FileExists { path, .. } => assert_eq!(path, "/var/data/config.yaml"),
+            other => panic!("expected FileExists, got {other:?}"),
+        }
     }
 
     #[test]
