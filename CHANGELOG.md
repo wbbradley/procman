@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.23.4] - 2026-04-23
+
+### Changed
+- Child-process ANSI escape sequences (colors, cursor moves, OSC 8 hyperlinks, etc.) are now stripped from the combined and per-process log files. Terminal stdout still receives the original colored output.
+
 ## [0.23.3] - 2026-04-23
 
 ### Added

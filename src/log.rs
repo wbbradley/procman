@@ -102,8 +102,16 @@ impl Logger {
             String::new()
         };
         let plain_prefix = format!("{padded}{time_suffix} |");
+        // Keep ANSI on stdout, strip it for anything persisted to disk.
+        let writes_to_disk = self.combined_log.is_some() || self.log_files.contains_key(name);
+        let stripped: Option<String> = if writes_to_disk && line_has_ansi(line) {
+            Some(strip_ansi_escapes::strip_str(line))
+        } else {
+            None
+        };
+        let disk_line: &str = stripped.as_deref().unwrap_or(line);
         if let Some(f) = &mut self.combined_log {
-            let _ = writeln!(f, "{plain_prefix} {line}");
+            let _ = writeln!(f, "{plain_prefix} {disk_line}");
         }
         if self.print_to_stdout {
             if self.colorize {
@@ -114,9 +122,13 @@ impl Logger {
             }
         }
         if let Some(f) = self.log_files.get_mut(name) {
-            let _ = writeln!(f, "{line}");
+            let _ = writeln!(f, "{disk_line}");
         }
     }
+}
+
+fn line_has_ansi(s: &str) -> bool {
+    s.as_bytes().contains(&0x1b)
 }
 
 // Keep prefixes readable on typical dark terminal backgrounds.
@@ -201,5 +213,22 @@ mod tests {
     fn apply_lightness_floor_brightens_black_to_gray() {
         let (r, g, b) = apply_lightness_floor(0, 0, 0, 0.6);
         assert!(lightness(r, g, b) >= 0.6 - 0.01);
+    }
+
+    #[test]
+    fn log_line_strips_ansi_from_disk_file() {
+        let dir =
+            std::env::temp_dir().join(format!("procman_log_strip_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let names = vec!["svc".to_string()];
+        let mut logger = Logger::new_for_test(&names, dir.clone()).unwrap();
+        logger.log_line(
+            "svc",
+            "\x1b[31mred\x1b[0m \x1b]8;;https://x\x07link\x1b]8;;\x07 done",
+        );
+        drop(logger);
+        let contents = std::fs::read_to_string(dir.join("svc.log")).unwrap();
+        assert_eq!(contents, "red link done\n");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
