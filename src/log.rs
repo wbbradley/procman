@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io::Write,
+    io::{IsTerminal, Write},
     path::PathBuf,
     time::Instant,
 };
@@ -14,6 +14,7 @@ pub struct Logger {
     combined_log: Option<File>,
     log_dir: PathBuf,
     print_to_stdout: bool,
+    colorize: bool,
     log_time: bool,
     start_time: Instant,
 }
@@ -53,12 +54,16 @@ impl Logger {
             let file = File::create(&log_path).context("creating log file for {name}")?;
             log_files.insert(name.clone(), file);
         }
+        let colorize = print_to_stdout
+            && std::env::var_os("NO_COLOR").is_none()
+            && std::io::stdout().is_terminal();
         Ok(Self {
             max_name_len,
             log_files,
             combined_log,
             log_dir,
             print_to_stdout,
+            colorize,
             log_time,
             start_time: Instant::now(),
         })
@@ -90,20 +95,111 @@ impl Logger {
 
     pub fn log_line(&mut self, name: &str, line: &str) {
         let padded = format!("{:>width$}", name, width = self.max_name_len);
-        let prefix = if self.log_time {
+        let time_suffix = if self.log_time {
             let elapsed = self.start_time.elapsed().as_secs_f64();
-            format!("{padded} {elapsed:.1}s |")
+            format!(" {elapsed:.1}s")
         } else {
-            format!("{padded} |")
+            String::new()
         };
+        let plain_prefix = format!("{padded}{time_suffix} |");
         if let Some(f) = &mut self.combined_log {
-            let _ = writeln!(f, "{prefix} {line}");
+            let _ = writeln!(f, "{plain_prefix} {line}");
         }
         if self.print_to_stdout {
-            println!("{prefix} {line}");
+            if self.colorize {
+                let (r, g, b) = color_for_name(name);
+                println!("\x1b[38;2;{r};{g};{b}m{padded}\x1b[0m{time_suffix} | {line}");
+            } else {
+                println!("{plain_prefix} {line}");
+            }
         }
         if let Some(f) = self.log_files.get_mut(name) {
             let _ = writeln!(f, "{line}");
         }
+    }
+}
+
+// Keep prefixes readable on typical dark terminal backgrounds.
+const LIGHTNESS_FLOOR: f32 = 0.55;
+
+fn color_for_name(name: &str) -> (u8, u8, u8) {
+    // FNV-1a.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in name.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let r = (hash & 0xff) as u8;
+    let g = ((hash >> 8) & 0xff) as u8;
+    let b = ((hash >> 16) & 0xff) as u8;
+    apply_lightness_floor(r, g, b, LIGHTNESS_FLOOR)
+}
+
+// Tint toward white to raise HSL lightness without changing hue.
+fn apply_lightness_floor(r: u8, g: u8, b: u8, floor: f32) -> (u8, u8, u8) {
+    let rf = r as f32 / 255.0;
+    let gf = g as f32 / 255.0;
+    let bf = b as f32 / 255.0;
+    let max = rf.max(gf).max(bf);
+    let min = rf.min(gf).min(bf);
+    let l = (max + min) / 2.0;
+    if l >= floor {
+        return (r, g, b);
+    }
+    let t = ((floor - l) / (1.0 - l)).clamp(0.0, 1.0);
+    let nr = rf + (1.0 - rf) * t;
+    let ng = gf + (1.0 - gf) * t;
+    let nb = bf + (1.0 - bf) * t;
+    (
+        (nr * 255.0).round() as u8,
+        (ng * 255.0).round() as u8,
+        (nb * 255.0).round() as u8,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lightness(r: u8, g: u8, b: u8) -> f32 {
+        let rf = r as f32 / 255.0;
+        let gf = g as f32 / 255.0;
+        let bf = b as f32 / 255.0;
+        (rf.max(gf).max(bf) + rf.min(gf).min(bf)) / 2.0
+    }
+
+    #[test]
+    fn color_for_name_is_deterministic() {
+        assert_eq!(color_for_name("web"), color_for_name("web"));
+        assert_ne!(color_for_name("web"), color_for_name("db"));
+    }
+
+    #[test]
+    fn color_for_name_meets_lightness_floor() {
+        // Sample a bunch of plausible names, plus edge cases.
+        let names = [
+            "", "a", "procman", "web", "db", "worker", "worker-1", "cache", "api", "frontend",
+            "backend", "redis", "postgres", "consumer", "migrator",
+        ];
+        for name in names {
+            let (r, g, b) = color_for_name(name);
+            let l = lightness(r, g, b);
+            // Allow a tiny epsilon for f32 rounding through u8.
+            assert!(
+                l >= LIGHTNESS_FLOOR - 0.01,
+                "name={name:?} rgb=({r},{g},{b}) lightness={l} < floor={LIGHTNESS_FLOOR}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_lightness_floor_noop_when_already_bright() {
+        assert_eq!(apply_lightness_floor(200, 200, 200, 0.5), (200, 200, 200));
+    }
+
+    #[test]
+    fn apply_lightness_floor_brightens_black_to_gray() {
+        let (r, g, b) = apply_lightness_floor(0, 0, 0, 0.6);
+        assert!(lightness(r, g, b) >= 0.6 - 0.01);
     }
 }

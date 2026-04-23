@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.23.3] - 2026-04-23
+
+### Added
+- Color-coded per-process output prefix on TTY stdout, using a deterministic hash of the process name. Honors `NO_COLOR`; log files remain plain.
+- Startup messages on stderr printing the resolved logs directory and each per-process log file path.
+
+### Changed
+- Logs directory path is canonicalized at startup, so printed and reported log paths are absolute.
+- `${...}` interpolations in `.pman` files (including wait condition strings) now trim whitespace inside the braces, so `${ args.dir }` resolves the same as `${args.dir}`.
+
+### Fixed
+- `${ args.NAME }`, `${ module.dir }`, and similar interpolations with surrounding spaces no longer fail with an unresolved-reference error.
+
 ## [0.23.2] - 2026-04-09
 
 ### Added

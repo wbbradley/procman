@@ -262,7 +262,7 @@ Watch options:
 
 - Each child runs in its own process group; shutdown signals reach all descendants.
 - stderr is merged into stdout per-process.
-- Output is prefixed with the process name, right-aligned and padded.
+- Output is prefixed with the process name, right-aligned and padded. On TTY stdout the prefix is color-coded by a deterministic hash of the name (disabled via `NO_COLOR`); log files stay plain.
 - Per-process logs are written to `<log_dir>/<name>.log` (directory is recreated each run; default `./logs/procman/`).
 - A combined `<log_dir>/procman.log` contains the full interleaved formatted output (same as stdout).
 - On SIGINT or SIGTERM, all children receive SIGTERM. After a 2-second grace period, remaining processes are sent SIGKILL.
