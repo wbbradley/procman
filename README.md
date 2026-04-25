@@ -262,6 +262,7 @@ Watch options:
 ## Behavior
 
 - Each child runs in its own process group; shutdown signals reach all descendants.
+- Child stdin is redirected to `/dev/null` by default (children are in a background pgid, so inheriting the TTY would raise SIGTTIN). Pipe input in via the `run` string itself if needed (e.g. `run "source | program"`).
 - stderr is merged into stdout per-process.
 - Output is prefixed with the process name, right-aligned and padded. On TTY stdout the prefix is color-coded by a deterministic hash of the name (disabled via `NO_COLOR`); log files stay plain.
 - Per-process logs are written to `<log_dir>/<name>.log` (directory is recreated each run; default `./logs/procman/`).
