@@ -244,8 +244,8 @@ Any condition can have a sub-block with options:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `timeout` | `60s` | Duration before giving up |
-| `poll` | `1s` | Duration between checks |
+| `timeout` | `none` | Duration before giving up. `none` means wait indefinitely. |
+| `poll` | `1s` (`100ms` for `after`) | Duration between checks |
 | `retry` | `true` | `false` = fail immediately on first check |
 
 ```
@@ -260,8 +260,8 @@ wait {
 }
 ```
 
-Use `timeout = none` for infinite wait — useful for long-running setup tasks
-where 60 seconds isn't enough.
+Use an explicit `timeout = 30s` (or any duration) when you want a bounded
+wait; the default is unbounded.
 
 ### No-retry mode
 

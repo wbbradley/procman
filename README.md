@@ -81,8 +81,9 @@ procman myapp.pman -e PORT=3000 -e RUST_LOG=debug
 ### `--check` — validate config and exit
 
 Runs the full parse and validation pipeline (arg definitions, template resolution, dependency
-cycle detection, and all static checks) then prints `<path>: ok` and exits 0. No processes are
-started. Useful for editor integration and CI linting.
+cycle detection, and all static checks) and exits 0 on success. No output on success, no
+processes are started. On failure, prints `file:line:col: error: ...` and exits non-zero.
+Useful for editor integration and CI linting.
 
 ```bash
 procman myapp.pman --check

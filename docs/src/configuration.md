@@ -66,11 +66,40 @@ A `.pman` file may contain:
   the per-process and combined log files; ANSI escapes are stripped from
   log files only.
 
+## Output formatting
+
+- **Per-process prefix**: every line on stdout is prefixed with the
+  originating job/service name, right-aligned and padded for visual scan.
+- **Color**: on a TTY, the prefix is colored using a deterministic hash of
+  the process name (so the same name always gets the same color across runs).
+  Set the `NO_COLOR` environment variable (any non-empty value) to disable.
+- **Log files stay plain**: ANSI escape sequences from the child process and
+  the prefix coloring are both stripped from the per-process and combined log
+  files.
+- **Startup messages**: at startup, procman prints to stderr the resolved
+  (canonicalized, absolute) log directory and each per-process log file path,
+  so log locations are unambiguous.
+
 ## Identifiers
 
 Job names, event names, arg names, and variable names are identifiers. Valid
 identifiers match `[a-zA-Z_][a-zA-Z0-9_-]*` — they start with a letter or
 underscore, followed by letters, digits, underscores, or hyphens.
+
+## Reserved Keywords
+
+The following identifiers are reserved by the language and cannot be used as
+job, service, task, event, arg, or `for`/`var` names:
+
+- `module` — used in the `module.dir` built-in.
+- `procman` — used in the `procman.dir` built-in.
+
+Other reserved tokens (`job`, `service`, `task`, `event`, `config`, `env`,
+`arg`, `import`, `as`, `wait`, `watch`, `for`, `if`, `in`, `on_fail`, `run`,
+`true`, `false`, `none`) are also unavailable as identifiers, but `module` and
+`procman` are called out here because they look like ordinary names yet are
+reserved for built-in directory references (see
+[Language Design](language-design.md#built-in-directory-references)).
 
 ## String Literals
 

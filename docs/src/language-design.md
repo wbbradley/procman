@@ -137,6 +137,10 @@ job migrate {
 
 In the root file, `module.dir == procman.dir`. Only `module.dir` supports the namespaced form (`ns::module.dir`); `procman.dir` always refers to the root.
 
+The names `module` and `procman` are reserved keywords (see
+[Configuration › Reserved Keywords](configuration.md#reserved-keywords)) and
+cannot be reused as job, service, task, event, arg, or local-variable names.
+
 #### CLI Overrides
 
 Unbound imported args (no binding and no default) are exposed as required CLI flags in the form `--alias::arg-name`. Args with bindings or defaults can still be overridden from the CLI:

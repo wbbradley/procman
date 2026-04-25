@@ -61,15 +61,16 @@ This shows each defined argument's name, type, description, default value, and s
 
 The `--check` flag runs the full config parse and validation pipeline — arg definitions,
 template resolution, dependency graph cycle detection, output reference validation, watch
-uniqueness, and all other static checks — then prints a success message and exits without
-starting any processes.
+uniqueness, and all other static checks — then exits without starting any processes.
 
 ```sh
 procman myapp.pman --check
 ```
 
-On success, prints `<path>: ok` and exits with code 0. On failure, prints the error and exits
-non-zero. This is useful for:
+On success, exits silently with code 0. On failure, prints the error and exits
+non-zero. Warnings (e.g. parameterized imports skipped because args are
+unbound) are printed in the standard `file:line:col: warning: description`
+format. This is useful for:
 
 - **Editor integration** — run `--check` on save for instant feedback.
 - **CI pipelines** — catch config errors before deployment.

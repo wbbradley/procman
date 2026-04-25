@@ -1,6 +1,7 @@
 # Introduction
 
-> This documentation covers **procman v0.22.0**.
+> See the [changelog](https://github.com/wbbradley/procman/blob/main/CHANGELOG.md)
+> and [crates.io](https://crates.io/crates/procman) for the current release.
 
 **procman** is a Foreman-like process supervisor written in Rust. It reads a
 `.pman` configuration file, spawns all listed commands, and multiplexes
