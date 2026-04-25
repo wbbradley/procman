@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.23.7] - 2026-04-25
 
 ### Fixed
 - Spawned children now have stdin redirected to `/dev/null` by default. Previously procman left child stdin unset, so children inherited procman's controlling TTY; combined with the per-child `setpgid(0, 0)` (which puts each child in a background process group), any child that read from stdin (JVM/JLine, `read` in bash, Python `input()`, etc.) would receive SIGTTIN/EIO and silently stall or exit. Observed with Minecraft Fabric servers exiting between `Starting minecraft server version ...` and `Done (...)!`. The same default now applies to `condition` scripts. Programs that genuinely need piped input can plumb it via the `run` string itself, e.g. `run "source | program"`.
