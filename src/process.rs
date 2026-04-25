@@ -55,7 +55,7 @@ fn build_command(resolved_run: &str, name: &str) -> Result<std::process::Command
         !resolved_run.trim().is_empty(),
         "empty run command for {name}"
     );
-    let mut cmd = std::process::Command::new("sh");
+    let mut cmd = std::process::Command::new("bash");
     cmd.args(["-e", "-u", "-o", "pipefail", "-c", resolved_run]);
     Ok(cmd)
 }
@@ -66,7 +66,7 @@ fn evaluate_condition(
     name: &str,
     logger: &Arc<Mutex<Logger>>,
 ) -> Result<bool> {
-    let mut cmd = std::process::Command::new("sh");
+    let mut cmd = std::process::Command::new("bash");
     cmd.args(["-e", "-u", "-o", "pipefail", "-c", condition]);
     cmd.env_clear();
     cmd.envs(env);
@@ -845,7 +845,7 @@ mod tests {
     #[test]
     fn build_command_single_line() {
         let cmd = build_command("echo hello world", "test").unwrap();
-        assert_eq!(cmd.get_program(), "sh");
+        assert_eq!(cmd.get_program(), "bash");
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(
             args,
@@ -854,9 +854,9 @@ mod tests {
     }
 
     #[test]
-    fn build_command_multiline_uses_sh() {
+    fn build_command_multiline_uses_bash() {
         let cmd = build_command("echo hello\necho world", "test").unwrap();
-        assert_eq!(cmd.get_program(), "sh");
+        assert_eq!(cmd.get_program(), "bash");
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(
             args,
@@ -867,7 +867,7 @@ mod tests {
     #[test]
     fn build_command_trailing_newline_only() {
         let cmd = build_command("echo hello\n", "test").unwrap();
-        assert_eq!(cmd.get_program(), "sh");
+        assert_eq!(cmd.get_program(), "bash");
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, &["-e", "-u", "-o", "pipefail", "-c", "echo hello\n"]);
     }
@@ -1058,7 +1058,7 @@ mod tests {
         assert_eq!(group.children.len(), 2);
 
         // Wait for children and collect exit statuses. If NODE_CONFIG is unbound,
-        // the shell (`sh -e -u`) exits with code 1 ("unbound variable").
+        // the shell (`bash -e -u`) exits with code 1 ("unbound variable").
         let mut all_ok = true;
         for (pid, name, _, _) in &group.children {
             match waitpid(*pid, None) {
@@ -1840,8 +1840,7 @@ mod tests {
 
     /// Verify that ProcessGroup::spawn pre-registers Dependency::OutputMatches
     /// matchers in the registry BEFORE any process starts. Uses `autostart =
-    /// false` upstream so spawn() doesn't actually run sh (avoiding the
-    /// pipefail issue on systems where /bin/sh is dash).
+    /// false` upstream so spawn() doesn't actually run bash.
     #[test]
     fn output_matches_pre_spawn_registration() {
         use crate::output_match::Matcher;

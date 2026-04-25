@@ -168,9 +168,9 @@ block defines a long-running daemon process. Both share the same fields.
 
 ### `run` (required)
 
-The command to execute. All commands are passed to `sh -euo pipefail -c`, so
+The command to execute. All commands are passed to `bash -euo pipefail -c`, so
 shell features like pipes, redirects, `&&`, variable expansion, and multi-line
-scripts all work naturally.
+scripts all work naturally. `bash` must be on `PATH`.
 
 Inline form:
 
