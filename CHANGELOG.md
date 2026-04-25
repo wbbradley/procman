@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.23.8] - 2026-04-25
+
+### Changed
+- Documentation refresh in `docs/src/`: replaced the hardcoded `v0.22.0` banner in the introduction with a link to the changelog and crates.io; corrected the `--check` description in `cli.md` and the README to reflect that it is silent on success (no `<path>: ok` output); added a "Reserved Keywords" subsection to `configuration.md` calling out `module` and `procman` (with a cross-reference from `language-design.md`); added an "Output formatting" subsection to `configuration.md` documenting deterministic-hash prefix coloring on TTY, `NO_COLOR` opt-out, ANSI stripping in log files, and stderr startup messages naming resolved log paths; fixed the shared condition options table in `dependencies.md` so the `timeout` default is shown as `none` (matching source) rather than `60s`.
+
 ## [0.23.7] - 2026-04-25
 
 ### Fixed
