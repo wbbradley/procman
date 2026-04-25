@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.23.6] - 2026-04-25
 
 ### Fixed
 - `run` and `condition` commands are now executed via `bash` instead of `sh`. On systems where `/bin/sh` is `dash` (Debian/Ubuntu), the previous `sh -e -u -o pipefail -c` invocation failed at startup with `sh: 0: Illegal option -o pipefail` because dash does not implement `pipefail`. `bash` must now be on `PATH`; the docs already promised pipefail semantics.
