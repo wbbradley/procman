@@ -70,6 +70,7 @@ fn evaluate_condition(
     cmd.args(["-e", "-u", "-o", "pipefail", "-c", condition]);
     cmd.env_clear();
     cmd.envs(env);
+    cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
     let status = cmd
@@ -114,6 +115,7 @@ impl ProcessGroup {
         let mut child_cmd = build_command(&resolved_run, &cmd.name)?;
         child_cmd.env_clear();
         child_cmd.envs(&resolved_env);
+        child_cmd.stdin(Stdio::null());
         child_cmd.stdout(Stdio::piped());
         child_cmd.stderr(Stdio::piped());
 
@@ -1525,6 +1527,56 @@ mod tests {
         assert!(evaluate_condition("test \"$MY_FLAG\" = yes", &env, "test", &logger).unwrap());
         env.insert("MY_FLAG".to_string(), "no".to_string());
         assert!(!evaluate_condition("test \"$MY_FLAG\" = yes", &env, "test", &logger).unwrap());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn spawned_child_has_stdin_redirected_to_dev_null() {
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut group, logger) = make_test_group();
+
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let probe_path =
+            std::env::temp_dir().join(format!("procman_stdin_probe_{}_{id}", std::process::id()));
+        let _ = std::fs::remove_file(&probe_path);
+
+        let config = ProcessConfig {
+            name: "stdin_probe".to_string(),
+            env: std::env::vars().collect(),
+            run: format!(
+                "readlink /proc/self/fd/0 > {} ; sleep 5",
+                probe_path.display()
+            ),
+            condition: None,
+            depends: vec![],
+            once: false,
+            for_each: None,
+            autostart: true,
+            watches: vec![],
+            is_task: false,
+        };
+        logger.lock().unwrap().add_process("stdin_probe").ok();
+        group.spawn_one(&config, &logger).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let contents = loop {
+            if let Ok(s) = std::fs::read_to_string(&probe_path)
+                && !s.trim().is_empty() {
+                    break s;
+                }
+            assert!(Instant::now() < deadline, "child never wrote probe file");
+            thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(contents.trim(), "/dev/null");
+
+        for (pid, _, _, _) in &group.children {
+            let _ = nix::sys::signal::killpg(*pid, Signal::SIGKILL);
+            let _ = waitpid(*pid, None);
+        }
+        for handle in std::mem::take(&mut group.reader_threads) {
+            let _ = handle.join();
+        }
+        let _ = std::fs::remove_file(&probe_path);
     }
 
     #[test]

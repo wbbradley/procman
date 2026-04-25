@@ -56,6 +56,16 @@ A `.pman` file may contain:
 - **`task name if expr { }`** — a conditionally evaluated task
 - **`event name { }`** — a dormant process, only started via `on_fail spawn`
 
+## Process I/O defaults
+
+- **stdin**: redirected to `/dev/null`. Procman puts every child in its own
+  process group, so an inherited TTY would be a background-pgid read and
+  raise SIGTTIN. If you need to feed input to a process, plumb it through
+  the `run` string itself (e.g. `run "source | program"`).
+- **stdout / stderr**: captured (combined into one stream) and written to
+  the per-process and combined log files; ANSI escapes are stripped from
+  log files only.
+
 ## Identifiers
 
 Job names, event names, arg names, and variable names are identifiers. Valid
