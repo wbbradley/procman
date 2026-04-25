@@ -645,6 +645,75 @@ impl<'a> Parser<'a> {
                     span: merge_spans(start_span, end_span),
                 })
             }
+            Some(TokenKind::OutputMatches) => {
+                if negated {
+                    bail!(
+                        "{}",
+                        self.fmt_error(start_span, "negated 'output_matches' is not supported")
+                    );
+                }
+                self.advance();
+                let (namespace, target, _) = self.parse_at_ref()?;
+                let pattern = self.expect_string_lit()?;
+
+                let mut options = ast::ConditionOptions::default();
+                if self.peek() == Some(&TokenKind::LBrace) {
+                    let block_span = self.span();
+                    self.advance(); // consume LBrace
+                    while !self.eat(&TokenKind::RBrace) {
+                        if self.at_end() {
+                            bail!(
+                                "{}",
+                                self.fmt_error(
+                                    block_span,
+                                    "unterminated output_matches options block"
+                                )
+                            );
+                        }
+                        let (field_name, field_span) = self.expect_ident()?;
+                        self.expect(&TokenKind::Assign)?;
+                        match field_name.as_str() {
+                            "timeout" => options.timeout = Some(self.parse_expr()?),
+                            "poll" => bail!(
+                                "{}",
+                                self.fmt_error(
+                                    field_span,
+                                    "'poll' is not supported on output_matches (matcher is event-driven)"
+                                )
+                            ),
+                            "retry" => bail!(
+                                "{}",
+                                self.fmt_error(
+                                    field_span,
+                                    "'retry' is not supported on output_matches"
+                                )
+                            ),
+                            _ => bail!(
+                                "{}",
+                                self.fmt_error(
+                                    field_span,
+                                    &format!(
+                                        "unknown option '{}' in output_matches block",
+                                        field_name
+                                    )
+                                )
+                            ),
+                        }
+                    }
+                }
+
+                let end_span = self.tokens[self.pos - 1].span;
+                Ok(ast::WaitCondition {
+                    negated,
+                    kind: ast::ConditionKind::OutputMatches {
+                        namespace,
+                        target,
+                        pattern,
+                    },
+                    options,
+                    span: merge_spans(start_span, end_span),
+                })
+            }
             Some(TokenKind::Contains) => {
                 self.advance();
                 let path = self.expect_string_lit()?;
@@ -1696,6 +1765,130 @@ mod tests {
         let err = parse(r#"job procman { run "echo" }"#, "test.pman").unwrap_err();
         assert!(
             err.to_string().contains("expected identifier"),
+            "got: {err}"
+        );
+    }
+
+    // ── output_matches tests ──
+
+    #[test]
+    fn parse_output_matches_basic() {
+        let input = r#"
+            job migrate { run "migrate" }
+            service api {
+                wait { output_matches @migrate "ready" }
+                run "serve"
+            }
+        "#;
+        let file = parse(input, "test.pman").unwrap();
+        let cond = &file.services[0].body.wait.as_ref().unwrap().conditions[0];
+        match &cond.kind {
+            ast::ConditionKind::OutputMatches {
+                namespace,
+                target,
+                pattern,
+            } => {
+                assert!(namespace.is_none());
+                assert_eq!(target, "migrate");
+                assert_eq!(pattern.value, "ready");
+            }
+            other => panic!("expected OutputMatches, got {other:?}"),
+        }
+        assert!(cond.options.timeout.is_none());
+    }
+
+    #[test]
+    fn parse_output_matches_with_timeout() {
+        let input = r#"
+            job runner { run "run" }
+            service api {
+                wait {
+                    output_matches @runner "ready" {
+                        timeout = 30s
+                    }
+                }
+                run "serve"
+            }
+        "#;
+        let file = parse(input, "test.pman").unwrap();
+        let cond = &file.services[0].body.wait.as_ref().unwrap().conditions[0];
+        assert!(matches!(&cond.options.timeout, Some(Expr::DurationLit(n, _)) if *n == 30.0));
+    }
+
+    #[test]
+    fn parse_output_matches_with_namespace() {
+        let input = r#"
+            service api {
+                wait { output_matches @db::migrate "done" }
+                run "serve"
+            }
+        "#;
+        let file = parse(input, "test.pman").unwrap();
+        let cond = &file.services[0].body.wait.as_ref().unwrap().conditions[0];
+        match &cond.kind {
+            ast::ConditionKind::OutputMatches {
+                namespace,
+                target,
+                pattern,
+            } => {
+                assert_eq!(namespace.as_deref(), Some("db"));
+                assert_eq!(target, "migrate");
+                assert_eq!(pattern.value, "done");
+            }
+            other => panic!("expected OutputMatches, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_output_matches_negated_rejected() {
+        let input = r#"
+            service api {
+                wait { !output_matches @runner "ready" }
+                run "serve"
+            }
+        "#;
+        let err = parse(input, "test.pman").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("negated 'output_matches' is not supported"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_output_matches_poll_rejected() {
+        let input = r#"
+            service api {
+                wait {
+                    output_matches @runner "ready" {
+                        poll = 1s
+                    }
+                }
+                run "serve"
+            }
+        "#;
+        let err = parse(input, "test.pman").unwrap_err();
+        assert!(
+            err.to_string().contains("'poll' is not supported"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_output_matches_retry_rejected() {
+        let input = r#"
+            service api {
+                wait {
+                    output_matches @runner "ready" {
+                        retry = false
+                    }
+                }
+                run "serve"
+            }
+        "#;
+        let err = parse(input, "test.pman").unwrap_err();
+        assert!(
+            err.to_string().contains("'retry' is not supported"),
             "got: {err}"
         );
     }

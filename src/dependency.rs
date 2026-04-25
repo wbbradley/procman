@@ -12,8 +12,9 @@ use std::{
 
 use crate::{
     checks::{check, collect_dependency_env, description, poll_interval, retry, timeout},
-    config::{ProcessConfig, SupervisorCommand},
+    config::{Dependency, ProcessConfig, SupervisorCommand},
     log::Logger,
+    output_match::wait_for_output_match,
 };
 
 fn wait_for_dependencies(
@@ -30,6 +31,47 @@ fn wait_for_dependencies(
 
     let total = config.depends.len();
     for (i, dep) in config.depends.iter().enumerate() {
+        // OutputMatches takes a dedicated event-driven path — the matcher was
+        // registered at pre-spawn time and either has already fired (retroactive)
+        // or is waiting on its condvar.
+        if let Dependency::OutputMatches {
+            matcher,
+            timeout: total_timeout,
+            ..
+        } = dep
+        {
+            let desc = description(dep);
+            if wait_for_output_match(matcher, *total_timeout, shutdown, logger, &config.name) {
+                let remaining_count = total - i - 1;
+                if remaining_count == 0 {
+                    logger
+                        .lock()
+                        .unwrap()
+                        .log_line(&config.name, &format!("dependency satisfied: {desc}"));
+                } else {
+                    let remaining: Vec<String> =
+                        config.depends[i + 1..].iter().map(description).collect();
+                    logger.lock().unwrap().log_line(
+                        &config.name,
+                        &format!(
+                            "dependency satisfied: {desc} (remaining: {})",
+                            remaining.join(", ")
+                        ),
+                    );
+                }
+                continue;
+            }
+            // wait_for_output_match logs its own timeout/shutdown reason; if
+            // the failure was upstream-exited-without-match, log that here.
+            if !shutdown.load(Ordering::Relaxed) {
+                logger.lock().unwrap().log_line(
+                    &config.name,
+                    &format!("dependency failed: {desc} (upstream exited, pattern never observed)"),
+                );
+            }
+            return false;
+        }
+
         let start = Instant::now();
         let mut first_failure_logged = false;
 
@@ -657,5 +699,199 @@ mod tests {
         // Should have triggered shutdown
         assert!(shutdown.load(Ordering::Relaxed));
         assert_eq!(pending.load(Ordering::Relaxed), 0);
+    }
+
+    // ── output_matches integration tests ──
+
+    use crate::output_match::{MatchOutcome, Matcher};
+
+    fn make_output_matches_dep(matcher: &Arc<Matcher>, timeout: Option<Duration>) -> Dependency {
+        Dependency::OutputMatches {
+            upstream: "upstream".to_string(),
+            pattern_source: matcher.pattern.clone(),
+            matcher: Arc::clone(matcher),
+            timeout,
+        }
+    }
+
+    #[test]
+    fn output_matches_matched_releases_waiter() {
+        let matcher = Matcher::new("ready".to_string(), "test".to_string());
+        let config = make_config("api", vec![make_output_matches_dep(&matcher, None)]);
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let logger = make_logger(&["api", "upstream"]);
+        let pending = Arc::new(AtomicUsize::new(1));
+
+        let _handle = spawn_waiter(
+            config,
+            tx,
+            Arc::clone(&shutdown),
+            Arc::clone(&logger),
+            Arc::clone(&pending),
+            make_exit_registry(),
+        );
+
+        // Fire matched after a short delay.
+        thread::sleep(Duration::from_millis(50));
+        matcher.fire(MatchOutcome::Matched, &logger, "upstream");
+
+        let received = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        match received {
+            SupervisorCommand::Spawn(c) => assert_eq!(c.name, "api"),
+            _ => panic!("expected Spawn"),
+        }
+    }
+
+    #[test]
+    fn output_matches_retroactive_release() {
+        // Matcher fires BEFORE spawn_waiter even starts. The waiter should
+        // observe the latched state instantly and release immediately.
+        let matcher = Matcher::new("ready".to_string(), "test".to_string());
+        let logger_for_fire = make_logger(&["upstream"]);
+        matcher.fire(MatchOutcome::Matched, &logger_for_fire, "upstream");
+
+        let config = make_config("api", vec![make_output_matches_dep(&matcher, None)]);
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let logger = make_logger(&["api"]);
+        let pending = Arc::new(AtomicUsize::new(1));
+
+        let start = Instant::now();
+        let _handle = spawn_waiter(
+            config,
+            tx,
+            Arc::clone(&shutdown),
+            logger,
+            Arc::clone(&pending),
+            make_exit_registry(),
+        );
+
+        let received = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        match received {
+            SupervisorCommand::Spawn(c) => assert_eq!(c.name, "api"),
+            _ => panic!("expected Spawn"),
+        }
+        // Retroactive — should be near-instant, well under typical poll
+        // intervals.
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "retroactive match should be near-instant, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn output_matches_upstream_exit_triggers_shutdown() {
+        let matcher = Matcher::new("ready".to_string(), "test".to_string());
+        let config = make_config("api", vec![make_output_matches_dep(&matcher, None)]);
+        let (tx, _rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let logger = make_logger(&["api", "upstream"]);
+        let pending = Arc::new(AtomicUsize::new(1));
+
+        let handle = spawn_waiter(
+            config,
+            tx,
+            Arc::clone(&shutdown),
+            Arc::clone(&logger),
+            Arc::clone(&pending),
+            make_exit_registry(),
+        );
+
+        // Fire upstream-exited (pattern never observed).
+        thread::sleep(Duration::from_millis(50));
+        matcher.fire(MatchOutcome::UpstreamExited, &logger, "upstream");
+
+        handle.join().unwrap();
+        assert!(shutdown.load(Ordering::Relaxed));
+        assert_eq!(pending.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn output_matches_timeout_triggers_shutdown() {
+        let matcher = Matcher::new("ready".to_string(), "test".to_string());
+        let config = make_config(
+            "api",
+            vec![make_output_matches_dep(
+                &matcher,
+                Some(Duration::from_millis(150)),
+            )],
+        );
+        let (tx, _rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let logger = make_logger(&["api"]);
+        let pending = Arc::new(AtomicUsize::new(1));
+
+        let start = Instant::now();
+        let handle = spawn_waiter(
+            config,
+            tx,
+            Arc::clone(&shutdown),
+            logger,
+            Arc::clone(&pending),
+            make_exit_registry(),
+        );
+        handle.join().unwrap();
+
+        assert!(shutdown.load(Ordering::Relaxed));
+        // Should bail roughly at the timeout; 600ms gives plenty of slack.
+        assert!(
+            start.elapsed() < Duration::from_millis(600),
+            "should timeout near 150ms, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn output_matches_after_after_in_sequential_wait() {
+        // wait { after @setup  output_matches @runner "ready" }
+        // The output_matches step must only be considered after `after @setup`
+        // is satisfied, but the matcher's `fired` flag latches the moment the
+        // upstream emits the line — even if that's BEFORE the waiter reaches
+        // step 2. So this test fires the matcher first, then satisfies setup,
+        // and expects the waiter to release without further delay.
+        let matcher = Matcher::new("ready".to_string(), "test".to_string());
+        let logger_for_fire = make_logger(&["runner"]);
+        matcher.fire(MatchOutcome::Matched, &logger_for_fire, "runner");
+
+        let config = make_config(
+            "api",
+            vec![
+                Dependency::ProcessExited {
+                    name: "setup".to_string(),
+                    poll_interval: None,
+                    timeout: Some(Duration::from_secs(60)),
+                    retry: true,
+                },
+                make_output_matches_dep(&matcher, None),
+            ],
+        );
+        let (tx, rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let logger = make_logger(&["api"]);
+        let pending = Arc::new(AtomicUsize::new(1));
+        let exit_registry = make_exit_registry();
+
+        let _handle = spawn_waiter(
+            config,
+            tx,
+            Arc::clone(&shutdown),
+            logger,
+            Arc::clone(&pending),
+            Arc::clone(&exit_registry),
+        );
+
+        // While `setup` hasn't exited, no Spawn arrives.
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+
+        // Now satisfy setup — the second condition is already latched.
+        exit_registry.lock().unwrap().insert("setup".to_string(), 0);
+
+        let received = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        match received {
+            SupervisorCommand::Spawn(c) => assert_eq!(c.name, "api"),
+            _ => panic!("expected Spawn"),
+        }
     }
 }

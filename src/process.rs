@@ -25,10 +25,11 @@ use nix::{
 };
 
 use crate::{
-    config::{ForEachConfig, ProcessConfig, SupervisorCommand},
+    config::{Dependency, ForEachConfig, ProcessConfig, SupervisorCommand},
     dependency,
     log::Logger,
     output,
+    output_match::{MatchOutcome, OutputMatchRegistry},
     watch,
 };
 
@@ -46,6 +47,7 @@ pub struct ProcessGroup {
     tx: Option<mpsc::Sender<SupervisorCommand>>,
     shutdown: Arc<AtomicBool>,
     task_names: HashSet<String>,
+    output_matchers: Arc<OutputMatchRegistry>,
 }
 
 fn build_command(resolved_run: &str, name: &str) -> Result<std::process::Command> {
@@ -145,15 +147,41 @@ impl ProcessGroup {
         let stdout = child.stdout.take().unwrap();
         let logger_clone = Arc::clone(logger);
         let name_clone = name.clone();
+        let matchers = self.output_matchers.for_upstream(&name);
         self.reader_threads.push(thread::spawn(move || {
             let reader = std::io::BufReader::new(stdout);
             for line in reader.lines() {
                 match line {
                     Ok(line) => {
-                        let mut log = logger_clone.lock().unwrap();
-                        log.log_line(&name_clone, &line);
+                        if !matchers.is_empty() {
+                            // Strip ANSI before matching so patterns work
+                            // against colorized output. Allocates only while
+                            // any matcher is unfired.
+                            let stripped: Option<String> =
+                                if matchers.iter().any(|m| !m.fired.load(Ordering::Relaxed)) {
+                                    Some(strip_ansi_escapes::strip_str(&line))
+                                } else {
+                                    None
+                                };
+                            if let Some(stripped) = stripped {
+                                for m in &matchers {
+                                    if !m.fired.load(Ordering::Relaxed)
+                                        && stripped.contains(&m.pattern)
+                                    {
+                                        m.fire(MatchOutcome::Matched, &logger_clone, &name_clone);
+                                    }
+                                }
+                            }
+                        }
+                        logger_clone.lock().unwrap().log_line(&name_clone, &line);
                     }
                     Err(_) => break,
+                }
+            }
+            // EOF: notify any unfired matcher that upstream has terminated.
+            for m in &matchers {
+                if !m.fired.load(Ordering::Relaxed) {
+                    m.fire(MatchOutcome::UpstreamExited, &logger_clone, &name_clone);
                 }
             }
         }));
@@ -269,10 +297,17 @@ impl ProcessGroup {
             };
 
             logger.lock().unwrap().add_process(&instance_name).ok();
+            // Fan-out: any matchers registered against the template name
+            // (e.g. `nodes`) need to also be registered under each instance
+            // (`nodes-0`, `nodes-1`, ...) so the per-instance reader threads
+            // see them. Done before spawn_one so the spawn_one snapshot picks
+            // them up. Semantics: any one instance matching the pattern
+            // satisfies the downstream waiter (first-wins via `fired`).
+            self.output_matchers
+                .copy_template_to_instances(&config.name, std::slice::from_ref(&instance_name));
             self.spawn_one(&instance_config, logger)?;
             self.start_watchers(&instance_config, logger);
         }
-
         self.fan_out_groups
             .insert(config.name.clone(), instance_names);
         logger.lock().unwrap().log_line(
@@ -291,6 +326,22 @@ impl ProcessGroup {
         task_names: HashSet<String>,
     ) -> Result<Self> {
         let log_dir = logger.lock().unwrap().log_dir().to_path_buf();
+        let output_matchers = Arc::new(OutputMatchRegistry::new());
+        // Pre-spawn pass: register every output_matches matcher against its
+        // upstream name BEFORE any process starts. This is what gives
+        // retroactive matching — if the upstream emits the line before the
+        // waiter reaches the condition, the matcher's `fired` flag latches
+        // immediately and the waiter's condvar wait returns instantly.
+        for cmd in commands {
+            for dep in &cmd.depends {
+                if let Dependency::OutputMatches {
+                    upstream, matcher, ..
+                } = dep
+                {
+                    output_matchers.register(upstream, Arc::clone(matcher));
+                }
+            }
+        }
         let mut group = Self {
             children: Vec::new(),
             reader_threads: Vec::new(),
@@ -305,6 +356,7 @@ impl ProcessGroup {
             tx: Some(tx),
             shutdown: Arc::clone(&shutdown),
             task_names,
+            output_matchers,
         };
 
         for cmd in commands {
@@ -773,6 +825,7 @@ mod tests {
             tx: None,
             shutdown: Arc::new(AtomicBool::new(false)),
             task_names: HashSet::new(),
+            output_matchers: Arc::new(OutputMatchRegistry::new()),
         };
         (group, logger)
     }
@@ -1775,6 +1828,140 @@ mod tests {
         assert!(names.contains(&"workers-1"));
         assert!(names.contains(&"workers-2"));
         assert!(group.fan_out_groups.contains_key("workers"));
+        for (pid, _, _, _) in &group.children {
+            let _ = waitpid(*pid, None);
+        }
+        for handle in std::mem::take(&mut group.reader_threads) {
+            let _ = handle.join();
+        }
+    }
+
+    // ── output_matches ProcessGroup wiring tests ──
+
+    /// Verify that ProcessGroup::spawn pre-registers Dependency::OutputMatches
+    /// matchers in the registry BEFORE any process starts. Uses `autostart =
+    /// false` upstream so spawn() doesn't actually run sh (avoiding the
+    /// pipefail issue on systems where /bin/sh is dash).
+    #[test]
+    fn output_matches_pre_spawn_registration() {
+        use crate::output_match::Matcher;
+
+        let matcher = Matcher::new("ready".to_string(), "label".to_string());
+        let upstream_name = "upstream";
+        let downstream = ProcessConfig {
+            name: "downstream".to_string(),
+            env: HashMap::new(),
+            run: "true".to_string(),
+            condition: None,
+            depends: vec![crate::config::Dependency::OutputMatches {
+                upstream: upstream_name.to_string(),
+                pattern_source: "ready".to_string(),
+                matcher: Arc::clone(&matcher),
+                timeout: None,
+            }],
+            once: false,
+            for_each: None,
+            // autostart=false keeps the downstream as dormant; with depends.is_empty()=false
+            // it would normally go through spawn_waiter, but autostart=false
+            // makes it dormant entirely.
+            autostart: false,
+            watches: vec![],
+            is_task: false,
+        };
+        let upstream = ProcessConfig {
+            name: upstream_name.to_string(),
+            env: HashMap::new(),
+            run: "true".to_string(),
+            condition: None,
+            depends: vec![],
+            once: true,
+            for_each: None,
+            autostart: false,
+            watches: vec![],
+            is_task: false,
+        };
+
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let log_dir = std::env::temp_dir().join(format!(
+            "procman_om_pre_spawn_test_{}_{id}",
+            std::process::id()
+        ));
+        let logger = Arc::new(Mutex::new(
+            Logger::new_for_test(
+                &[
+                    "procman".to_string(),
+                    upstream_name.to_string(),
+                    "downstream".to_string(),
+                ],
+                log_dir,
+            )
+            .unwrap(),
+        ));
+        let (tx, _rx) = mpsc::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let group = ProcessGroup::spawn(
+            &[upstream, downstream],
+            tx,
+            Arc::clone(&shutdown),
+            Arc::clone(&logger),
+            false,
+            HashSet::new(),
+        )
+        .unwrap();
+
+        // The matcher should be registered under the upstream name.
+        let snapshot = group.output_matchers.for_upstream(upstream_name);
+        assert_eq!(snapshot.len(), 1);
+        assert!(Arc::ptr_eq(&snapshot[0], &matcher));
+    }
+
+    /// Verify that fan-out propagates matchers from the template name to
+    /// each instance name when the upstream is a `for` job.
+    #[test]
+    fn output_matches_fan_out_copies_matchers() {
+        use crate::output_match::Matcher;
+
+        let (mut group, logger) = make_test_group();
+        let matcher = Matcher::new("ready".to_string(), "label".to_string());
+        // Pre-register against the template name (as ProcessGroup::spawn would).
+        group
+            .output_matchers
+            .register("nodes", Arc::clone(&matcher));
+
+        // Build a fan-out template that produces 3 instances and runs `true`.
+        // We can't easily avoid the sh subprocess here, but the test only
+        // checks that the registry was extended — so the children may exit
+        // with non-zero (dash) and the test still verifies the wiring.
+        let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let config = ProcessConfig {
+            name: "nodes".to_string(),
+            env: std::env::vars().collect(),
+            run: "true".to_string(),
+            condition: None,
+            depends: vec![],
+            once: true,
+            autostart: true,
+            for_each: Some(ForEachConfig::Array {
+                values: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                variable: "ITEM".to_string(),
+            }),
+            watches: vec![],
+            is_task: false,
+        };
+        group.expand_fan_out(&config, &logger).unwrap();
+
+        for instance in &["nodes-0", "nodes-1", "nodes-2"] {
+            let snapshot = group.output_matchers.for_upstream(instance);
+            assert_eq!(
+                snapshot.len(),
+                1,
+                "expected matcher registered under {instance}"
+            );
+            assert!(Arc::ptr_eq(&snapshot[0], &matcher));
+        }
+
+        // Cleanup: reap children, join readers.
         for (pid, _, _, _) in &group.children {
             let _ = waitpid(*pid, None);
         }

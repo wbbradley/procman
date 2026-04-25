@@ -22,35 +22,36 @@ impl Span {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TokenKind {
     // Keywords
-    Config,   // config
-    Job,      // job
-    Service,  // service
-    Event,    // event
-    Task,     // task
-    If,       // if
-    For,      // for
-    In,       // in
-    Env,      // env
-    Run,      // run
-    Wait,     // wait
-    Watch,    // watch
-    After,    // after
-    OnFail,   // on_fail
-    Spawn,    // spawn
-    Http,     // http
-    Connect,  // connect
-    Exists,   // exists
-    Contains, // contains
-    Running,  // running
-    Glob,     // glob
-    Arg,      // arg
-    Import,   // import
-    As,       // as
-    True,     // true
-    False,    // false
-    None,     // none
-    Module,   // module
-    Procman,  // procman
+    Config,        // config
+    Job,           // job
+    Service,       // service
+    Event,         // event
+    Task,          // task
+    If,            // if
+    For,           // for
+    In,            // in
+    Env,           // env
+    Run,           // run
+    Wait,          // wait
+    Watch,         // watch
+    After,         // after
+    OnFail,        // on_fail
+    Spawn,         // spawn
+    Http,          // http
+    Connect,       // connect
+    Exists,        // exists
+    Contains,      // contains
+    OutputMatches, // output_matches
+    Running,       // running
+    Glob,          // glob
+    Arg,           // arg
+    Import,        // import
+    As,            // as
+    True,          // true
+    False,         // false
+    None,          // none
+    Module,        // module
+    Procman,       // procman
 
     // Literals
     String(String),       // "..." (contents, escapes resolved)

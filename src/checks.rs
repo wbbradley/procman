@@ -94,6 +94,11 @@ pub fn check(
             .status()
             .map(|s| !s.success())
             .unwrap_or(true),
+        Dependency::OutputMatches { .. } => {
+            // OutputMatches is event-driven — its waiter takes a dedicated path
+            // in `dependency::wait_for_dependencies`, so `check` must never see it.
+            unreachable!("OutputMatches has a dedicated waiter path; check() should not be called")
+        }
     }
 }
 
@@ -123,6 +128,9 @@ pub fn poll_interval(dep: &Dependency) -> Duration {
         Dependency::ProcessNotRunning { poll_interval, .. } => {
             poll_interval.unwrap_or(Duration::from_secs(1))
         }
+        Dependency::OutputMatches { .. } => {
+            unreachable!("OutputMatches has a dedicated waiter path; poll_interval is unused")
+        }
     }
 }
 
@@ -136,6 +144,7 @@ pub fn timeout(dep: &Dependency) -> Option<Duration> {
         Dependency::TcpNotListening { timeout, .. } => *timeout,
         Dependency::FileNotExists { timeout, .. } => *timeout,
         Dependency::ProcessNotRunning { timeout, .. } => *timeout,
+        Dependency::OutputMatches { timeout, .. } => *timeout,
     }
 }
 
@@ -149,6 +158,9 @@ pub fn retry(dep: &Dependency) -> bool {
         Dependency::TcpNotListening { retry, .. } => *retry,
         Dependency::FileNotExists { retry, .. } => *retry,
         Dependency::ProcessNotRunning { retry, .. } => *retry,
+        Dependency::OutputMatches { .. } => {
+            unreachable!("OutputMatches has a dedicated waiter path; retry is unused")
+        }
     }
 }
 
@@ -177,6 +189,13 @@ pub fn description(dep: &Dependency) -> String {
         }
         Dependency::ProcessNotRunning { pattern, .. } => {
             format!("process not running: {pattern}")
+        }
+        Dependency::OutputMatches {
+            upstream,
+            pattern_source,
+            ..
+        } => {
+            format!("output_matches @{upstream} {pattern_source:?}")
         }
     }
 }

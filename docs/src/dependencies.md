@@ -167,6 +167,77 @@ wait {
 env SUI_RPC_URL = sui_rpc_url
 ```
 
+### `output_matches @job "pattern"`
+
+Wait for an upstream `job` or `service` to emit a line containing
+`pattern` on its captured output stream. The match is a literal substring
+(not a regex), case-sensitive, evaluated per line. ANSI color escapes are
+stripped before matching, so patterns work against colorized output.
+
+```
+service api {
+  wait {
+    output_matches @migrate "Migrations complete."
+  }
+  run "api-server"
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `timeout` | no | Duration or `none`. Defaults to `none` (wait indefinitely). |
+
+**Differences from other conditions:**
+
+- The matcher is event-driven, not polled — `poll = ...` is rejected at parse
+  time.
+- A stream match either happens or it doesn't — `retry = ...` is rejected at
+  parse time.
+- Negation (`!output_matches ...`) is not supported and rejected at parse
+  time.
+
+**Pre-spawn registration prevents missed signals.** Matchers are registered
+*before* any process is spawned, so if the upstream emits the pattern before
+the downstream waiter actually reaches the `output_matches` step (e.g. when
+`output_matches` follows another condition like `after @setup`), the match is
+latched and the waiter releases immediately when it gets there. There is no
+race window between upstream startup and the waiter reaching the condition.
+
+**Upstream exits without match.** If the upstream's output stream reaches EOF
+without the pattern ever being observed, the waiter logs:
+
+```
+dependency failed: output_matches @upstream "pattern" (upstream exited, pattern never observed)
+```
+
+and triggers shutdown — same shape as `after @job` failing.
+
+**Allowed targets.** The target must be a `job` or `service`. `task` and
+`event` targets are rejected at validate time. Self-references and unknown
+targets are also rejected. Output_matches edges contribute to cycle
+detection alongside `after` edges.
+
+**Fan-out upstreams** (`for ... in ...`): when the upstream is a fan-out
+template, the matcher is copied to each materialized instance. Any one
+instance emitting the pattern satisfies the condition (first-wins).
+
+**Interpolation.** The pattern supports `${args.NAME}`, `${module.dir}`,
+`${procman.dir}`, and `${alias::args.NAME}` interpolation, consistent with
+other string-bearing conditions:
+
+```
+service api {
+  wait {
+    output_matches @worker "${args.phase_token}"
+  }
+  run "serve"
+}
+```
+
+**Not yet supported (planned):** regex pattern syntax and capture-group
+extraction into a `var`. For v1, only literal substring matching is
+available.
+
 ## Condition Options
 
 Any condition can have a sub-block with options:

@@ -176,6 +176,11 @@ pub enum ConditionKind {
         key: StringLit,
         var: Option<String>,
     },
+    OutputMatches {
+        namespace: Option<String>,
+        target: String,
+        pattern: StringLit,
+    },
 }
 
 #[derive(Debug, Default)]

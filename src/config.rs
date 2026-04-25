@@ -1,6 +1,8 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Result, bail};
+
+use crate::output_match::Matcher;
 
 #[derive(Clone, Debug)]
 pub enum ArgType {
@@ -145,6 +147,12 @@ pub enum Dependency {
         timeout: Option<Duration>,
         retry: bool,
     },
+    OutputMatches {
+        upstream: String,
+        pattern_source: String,
+        matcher: Arc<Matcher>,
+        timeout: Option<Duration>,
+    },
 }
 
 impl Dependency {
@@ -161,6 +169,7 @@ impl Dependency {
             Dependency::TcpNotListening { address, .. } => f(address),
             Dependency::FileNotExists { path, .. } => f(path),
             Dependency::ProcessNotRunning { pattern, .. } => f(pattern),
+            Dependency::OutputMatches { upstream, .. } => f(upstream),
         }
     }
 

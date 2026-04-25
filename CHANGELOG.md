@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `output_matches @proc "literal"` wait condition: a downstream job/service blocks until a named upstream job/service emits a matching line on its captured output stream. Match is a literal substring (case-sensitive, per-line). ANSI escape sequences are stripped before matching, so patterns work against colorized output. Pre-spawn matcher registration prevents missed signals between upstream spawn and the waiter reaching this condition (retroactive matching). Supports `${args.NAME}`, `${module.dir}`, `${procman.dir}`, and `${alias::args.NAME}` interpolation in the pattern. Optional `timeout` block; default is `none` (wait indefinitely). `poll`, `retry`, and negation (`!output_matches`) are rejected at parse time. Targets must be jobs or services; tasks/events and self-references are rejected at validate time. Output_matches edges contribute to cycle detection. Regex pattern syntax and capture-group `var` extraction are not yet supported.
+
 ## [0.23.4] - 2026-04-23
 
 ### Changed

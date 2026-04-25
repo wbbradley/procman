@@ -287,6 +287,7 @@ impl<'a> Lexer<'a> {
             "connect" => TokenKind::Connect,
             "exists" => TokenKind::Exists,
             "contains" => TokenKind::Contains,
+            "output_matches" => TokenKind::OutputMatches,
             "running" => TokenKind::Running,
             "glob" => TokenKind::Glob,
             "arg" => TokenKind::Arg,

@@ -66,7 +66,7 @@ service api {
 }
 ```
 
-Here `migrate` and `web` start immediately. `api` waits for `migrate` to exit successfully and for `web` to pass its health check — no scripting required. Available wait condition types include HTTP health checks, TCP connect, file exists, file contains, process exited (`after`), and their negations. See the [Config Format](#config-format) section below and the [Dependencies chapter](https://wbbradley.github.io/procman/dependencies.html) for the complete reference.
+Here `migrate` and `web` start immediately. `api` waits for `migrate` to exit successfully and for `web` to pass its health check — no scripting required. Available wait condition types include HTTP health checks, TCP connect, file exists, file contains, process exited (`after`), output-line matching (`output_matches`), and their negations. See the [Config Format](#config-format) section below and the [Dependencies chapter](https://wbbradley.github.io/procman/dependencies.html) for the complete reference.
 
 > **`job` vs `service`:** A `job` runs to completion (build steps, migrations, setup tasks) — it defaults to one-shot behavior where exit code 0 is success. A `service` is a long-running daemon (web servers, API servers, workers) that is expected to run for the lifetime of the supervisor.
 
@@ -242,6 +242,7 @@ Each job/service definition supports:
   - `!exists "path"` — file does not exist.
   - `!running "pattern"` — no process matches pattern (`pgrep -f`).
   - `contains "path" { format, key, var }` — file contains a key; optionally binds to a local `var`.
+  - `output_matches @job "literal"` — wait for an upstream job/service to emit a line containing `literal`. Pre-spawn registration prevents missed signals; ANSI is stripped before matching.
   - All conditions accept optional `timeout` (default: none / wait indefinitely), `poll` (default `1s`), and `retry` (default `true`; `false` = fail immediately on first check).
 - `if expr` (optional, on the `job`/`service` line): expression evaluated before spawning. If falsy, the job/service is skipped entirely. Skipped jobs register as exited so `after @job` dependents can proceed.
 - `watch name { }` (optional, services only): named runtime health checks that monitor the service after it starts. Each watch polls a condition (same types as `wait`) and takes an action when consecutive failures exceed the threshold.

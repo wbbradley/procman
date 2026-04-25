@@ -4,6 +4,7 @@ mod config;
 mod dependency;
 mod log;
 mod output;
+mod output_match;
 mod pman;
 mod process;
 mod signal;

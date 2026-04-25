@@ -8,6 +8,7 @@ use anyhow::{Result, bail};
 
 use crate::{
     config::{self, ArgDef, ArgType, Dependency, FileFormat, ForEachConfig, ProcessConfig, Watch},
+    output_match::Matcher,
     pman::{
         ast::{self, BinOp, Expr, RunSection, ShellBlock},
         loader::LoadedModules,
@@ -247,10 +248,8 @@ fn collect_skipped_jobs(
 
 fn collect_arg_deps(expr: &Expr, deps: &mut HashSet<String>) {
     match expr {
-        Expr::ArgsRef(name, _) => {
-            if !name.starts_with("__") {
-                deps.insert(name.clone());
-            }
+        Expr::ArgsRef(name, _) if !name.starts_with("__") => {
+            deps.insert(name.clone());
         }
         Expr::BinOp(lhs, _, rhs, _) => {
             collect_arg_deps(lhs, deps);
@@ -870,6 +869,52 @@ fn lower_wait_condition(
                 retry,
             })
         }
+        (
+            ast::ConditionKind::OutputMatches {
+                namespace,
+                target,
+                pattern,
+            },
+            false,
+        ) => {
+            if opts.poll.is_some() {
+                bail!(
+                    "{}",
+                    cond.span.fmt_error(
+                        path,
+                        "'poll' is not supported on output_matches (matcher is event-driven)"
+                    )
+                );
+            }
+            if opts.retry.is_some() {
+                bail!(
+                    "{}",
+                    cond.span
+                        .fmt_error(path, "'retry' is not supported on output_matches")
+                );
+            }
+            let upstream = qualify_name(prefix, namespace.as_deref(), target);
+            let pattern_value = eval_string_lit_or_expr(pattern, arg_values, local_vars, path)?;
+            let target_display = match namespace {
+                Some(ns) => format!("{ns}::{target}"),
+                None => target.clone(),
+            };
+            let label = format!("output_matches @{target_display} {pattern_value:?}");
+            let matcher = Matcher::new(pattern_value.clone(), label);
+            Ok(Dependency::OutputMatches {
+                upstream,
+                pattern_source: pattern_value,
+                matcher,
+                timeout,
+            })
+        }
+        (ast::ConditionKind::OutputMatches { .. }, true) => {
+            bail!(
+                "{}",
+                cond.span
+                    .fmt_error(path, "negated 'output_matches' is not supported")
+            )
+        }
         (ast::ConditionKind::After { .. }, true) => {
             bail!(
                 "{}",
@@ -1019,9 +1064,20 @@ fn lower_job_or_event(
     let mut depends = Vec::new();
     if let Some(wait) = &body.wait {
         for cond in &wait.conditions {
-            // Strip `after @skipped_job` dependencies.
+            // Strip `after @skipped_job` and `output_matches @skipped_job ...`
+            // dependencies. Matches existing skipped-job semantics: treated as
+            // satisfied without observing the pattern.
             if let ast::ConditionKind::After { namespace, job } = &cond.kind {
                 let qualified = qualify_name(prefix, namespace.as_deref(), job);
+                if skipped_jobs.contains(&qualified) {
+                    continue;
+                }
+            }
+            if let ast::ConditionKind::OutputMatches {
+                namespace, target, ..
+            } = &cond.kind
+            {
+                let qualified = qualify_name(prefix, namespace.as_deref(), target);
                 if skipped_jobs.contains(&qualified) {
                     continue;
                 }
@@ -2851,5 +2907,107 @@ event recovery {
             }
             other => panic!("expected FileExists, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lower_output_matches_basic() {
+        let (configs, _) = lower_str(
+            r#"
+            job migrate { run "migrate" }
+            service api {
+                wait { output_matches @migrate "ready" }
+                run "start"
+            }
+        "#,
+        );
+        let api = configs.iter().find(|c| c.name == "api").unwrap();
+        assert_eq!(api.depends.len(), 1);
+        match &api.depends[0] {
+            Dependency::OutputMatches {
+                upstream,
+                pattern_source,
+                matcher,
+                timeout,
+            } => {
+                assert_eq!(upstream, "migrate");
+                assert_eq!(pattern_source, "ready");
+                assert_eq!(matcher.pattern, "ready");
+                assert_eq!(*timeout, None);
+            }
+            other => panic!("expected OutputMatches, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_output_matches_with_timeout() {
+        let (configs, _) = lower_str(
+            r#"
+            job runner { run "run" }
+            service api {
+                wait {
+                    output_matches @runner "ready" {
+                        timeout = 30s
+                    }
+                }
+                run "start"
+            }
+        "#,
+        );
+        let api = configs.iter().find(|c| c.name == "api").unwrap();
+        match &api.depends[0] {
+            Dependency::OutputMatches { timeout, .. } => {
+                assert_eq!(*timeout, Some(Duration::from_secs(30)));
+            }
+            other => panic!("expected OutputMatches, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_output_matches_interpolates_pattern() {
+        let (configs, _) = lower_with_args(
+            r#"
+            arg phase { type = string default = "phase_1_done" }
+            job worker { run "work" }
+            service api {
+                wait { output_matches @worker "${args.phase}" }
+                run "start"
+            }
+        "#,
+            &[("phase", "phase_2_done")],
+        );
+        let api = configs.iter().find(|c| c.name == "api").unwrap();
+        match &api.depends[0] {
+            Dependency::OutputMatches {
+                pattern_source,
+                matcher,
+                ..
+            } => {
+                assert_eq!(pattern_source, "phase_2_done");
+                assert_eq!(matcher.pattern, "phase_2_done");
+            }
+            other => panic!("expected OutputMatches, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_output_matches_skipped_target_stripped() {
+        // If upstream `setup` has `if false`, it never runs; the
+        // output_matches dep should be silently stripped, mirroring
+        // `after @skipped_job` behavior.
+        let (configs, _) = lower_str(
+            r#"
+            job setup if false { run "setup" }
+            service api {
+                wait { output_matches @setup "ready" }
+                run "start"
+            }
+        "#,
+        );
+        let api = configs.iter().find(|c| c.name == "api").unwrap();
+        assert!(
+            api.depends.is_empty(),
+            "expected output_matches @skipped to be stripped, got {:?}",
+            api.depends
+        );
     }
 }

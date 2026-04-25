@@ -13,6 +13,7 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
     let mut job_names: HashSet<&str> = HashSet::new();
     let mut service_names: HashSet<&str> = HashSet::new();
     let mut event_names: HashSet<&str> = HashSet::new();
+    let mut task_names: HashSet<&str> = HashSet::new();
     // Jobs are once=true by default; collect all job names as once jobs.
     let mut once_jobs: HashSet<&str> = HashSet::new();
     let mut errors: Vec<String> = Vec::new();
@@ -79,6 +80,7 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
     for task in &file.tasks {
         // Tasks are once=true; register in once_jobs and job_names (like jobs).
         once_jobs.insert(&task.name);
+        task_names.insert(&task.name);
         if !job_names.insert(&task.name) {
             errors.push(
                 task.span
@@ -101,7 +103,64 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
         bail!("{}", errors.join("\n"));
     }
 
-    // Build after-edges for cycle detection and reachability.
+    // Validate one local `output_matches` reference and, on success, add an
+    // edge from `owner` to `target` in `after_edges`. Returns errors via push.
+    #[allow(clippy::too_many_arguments)]
+    fn check_output_matches_local<'b>(
+        owner: &'b str,
+        owner_kind: &str,
+        cond: &'b ast::WaitCondition,
+        namespace: Option<&str>,
+        target: &'b str,
+        job_names: &HashSet<&'b str>,
+        task_names: &HashSet<&'b str>,
+        event_names: &HashSet<&'b str>,
+        targets: &mut HashSet<&'b str>,
+        path: &str,
+        errors: &mut Vec<String>,
+    ) {
+        if namespace.is_some() {
+            return; // deferred to validate_cross_refs
+        }
+        if target == owner {
+            errors.push(cond.span.fmt_error(
+                path,
+                &format!("{owner_kind} '{owner}': output_matches @{target} is a self-reference"),
+            ));
+            return;
+        }
+        if event_names.contains(target) {
+            errors.push(cond.span.fmt_error(
+                path,
+                &format!(
+                    "{owner_kind} '{owner}': output_matches @{target} target must be a job or service (got event)"
+                ),
+            ));
+            return;
+        }
+        if task_names.contains(target) {
+            errors.push(cond.span.fmt_error(
+                path,
+                &format!(
+                    "{owner_kind} '{owner}': output_matches @{target} target must be a job or service (got task)"
+                ),
+            ));
+            return;
+        }
+        if !job_names.contains(target) {
+            errors.push(cond.span.fmt_error(
+                path,
+                &format!(
+                    "{owner_kind} '{owner}': output_matches @{target} references unknown job or service"
+                ),
+            ));
+            return;
+        }
+        targets.insert(target);
+    }
+
+    // Build after-edges for cycle detection and reachability. Includes both
+    // `after @x` and `output_matches @x ...` edges.
     let mut after_edges: HashMap<&str, HashSet<&str>> = HashMap::new();
 
     // Step 2: Validate after references + build edges.
@@ -133,6 +192,23 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
                         ));
                     }
                     targets.insert(target.as_str());
+                } else if let ast::ConditionKind::OutputMatches {
+                    namespace, target, ..
+                } = &cond.kind
+                {
+                    check_output_matches_local(
+                        &job.name,
+                        "job",
+                        cond,
+                        namespace.as_deref(),
+                        target,
+                        &job_names,
+                        &task_names,
+                        &event_names,
+                        &mut targets,
+                        path,
+                        &mut errors,
+                    );
                 }
             }
         }
@@ -168,6 +244,23 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
                         ));
                     }
                     targets.insert(target.as_str());
+                } else if let ast::ConditionKind::OutputMatches {
+                    namespace, target, ..
+                } = &cond.kind
+                {
+                    check_output_matches_local(
+                        &service.name,
+                        "service",
+                        cond,
+                        namespace.as_deref(),
+                        target,
+                        &job_names,
+                        &task_names,
+                        &event_names,
+                        &mut targets,
+                        path,
+                        &mut errors,
+                    );
                 }
             }
         }
@@ -203,6 +296,23 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
                         ));
                     }
                     targets.insert(target.as_str());
+                } else if let ast::ConditionKind::OutputMatches {
+                    namespace, target, ..
+                } = &cond.kind
+                {
+                    check_output_matches_local(
+                        &event.name,
+                        "event",
+                        cond,
+                        namespace.as_deref(),
+                        target,
+                        &job_names,
+                        &task_names,
+                        &event_names,
+                        &mut targets,
+                        path,
+                        &mut errors,
+                    );
                 }
             }
         }
@@ -238,6 +348,23 @@ pub fn validate(file: &ast::File, path: &str) -> Result<()> {
                         ));
                     }
                     targets.insert(target.as_str());
+                } else if let ast::ConditionKind::OutputMatches {
+                    namespace, target, ..
+                } = &cond.kind
+                {
+                    check_output_matches_local(
+                        &task.name,
+                        "task",
+                        cond,
+                        namespace.as_deref(),
+                        target,
+                        &job_names,
+                        &task_names,
+                        &event_names,
+                        &mut targets,
+                        path,
+                        &mut errors,
+                    );
                 }
             }
         }
@@ -678,6 +805,34 @@ fn validate_namespaced_after_refs_in_body(
                         }
                     }
                 }
+            } else if let ast::ConditionKind::OutputMatches {
+                namespace: Some(ns),
+                target,
+                ..
+            } = &cond.kind
+            {
+                match registry.get(ns.as_str()) {
+                    None => {
+                        errors.push(cond.span.fmt_error(
+                            path,
+                            &format!(
+                                "'{owner_name}': output_matches @{ns}::{target} references unknown import alias '{ns}'"
+                            ),
+                        ));
+                    }
+                    Some(entities) => {
+                        if !entities.jobs.contains(target.as_str())
+                            && !entities.services.contains(target.as_str())
+                        {
+                            errors.push(cond.span.fmt_error(
+                                path,
+                                &format!(
+                                    "'{owner_name}': output_matches @{ns}::{target} target must be a job or service in '{ns}'"
+                                ),
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
@@ -866,9 +1021,41 @@ fn validate_module_cross_refs(
     }
 }
 
+fn qualified_target(prefix: Option<&str>, namespace: Option<&str>, target: &str) -> String {
+    match (prefix, namespace) {
+        (Some(p), Some(ns)) => format!("{p}::{ns}::{target}"),
+        (None, Some(ns)) => format!("{ns}::{target}"),
+        (Some(p), None) => format!("{p}::{target}"),
+        (None, None) => target.to_string(),
+    }
+}
+
+fn collect_wait_edges(
+    wait: Option<&ast::WaitBlock>,
+    prefix: Option<&str>,
+    targets: &mut HashSet<String>,
+) {
+    let Some(wait) = wait else { return };
+    for cond in &wait.conditions {
+        match &cond.kind {
+            ast::ConditionKind::After {
+                namespace,
+                job: target,
+            }
+            | ast::ConditionKind::OutputMatches {
+                namespace, target, ..
+            } => {
+                targets.insert(qualified_target(prefix, namespace.as_deref(), target));
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Build after-edges for one file's entities, using `prefix` for qualified names.
 /// A namespaced ref `@ns::target` at prefix `P` becomes `{P}::{ns}::{target}`.
 /// An unnamespaced ref `@target` at prefix `P` becomes `{P}::{target}` (or just `target` if no prefix).
+/// Includes both `after @x` and `output_matches @x ...` edges.
 fn build_edges_for_file(
     file: &ast::File,
     prefix: Option<&str>,
@@ -880,22 +1067,7 @@ fn build_edges_for_file(
             None => job.name.clone(),
         };
         let mut targets = HashSet::new();
-        if let Some(wait) = &job.body.wait {
-            for cond in &wait.conditions {
-                if let ast::ConditionKind::After {
-                    namespace,
-                    job: target,
-                } = &cond.kind
-                {
-                    targets.insert(match (prefix, namespace.as_deref()) {
-                        (Some(p), Some(ns)) => format!("{p}::{ns}::{target}"),
-                        (None, Some(ns)) => format!("{ns}::{target}"),
-                        (Some(p), None) => format!("{p}::{target}"),
-                        (None, None) => target.clone(),
-                    });
-                }
-            }
-        }
+        collect_wait_edges(job.body.wait.as_ref(), prefix, &mut targets);
         edges.insert(qualified, targets);
     }
     for service in &file.services {
@@ -904,22 +1076,7 @@ fn build_edges_for_file(
             None => service.name.clone(),
         };
         let mut targets = HashSet::new();
-        if let Some(wait) = &service.body.wait {
-            for cond in &wait.conditions {
-                if let ast::ConditionKind::After {
-                    namespace,
-                    job: target,
-                } = &cond.kind
-                {
-                    targets.insert(match (prefix, namespace.as_deref()) {
-                        (Some(p), Some(ns)) => format!("{p}::{ns}::{target}"),
-                        (None, Some(ns)) => format!("{ns}::{target}"),
-                        (Some(p), None) => format!("{p}::{target}"),
-                        (None, None) => target.clone(),
-                    });
-                }
-            }
-        }
+        collect_wait_edges(service.body.wait.as_ref(), prefix, &mut targets);
         edges.insert(qualified, targets);
     }
     for event in &file.events {
@@ -928,22 +1085,7 @@ fn build_edges_for_file(
             None => event.name.clone(),
         };
         let mut targets = HashSet::new();
-        if let Some(wait) = &event.body.wait {
-            for cond in &wait.conditions {
-                if let ast::ConditionKind::After {
-                    namespace,
-                    job: target,
-                } = &cond.kind
-                {
-                    targets.insert(match (prefix, namespace.as_deref()) {
-                        (Some(p), Some(ns)) => format!("{p}::{ns}::{target}"),
-                        (None, Some(ns)) => format!("{ns}::{target}"),
-                        (Some(p), None) => format!("{p}::{target}"),
-                        (None, None) => target.clone(),
-                    });
-                }
-            }
-        }
+        collect_wait_edges(event.body.wait.as_ref(), prefix, &mut targets);
         edges.insert(qualified, targets);
     }
     for task in &file.tasks {
@@ -952,22 +1094,7 @@ fn build_edges_for_file(
             None => task.name.clone(),
         };
         let mut targets = HashSet::new();
-        if let Some(wait) = &task.body.wait {
-            for cond in &wait.conditions {
-                if let ast::ConditionKind::After {
-                    namespace,
-                    job: target,
-                } = &cond.kind
-                {
-                    targets.insert(match (prefix, namespace.as_deref()) {
-                        (Some(p), Some(ns)) => format!("{p}::{ns}::{target}"),
-                        (None, Some(ns)) => format!("{ns}::{target}"),
-                        (Some(p), None) => format!("{p}::{target}"),
-                        (None, None) => target.clone(),
-                    });
-                }
-            }
-        }
+        collect_wait_edges(task.body.wait.as_ref(), prefix, &mut targets);
         edges.insert(qualified, targets);
     }
 }
@@ -1547,6 +1674,110 @@ job web { run "other" }"#;
             task test_a {
                 wait { after @setup }
                 run "test"
+            }
+        "#,
+        )
+        .unwrap();
+    }
+
+    // ── output_matches validation tests ──
+
+    #[test]
+    fn output_matches_unknown_target_errors() {
+        let input = r#"
+            service api {
+                wait { output_matches @missing "ready" }
+                run "serve"
+            }
+        "#;
+        let err = parse_and_validate(input).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("references unknown job or service"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn output_matches_self_reference_errors() {
+        let input = r#"
+            service api {
+                wait { output_matches @api "ready" }
+                run "serve"
+            }
+        "#;
+        let err = parse_and_validate(input).unwrap_err();
+        assert!(err.to_string().contains("self-reference"), "got: {err}");
+    }
+
+    #[test]
+    fn output_matches_event_target_errors() {
+        let input = r#"
+            event recovery { run "./recover.sh" }
+            service api {
+                wait { output_matches @recovery "ready" }
+                run "serve"
+            }
+        "#;
+        let err = parse_and_validate(input).unwrap_err();
+        assert!(err.to_string().contains("got event"), "got: {err}");
+    }
+
+    #[test]
+    fn output_matches_task_target_errors() {
+        let input = r#"
+            task test_a { run "test" }
+            service api {
+                wait { output_matches @test_a "ready" }
+                run "serve"
+            }
+        "#;
+        let err = parse_and_validate(input).unwrap_err();
+        assert!(err.to_string().contains("got task"), "got: {err}");
+    }
+
+    #[test]
+    fn output_matches_cycle_detected() {
+        // Cycle via output_matches edges: a → b → a.
+        let input = r#"
+            service a {
+                wait { output_matches @b "ready" }
+                run "a"
+            }
+            service b {
+                wait { output_matches @a "ready" }
+                run "b"
+            }
+        "#;
+        let err = parse_and_validate(input).unwrap_err();
+        assert!(
+            err.to_string().contains("circular dependency"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn output_matches_targets_job_ok() {
+        parse_and_validate(
+            r#"
+            job runner { run "run" }
+            service api {
+                wait { output_matches @runner "ready" }
+                run "serve"
+            }
+        "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn output_matches_targets_service_ok() {
+        parse_and_validate(
+            r#"
+            service runner { run "run" }
+            service api {
+                wait { output_matches @runner "ready" }
+                run "serve"
             }
         "#,
         )
