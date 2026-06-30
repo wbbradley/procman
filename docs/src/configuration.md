@@ -26,6 +26,7 @@ job migrate {
 }
 
 service web {
+  cwd "backend"
   env PORT = args.port
   run "serve --port $PORT"
 }
@@ -96,7 +97,7 @@ job, service, task, event, arg, or `for`/`var` names:
 
 Other reserved tokens (`job`, `service`, `task`, `event`, `config`, `env`,
 `arg`, `import`, `as`, `wait`, `watch`, `for`, `if`, `in`, `on_fail`, `run`,
-`true`, `false`, `none`) are also unavailable as identifiers, but `module` and
+`cwd`, `true`, `false`, `none`) are also unavailable as identifiers, but `module` and
 `procman` are called out here because they look like ordinary names yet are
 reserved for built-in directory references (see
 [Language Design](language-design.md#built-in-directory-references)).
@@ -247,6 +248,22 @@ service api {
 }
 ```
 
+### `cwd` (optional)
+
+The working directory for the spawned process. Relative paths resolve against the `.pman` file's
+directory (not procman's working directory); absolute paths are used verbatim. The value is an
+expression, so `args.*` references and string interpolation work. Conditions in `wait` and `watch`
+blocks also run in this directory. Omitting `cwd` inherits procman's working directory. When
+combined with `for`, the directory is applied to every fanned-out instance. Startup fails if the
+directory does not exist.
+
+```
+service web {
+  cwd "backend"
+  run "serve"
+}
+```
+
 ### `job` vs `service`
 
 A `job` is a one-shot process that runs to completion. Exit code 0 is treated
@@ -278,7 +295,7 @@ task test_suite {
 
 Trigger with: `procman myapp.pman -t test_suite`
 
-Tasks share all the same fields as jobs and services (`run`, `env`, `wait`,
+Tasks share all the same fields as jobs and services (`run`, `env`, `cwd`, `wait`,
 `for`, `if`, `watch`).
 
 ### `wait` (optional)
