@@ -1,8 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
@@ -236,6 +235,7 @@ mod tests {
             autostart: true,
             watches: vec![],
             is_task: false,
+            cwd: None,
         }
     }
 

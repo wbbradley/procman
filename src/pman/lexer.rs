@@ -277,6 +277,7 @@ impl<'a> Lexer<'a> {
             "for" => TokenKind::For,
             "in" => TokenKind::In,
             "env" => TokenKind::Env,
+            "cwd" => TokenKind::Cwd,
             "run" => TokenKind::Run,
             "wait" => TokenKind::Wait,
             "watch" => TokenKind::Watch,
@@ -733,6 +734,11 @@ mod tests {
     #[test]
     fn lex_task_keyword() {
         assert_eq!(kinds("task"), vec![TokenKind::Task]);
+    }
+
+    #[test]
+    fn lex_cwd_keyword() {
+        assert_eq!(kinds("cwd"), vec![TokenKind::Cwd]);
     }
 
     #[test]

@@ -479,6 +479,7 @@ impl<'a> Parser<'a> {
 
     fn parse_job_body(&mut self) -> Result<ast::JobBody> {
         let mut env = Vec::new();
+        let mut cwd = None;
         let mut wait = None;
         let mut watches = Vec::new();
         let mut run_section: Option<ast::RunSection> = None;
@@ -490,6 +491,10 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 Some(TokenKind::Env) => {
                     self.parse_env_entry_or_block(&mut env)?;
+                }
+                Some(TokenKind::Cwd) => {
+                    self.advance();
+                    cwd = Some(self.parse_expr()?);
                 }
                 Some(TokenKind::Wait) => {
                     wait = Some(self.parse_wait_block()?);
@@ -528,6 +533,7 @@ impl<'a> Parser<'a> {
 
         Ok(ast::JobBody {
             env,
+            cwd,
             wait,
             watches,
             run_section,
@@ -1223,6 +1229,13 @@ mod tests {
         assert!(
             matches!(&file.events[0].body.run_section, ast::RunSection::Direct(ast::ShellBlock::Inline(s)) if s.value == "./recover.sh")
         );
+    }
+
+    #[test]
+    fn parse_job_with_cwd() {
+        let file = parse(r#"job web { cwd "/path" run "serve" }"#, "test.pman").unwrap();
+        let job = &file.jobs[0];
+        assert!(matches!(&job.body.cwd, Some(Expr::StringLit(s, _)) if s == "/path"));
     }
 
     #[test]

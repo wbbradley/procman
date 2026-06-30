@@ -5,8 +5,7 @@ use std::{
     path::PathBuf,
     process::Stdio,
     sync::{
-        Arc,
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
@@ -64,12 +63,16 @@ fn evaluate_condition(
     condition: &str,
     env: &HashMap<String, String>,
     name: &str,
+    cwd: Option<&str>,
     logger: &Arc<Mutex<Logger>>,
 ) -> Result<bool> {
     let mut cmd = std::process::Command::new("bash");
     cmd.args(["-e", "-u", "-o", "pipefail", "-c", condition]);
     cmd.env_clear();
     cmd.envs(env);
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
@@ -118,6 +121,17 @@ impl ProcessGroup {
         child_cmd.stdin(Stdio::null());
         child_cmd.stdout(Stdio::piped());
         child_cmd.stderr(Stdio::piped());
+
+        if let Some(cwd) = &cmd.cwd {
+            let resolved_cwd = output::resolve_templates(cwd, &resolve)?;
+            if !std::path::Path::new(&resolved_cwd).is_dir() {
+                anyhow::bail!(
+                    "{}: working directory does not exist: {resolved_cwd}",
+                    cmd.name
+                );
+            }
+            child_cmd.current_dir(&resolved_cwd);
+        }
 
         unsafe {
             child_cmd.pre_exec(move || {
@@ -296,6 +310,7 @@ impl ProcessGroup {
                 autostart: true,
                 watches: instance_watches,
                 is_task: config.is_task,
+                cwd: config.cwd.clone(),
             };
 
             logger.lock().unwrap().add_process(&instance_name).ok();
@@ -367,7 +382,7 @@ impl ProcessGroup {
                 continue;
             }
             if let Some(ref condition) = cmd.condition
-                && !evaluate_condition(condition, &cmd.env, &cmd.name, &logger)?
+                && !evaluate_condition(condition, &cmd.env, &cmd.name, cmd.cwd.as_deref(), &logger)?
             {
                 if cmd.once {
                     group
@@ -434,7 +449,13 @@ impl ProcessGroup {
                         config
                     };
                     if let Some(ref condition) = config.condition {
-                        match evaluate_condition(condition, &config.env, &config.name, logger) {
+                        match evaluate_condition(
+                            condition,
+                            &config.env,
+                            &config.name,
+                            config.cwd.as_deref(),
+                            logger,
+                        ) {
                             Ok(true) => {}
                             Ok(false) => {
                                 if config.once {
@@ -893,6 +914,7 @@ mod tests {
             }),
             watches: vec![],
             is_task: false,
+            cwd: None,
         };
         group.expand_fan_out(&config, &logger).unwrap();
         assert_eq!(group.children.len(), 3);
@@ -931,6 +953,7 @@ mod tests {
             }),
             watches: vec![],
             is_task: false,
+            cwd: None,
         };
         let err = group.expand_fan_out(&config, &logger).unwrap_err();
         assert!(err.to_string().contains("matched zero files"), "{err}");
@@ -955,6 +978,7 @@ mod tests {
             }),
             watches: vec![],
             is_task: false,
+            cwd: None,
         };
         group.expand_fan_out(&config, &logger).unwrap();
         // Verify that the run strings got substituted
@@ -1012,6 +1036,7 @@ mod tests {
             }),
             watches: vec![],
             is_task: false,
+            cwd: None,
         };
         group.expand_fan_out(&config, &logger).unwrap();
         assert_eq!(group.children.len(), 2);
@@ -1139,6 +1164,7 @@ mod tests {
             autostart: true,
             watches: vec![],
             is_task: false,
+            cwd: None,
         }];
         let group = ProcessGroup::spawn(
             &configs,
@@ -1196,6 +1222,7 @@ mod tests {
                 autostart: true,
                 watches: vec![],
                 is_task: false,
+                cwd: None,
             },
             ProcessConfig {
                 name: "b".to_string(),
@@ -1208,6 +1235,7 @@ mod tests {
                 autostart: true,
                 watches: vec![],
                 is_task: false,
+                cwd: None,
             },
         ];
         let group = ProcessGroup::spawn(
@@ -1270,6 +1298,7 @@ mod tests {
                 autostart: true,
                 watches: vec![],
                 is_task: false,
+                cwd: None,
             },
             ProcessConfig {
                 name: "slow".to_string(),
@@ -1282,6 +1311,7 @@ mod tests {
                 autostart: true,
                 watches: vec![],
                 is_task: false,
+                cwd: None,
             },
         ];
         let group = ProcessGroup::spawn(
@@ -1352,6 +1382,7 @@ mod tests {
                 autostart: true,
                 watches: vec![],
                 is_task: false,
+                cwd: None,
             },
             ProcessConfig {
                 name: "crasher".to_string(),
@@ -1364,6 +1395,7 @@ mod tests {
                 autostart: true,
                 watches: vec![],
                 is_task: false,
+                cwd: None,
             },
         ];
         let group = ProcessGroup::spawn(
@@ -1410,6 +1442,7 @@ mod tests {
                 autostart: false,
                 watches: vec![],
                 is_task: false,
+                cwd: None,
             },
         );
 
@@ -1431,6 +1464,7 @@ mod tests {
             autostart: true,
             watches: vec![],
             is_task: false,
+            cwd: None,
         };
         tx.send(SupervisorCommand::Spawn(Box::new(config))).unwrap();
         drop(tx);
@@ -1459,6 +1493,7 @@ mod tests {
             autostart: true,
             watches: vec![],
             is_task: false,
+            cwd: None,
         };
         logger.lock().unwrap().add_process("worker").ok();
         group.spawn_one(&config, &logger).unwrap();
@@ -1507,7 +1542,7 @@ mod tests {
         let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_, logger) = make_test_group();
         let env: HashMap<String, String> = std::env::vars().collect();
-        assert!(evaluate_condition("true", &env, "test", &logger).unwrap());
+        assert!(evaluate_condition("true", &env, "test", None, &logger).unwrap());
     }
 
     #[test]
@@ -1515,7 +1550,7 @@ mod tests {
         let _guard = PROCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_, logger) = make_test_group();
         let env: HashMap<String, String> = std::env::vars().collect();
-        assert!(!evaluate_condition("false", &env, "test", &logger).unwrap());
+        assert!(!evaluate_condition("false", &env, "test", None, &logger).unwrap());
     }
 
     #[test]
@@ -1524,9 +1559,13 @@ mod tests {
         let (_, logger) = make_test_group();
         let mut env = HashMap::new();
         env.insert("MY_FLAG".to_string(), "yes".to_string());
-        assert!(evaluate_condition("test \"$MY_FLAG\" = yes", &env, "test", &logger).unwrap());
+        assert!(
+            evaluate_condition("test \"$MY_FLAG\" = yes", &env, "test", None, &logger).unwrap()
+        );
         env.insert("MY_FLAG".to_string(), "no".to_string());
-        assert!(!evaluate_condition("test \"$MY_FLAG\" = yes", &env, "test", &logger).unwrap());
+        assert!(
+            !evaluate_condition("test \"$MY_FLAG\" = yes", &env, "test", None, &logger).unwrap()
+        );
     }
 
     #[test]
@@ -1554,6 +1593,7 @@ mod tests {
             autostart: true,
             watches: vec![],
             is_task: false,
+            cwd: None,
         };
         logger.lock().unwrap().add_process("stdin_probe").ok();
         group.spawn_one(&config, &logger).unwrap();
@@ -1561,9 +1601,10 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let contents = loop {
             if let Ok(s) = std::fs::read_to_string(&probe_path)
-                && !s.trim().is_empty() {
-                    break s;
-                }
+                && !s.trim().is_empty()
+            {
+                break s;
+            }
             assert!(Instant::now() < deadline, "child never wrote probe file");
             thread::sleep(Duration::from_millis(50));
         };
@@ -1603,6 +1644,7 @@ mod tests {
             autostart: true,
             watches: vec![],
             is_task: false,
+            cwd: None,
         }];
         let group = ProcessGroup::spawn(
             &configs,
@@ -1632,6 +1674,7 @@ mod tests {
             autostart: true,
             watches: vec![],
             is_task: false,
+            cwd: None,
         };
         logger.lock().unwrap().add_process("cond-pass").ok();
         group.spawn_one(&config, &logger).unwrap();
@@ -1668,6 +1711,7 @@ mod tests {
             autostart: true,
             watches: vec![],
             is_task: false,
+            cwd: None,
         }];
         let group = ProcessGroup::spawn(
             &configs,
@@ -1707,6 +1751,7 @@ mod tests {
             autostart: true,
             watches: vec![],
             is_task: false,
+            cwd: None,
         }];
         let group = ProcessGroup::spawn(
             &configs,
@@ -1769,6 +1814,7 @@ mod tests {
                 autostart: true,
                 watches: vec![],
                 is_task: false,
+                cwd: None,
             },
             ProcessConfig {
                 name: "job_b".to_string(),
@@ -1781,6 +1827,7 @@ mod tests {
                 autostart: true,
                 watches: vec![],
                 is_task: false,
+                cwd: None,
             },
         ];
         let group = ProcessGroup::spawn(
@@ -1827,6 +1874,7 @@ mod tests {
             }),
             watches: vec![],
             is_task: false,
+            cwd: None,
         };
         group.expand_fan_out(&config, &logger).unwrap();
         assert_eq!(group.children.len(), 3);
@@ -1868,6 +1916,7 @@ mod tests {
             }),
             watches: vec![],
             is_task: false,
+            cwd: None,
         };
         group.expand_fan_out(&config, &logger).unwrap();
         assert_eq!(group.children.len(), 3);
@@ -1918,6 +1967,7 @@ mod tests {
             autostart: false,
             watches: vec![],
             is_task: false,
+            cwd: None,
         };
         let upstream = ProcessConfig {
             name: upstream_name.to_string(),
@@ -1930,6 +1980,7 @@ mod tests {
             autostart: false,
             watches: vec![],
             is_task: false,
+            cwd: None,
         };
 
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1999,6 +2050,7 @@ mod tests {
             }),
             watches: vec![],
             is_task: false,
+            cwd: None,
         };
         group.expand_fan_out(&config, &logger).unwrap();
 

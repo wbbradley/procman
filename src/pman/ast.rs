@@ -87,6 +87,7 @@ pub struct TaskDef {
 #[derive(Debug)]
 pub struct JobBody {
     pub env: Vec<EnvBinding>,
+    pub cwd: Option<Expr>,
     pub wait: Option<WaitBlock>,
     pub watches: Vec<WatchDef>,
     pub run_section: RunSection,

@@ -1130,6 +1130,23 @@ fn lower_job_or_event(
         .map(|w| lower_watch(w, arg_values, &local_vars, prefix, path))
         .collect::<Result<_>>()?;
 
+    // Resolve cwd. Relative paths resolve against the `.pman` file's directory.
+    let cwd = match &body.cwd {
+        Some(expr) => {
+            let raw = eval_expr_to_string(expr, arg_values, &local_vars, prefix, path)?;
+            let p = std::path::Path::new(&raw);
+            Some(if p.is_absolute() {
+                raw
+            } else {
+                std::path::Path::new(&parent_dir_of(path))
+                    .join(&raw)
+                    .to_string_lossy()
+                    .to_string()
+            })
+        }
+        None => None,
+    };
+
     match &body.run_section {
         RunSection::Direct(shell) => Ok(vec![ProcessConfig {
             name: name.to_string(),
@@ -1142,6 +1159,7 @@ fn lower_job_or_event(
             autostart,
             watches,
             is_task,
+            cwd: cwd.clone(),
         }]),
         RunSection::ForLoop(fl) => match &fl.iterable {
             ast::Iterable::Glob(glob_lit) => {
@@ -1170,6 +1188,7 @@ fn lower_job_or_event(
                     autostart,
                     watches,
                     is_task,
+                    cwd: cwd.clone(),
                 }])
             }
             ast::Iterable::Array(items) => {
@@ -1199,6 +1218,7 @@ fn lower_job_or_event(
                     autostart,
                     watches,
                     is_task,
+                    cwd: cwd.clone(),
                 }])
             }
             ast::Iterable::RangeExclusive(start_expr, end_expr) => {
@@ -1228,6 +1248,7 @@ fn lower_job_or_event(
                     autostart,
                     watches,
                     is_task,
+                    cwd: cwd.clone(),
                 }])
             }
             ast::Iterable::RangeInclusive(start_expr, end_expr) => {
@@ -1257,6 +1278,7 @@ fn lower_job_or_event(
                     autostart,
                     watches,
                     is_task,
+                    cwd: cwd.clone(),
                 }])
             }
         },
@@ -1614,6 +1636,41 @@ mod tests {
             &[("log_level", "debug")],
         );
         assert_eq!(configs[0].env.get("RUST_LOG").unwrap(), "warn");
+    }
+
+    #[test]
+    fn lower_cwd_absolute_and_relative() {
+        // Absolute cwd is preserved verbatim.
+        let (configs, _) = lower(
+            r#"job a { cwd "/abs/path" run "serve" }"#,
+            "/some/dir/test.pman",
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(configs[0].cwd.as_deref(), Some("/abs/path"));
+
+        // Relative cwd resolves against the .pman file's directory. The parent
+        // dir `/some/dir` doesn't exist, so parent_dir_of falls back to the
+        // literal parent — deterministic.
+        let (configs, _) = lower(
+            r#"job b { cwd "rel/path" run "serve" }"#,
+            "/some/dir/test.pman",
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(configs[0].cwd.as_deref(), Some("/some/dir/rel/path"));
+
+        // No cwd → None.
+        let (configs, _) = lower(
+            r#"job c { run "serve" }"#,
+            "/some/dir/test.pman",
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(configs[0].cwd, None);
     }
 
     #[test]

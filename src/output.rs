@@ -172,6 +172,7 @@ mod tests {
             autostart: true,
             watches: vec![],
             is_task: false,
+            cwd: None,
         }
     }
 

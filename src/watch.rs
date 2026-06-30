@@ -1,8 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -136,6 +135,7 @@ fn execute_action(
                 autostart: true,
                 watches: vec![],
                 is_task: false,
+                cwd: None,
             };
             let _ = tx.send(SupervisorCommand::Spawn(Box::new(config)));
             false

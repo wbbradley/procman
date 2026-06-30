@@ -31,6 +31,7 @@ pub enum TokenKind {
     For,           // for
     In,            // in
     Env,           // env
+    Cwd,           // cwd
     Run,           // run
     Wait,          // wait
     Watch,         // watch

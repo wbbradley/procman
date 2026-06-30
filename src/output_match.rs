@@ -1,9 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
-        Condvar,
-        Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},

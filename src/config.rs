@@ -85,6 +85,7 @@ pub struct ProcessConfig {
     pub autostart: bool,
     pub watches: Vec<Watch>,
     pub is_task: bool,
+    pub cwd: Option<String>,
 }
 
 #[derive(Clone, Debug)]
