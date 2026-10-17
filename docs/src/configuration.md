@@ -278,8 +278,9 @@ supervisor shutdown.
 ### `task`
 
 A `task` is a one-shot process that does not auto-start. Tasks must be explicitly
-triggered via the `-t`/`--task` CLI flag. Like jobs, tasks run to completion —
-exit code 0 is success, non-zero triggers shutdown.
+triggered via `-t`/`--task` or `--all-tasks`. Tasks run to completion; non-zero
+exits are recorded without stopping other tasks. Once all activated tasks finish,
+procman shuts down supporting processes and exits non-zero if any task failed.
 
 Tasks are useful for operations that should only run on demand: test suites,
 database migrations, cleanup scripts, or any one-shot utility work.
