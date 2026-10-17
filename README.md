@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/procman.svg)](https://crates.io/crates/procman)
 [![docs](https://img.shields.io/badge/docs-mdbook-blue)](https://wbbradley.github.io/procman/)
 
-A process supervisor with a dependency DAG and a typed `.pman` language for defining jobs, services, and their relationships. Spawns processes, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives. See the [full documentation](https://wbbradley.github.io/procman/) for detailed guides on configuration, dependencies, templates, and more.
+A process supervisor with a dependency DAG and a typed `.pman` language for defining jobs, services, and their relationships. Spawns processes, multiplexes their output with name prefixes, and coordinates startup and shutdown. Failed jobs and exiting services trigger shutdown; selected tasks can fail independently while the remaining tasks finish. See the [full documentation](https://wbbradley.github.io/procman/) for detailed guides on configuration, dependencies, templates, and more.
 
 ## Why procman?
 
@@ -284,7 +284,8 @@ Watch options:
 - Per-process logs are written to `<log_dir>/<name>.log` (directory is recreated each run; default `./logs/procman/`).
 - A combined `<log_dir>/procman.log` contains the full interleaved formatted output (same as stdout).
 - On SIGINT or SIGTERM, all children receive SIGTERM. After a 2-second grace period, remaining processes are sent SIGKILL.
-- procman exits with the first child's exit code.
+- Failed jobs or exiting services trigger shutdown. Successful jobs can finish while other processes continue.
+- Once all selected tasks finish, procman shuts down supporting processes and exits with the first task failure code, or 0 if all tasks succeeded.
 
 ## License
 

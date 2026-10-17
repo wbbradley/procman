@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.24.0] - 2026-10-17
+
+### Breaking Changes
+- Reserve `cwd` as a language keyword. Rename existing identifiers named `cwd` and update their references; quoted strings and shell commands are unaffected.
+
+### Added
+- Add `--all-tasks` to activate every configured task, including imported tasks. It can be combined with `-t` without running a task twice.
+- Add `cwd` to process definitions to set their working directory. Relative paths resolve against the defining `.pman` file, and argument expressions are supported.
+
+### Fixed
+- Correct documentation to explain that task failures allow other activated tasks to finish before procman exits unsuccessfully.
+- Clarify that `cwd` applies to process commands and top-level `if` conditions; `wait` and `watch` checks use procman's working directory.
+
 ## [0.23.8] - 2026-04-25
 
 ### Changed
