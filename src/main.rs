@@ -42,6 +42,9 @@ EXAMPLES:
     # Run specific tasks defined in the config file
     procman tests.pman -t test_system_a -t test_system_b
 
+    # Run every task defined in the config file
+    procman tests.pman --all-tasks
+
 SIGNALS:
     On SIGINT or SIGTERM, all children receive SIGTERM. After a 2-second
     grace period, remaining processes are sent SIGKILL."
@@ -61,6 +64,9 @@ struct Cli {
     /// Task(s) to run (repeatable)
     #[arg(short = 't', long = "task", value_name = "NAME")]
     tasks: Vec<String>,
+    /// Run all tasks, including tasks in imported files
+    #[arg(long)]
+    all_tasks: bool,
     /// Arguments for config-defined args (passed after --)
     #[arg(last = true)]
     user_args: Vec<String>,
@@ -84,7 +90,8 @@ fn run_supervisor(
     config_path: String,
     extra_env: HashMap<String, String>,
     user_args: Vec<String>,
-    task_names: Vec<String>,
+    mut task_names: Vec<String>,
+    all_tasks: bool,
     debug: bool,
     check: bool,
 ) -> Result<()> {
@@ -148,6 +155,14 @@ fn run_supervisor(
     let (mut configs, _, module_args) = pman::lower_loaded(&modules, &merged_env, &arg_values)?;
 
     // Phase 5: activate triggered tasks
+    if all_tasks {
+        task_names.extend(
+            configs
+                .iter()
+                .filter(|config| config.is_task)
+                .map(|config| config.name.clone()),
+        );
+    }
     for task_name in &task_names {
         let found = configs
             .iter_mut()
@@ -227,6 +242,7 @@ fn main() -> Result<()> {
         extra_env,
         cli.user_args,
         cli.tasks,
+        cli.all_tasks,
         cli.debug,
         cli.check,
     )
@@ -278,7 +294,15 @@ mod tests {
         let path = dir.path().join("test.pman");
         std::fs::write(&path, r#"job web { run "echo hello" }"#).unwrap();
         let config_path = path.to_str().unwrap().to_string();
-        let result = run_supervisor(config_path, HashMap::new(), vec![], vec![], false, true);
+        let result = run_supervisor(
+            config_path,
+            HashMap::new(),
+            vec![],
+            vec![],
+            false,
+            false,
+            true,
+        );
         assert!(result.is_ok());
     }
 
@@ -288,7 +312,15 @@ mod tests {
         let path = dir.path().join("bad.pman");
         std::fs::write(&path, "this is not valid pman syntax !!!").unwrap();
         let config_path = path.to_str().unwrap().to_string();
-        let result = run_supervisor(config_path, HashMap::new(), vec![], vec![], false, true);
+        let result = run_supervisor(
+            config_path,
+            HashMap::new(),
+            vec![],
+            vec![],
+            false,
+            false,
+            true,
+        );
         assert!(result.is_err());
     }
 
@@ -312,7 +344,15 @@ mod tests {
         .unwrap();
 
         let config_path = root_path.to_str().unwrap().to_string();
-        let result = run_supervisor(config_path, HashMap::new(), vec![], vec![], false, true);
+        let result = run_supervisor(
+            config_path,
+            HashMap::new(),
+            vec![],
+            vec![],
+            false,
+            false,
+            true,
+        );
         assert!(result.is_ok(), "got: {}", result.unwrap_err());
     }
 
@@ -346,7 +386,15 @@ mod tests {
         .unwrap();
 
         let config_path = root_path.to_str().unwrap().to_string();
-        let result = run_supervisor(config_path, HashMap::new(), vec![], vec![], false, true);
+        let result = run_supervisor(
+            config_path,
+            HashMap::new(),
+            vec![],
+            vec![],
+            false,
+            false,
+            true,
+        );
         assert!(result.is_ok(), "got: {}", result.unwrap_err());
     }
 
@@ -384,7 +432,15 @@ mod tests {
             "--db::url".to_string(),
             "postgres://localhost/mydb".to_string(),
         ];
-        let result = run_supervisor(config_path, HashMap::new(), user_args, vec![], false, true);
+        let result = run_supervisor(
+            config_path,
+            HashMap::new(),
+            user_args,
+            vec![],
+            false,
+            false,
+            true,
+        );
         assert!(result.is_ok(), "got: {}", result.unwrap_err());
     }
 
@@ -412,7 +468,15 @@ mod tests {
         .unwrap();
 
         let config_path = root_path.to_str().unwrap().to_string();
-        let result = run_supervisor(config_path, HashMap::new(), vec![], vec![], false, true);
+        let result = run_supervisor(
+            config_path,
+            HashMap::new(),
+            vec![],
+            vec![],
+            false,
+            false,
+            true,
+        );
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("required argument --db::url not provided"),
@@ -426,7 +490,15 @@ mod tests {
         let path = dir.path().join("test.pman");
         std::fs::write(&path, r#"task test_a { run "echo hello" }"#).unwrap();
         let config_path = path.to_str().unwrap().to_string();
-        let result = run_supervisor(config_path, HashMap::new(), vec![], vec![], false, true);
+        let result = run_supervisor(
+            config_path,
+            HashMap::new(),
+            vec![],
+            vec![],
+            false,
+            false,
+            true,
+        );
         assert!(result.is_ok());
     }
 
@@ -441,6 +513,7 @@ mod tests {
             HashMap::new(),
             vec![],
             vec!["nonexistent".to_string()],
+            false,
             false,
             false,
         );
@@ -472,7 +545,15 @@ mod tests {
 
         let config_path = root_path.to_str().unwrap().to_string();
         let user_args = vec!["--dep-dir".to_string(), "deps".to_string()];
-        let result = run_supervisor(config_path, HashMap::new(), user_args, vec![], false, true);
+        let result = run_supervisor(
+            config_path,
+            HashMap::new(),
+            user_args,
+            vec![],
+            false,
+            false,
+            true,
+        );
         assert!(result.is_ok(), "got: {}", result.unwrap_err());
     }
 
@@ -492,7 +573,15 @@ mod tests {
 
         // --check without providing --dep-dir should succeed (skip parameterized import)
         let config_path = root_path.to_str().unwrap().to_string();
-        let result = run_supervisor(config_path, HashMap::new(), vec![], vec![], false, true);
+        let result = run_supervisor(
+            config_path,
+            HashMap::new(),
+            vec![],
+            vec![],
+            false,
+            false,
+            true,
+        );
         assert!(result.is_ok(), "got: {}", result.unwrap_err());
     }
 }

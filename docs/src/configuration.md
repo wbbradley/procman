@@ -252,8 +252,8 @@ service api {
 
 The working directory for the spawned process. Relative paths resolve against the `.pman` file's
 directory (not procman's working directory); absolute paths are used verbatim. The value is an
-expression, so `args.*` references and string interpolation work. Conditions in `wait` and `watch`
-blocks also run in this directory. Omitting `cwd` inherits procman's working directory. When
+expression, so `args.*` references and string interpolation work. Process commands run in this
+directory; `wait` and `watch` checks use procman's working directory. Omitting `cwd` inherits procman's working directory. When
 combined with `for`, the directory is applied to every fanned-out instance. Startup fails if the
 directory does not exist.
 
@@ -278,8 +278,9 @@ supervisor shutdown.
 ### `task`
 
 A `task` is a one-shot process that does not auto-start. Tasks must be explicitly
-triggered via the `-t`/`--task` CLI flag. Like jobs, tasks run to completion —
-exit code 0 is success, non-zero triggers shutdown.
+triggered via `-t`/`--task` or `--all-tasks`. Tasks run to completion; non-zero
+exits are recorded without stopping other tasks. Once all activated tasks finish,
+procman shuts down supporting processes and exits non-zero if any task failed.
 
 Tasks are useful for operations that should only run on demand: test suites,
 database migrations, cleanup scripts, or any one-shot utility work.

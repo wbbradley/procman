@@ -370,8 +370,9 @@ If the expression is falsy, the job/service is not evaluated at all — no depen
 ## Task Definitions
 
 A `task` is a one-shot process that does not auto-start. Tasks must be
-explicitly triggered via the `-t`/`--task` CLI flag. Like jobs, exit code 0 is
-success without triggering shutdown; non-zero triggers shutdown.
+explicitly triggered via `-t`/`--task` or `--all-tasks`. Non-zero exits are
+recorded without stopping other tasks. Once all activated tasks finish, procman
+shuts down supporting processes and exits non-zero if any task failed.
 
 Tasks share all fields with jobs and services (`run`, `env`, `wait`, `for`,
 `if`, `watch`).

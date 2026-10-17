@@ -3,7 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/procman.svg)](https://crates.io/crates/procman)
 [![docs](https://img.shields.io/badge/docs-mdbook-blue)](https://wbbradley.github.io/procman/)
 
-A process supervisor with a dependency DAG and a typed `.pman` language for defining jobs, services, and their relationships. Spawns processes, multiplexes their output with name prefixes, and tears everything down cleanly when any child exits or a signal arrives. See the [full documentation](https://wbbradley.github.io/procman/) for detailed guides on configuration, dependencies, templates, and more.
+A process supervisor with a dependency DAG and a typed `.pman` language for defining jobs, services, and their relationships. Spawns processes, multiplexes their output with name prefixes, and coordinates startup and shutdown. Failed jobs and exiting services trigger shutdown; selected tasks can fail independently while the remaining tasks finish. See the [full documentation](https://wbbradley.github.io/procman/) for detailed guides on configuration, dependencies, templates, and more.
 
 ## Why procman?
 
@@ -35,6 +35,7 @@ procman myapp.pman                             # run all jobs
 procman myapp.pman -e PORT=3000 -e RUST_LOG=debug  # inject env vars
 procman myapp.pman -- --rust-log debug --verbose   # pass config-defined args
 procman myapp.pman -t test_a -t test_b         # run specific tasks
+procman myapp.pman --all-tasks                 # run every task
 procman myapp.pman --debug                     # pause before shutdown on failure
 procman myapp.pman --check                     # validate config and exit
 ```
@@ -98,6 +99,19 @@ procman tests.pman -t test_system_a -t test_system_b
 ```
 
 This is designed for test harness orchestration: define services and jobs as scaffolding, then trigger tasks as the actual test runs.
+
+### `--all-tasks` — run every task
+
+Activates every task in the config, including imported tasks. Jobs and services
+start as usual, and task conditions and dependencies still apply. Procman waits
+for all activated tasks to finish, then shuts down supporting processes and exits
+non-zero if any task failed. With no tasks defined, normal job/service behavior
+is unchanged. Can be combined with `-t`; each task runs only once and explicitly
+named tasks are still validated.
+
+```bash
+procman tests.pman --all-tasks
+```
 
 ### `--debug` — pause before shutdown
 
@@ -227,7 +241,7 @@ The config file contains top-level blocks in any order:
 - `job name { }` / `job name if expr { }` — one-shot process definitions (run to completion).
 - `service name { }` / `service name if expr { }` — long-running process definitions (daemons).
 - `event name { }` — dormant processes, only started via `on_fail spawn @name`.
-- `task name { }` / `task name if expr { }` — run-to-completion processes triggered via `-t` CLI flag. Tasks do not autostart. When a task fails, it does not tear down the supervisor — failures are accumulated and the exit code reflects whether all triggered tasks passed.
+- `task name { }` / `task name if expr { }` — run-to-completion processes triggered via `-t` or `--all-tasks`. Tasks do not autostart. When a task fails, it does not tear down the supervisor — failures are accumulated and the exit code reflects whether all triggered tasks passed.
 
 Each job/service definition supports:
 
@@ -270,7 +284,8 @@ Watch options:
 - Per-process logs are written to `<log_dir>/<name>.log` (directory is recreated each run; default `./logs/procman/`).
 - A combined `<log_dir>/procman.log` contains the full interleaved formatted output (same as stdout).
 - On SIGINT or SIGTERM, all children receive SIGTERM. After a 2-second grace period, remaining processes are sent SIGKILL.
-- procman exits with the first child's exit code.
+- Failed jobs or exiting services trigger shutdown. Successful jobs can finish while other processes continue.
+- Once all selected tasks finish, procman shuts down supporting processes and exits with the first task failure code, or 0 if all tasks succeeded.
 
 ## License
 

@@ -29,7 +29,7 @@ procman myapp.pman -e PORT=3000 -e RUST_LOG=debug
 
 A repeatable `-t NAME` flag that activates one or more tasks by name. Tasks are
 one-shot processes defined with `task` blocks that don't auto-start — they must be
-explicitly triggered via this flag.
+explicitly triggered via this flag or `--all-tasks`.
 
 ```sh
 procman myapp.pman -t migrate
@@ -37,8 +37,20 @@ procman myapp.pman -t test_a -t test_b
 ```
 
 If a named task does not exist in the config, procman exits with an error and lists
-available tasks. A non-zero exit code from any task triggers shutdown of all
-processes.
+available tasks. Non-zero task exits are recorded without stopping other tasks.
+Once all activated tasks finish, procman shuts down supporting processes and
+exits non-zero if any task failed.
+
+## `--all-tasks` — Trigger all tasks
+
+Activates every task in the config, including imported tasks. Jobs and services
+start as usual; task conditions and dependencies still apply. With no tasks
+defined, normal job/service behavior is unchanged. May be combined with `-t`:
+each task runs only once, and explicitly named tasks are still validated.
+
+```sh
+procman myapp.pman --all-tasks
+```
 
 ## `-- [ARGS]` — User-defined arguments
 
