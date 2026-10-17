@@ -11,7 +11,7 @@
 
 ### Fixed
 - Correct documentation to explain that task failures allow other activated tasks to finish before procman exits unsuccessfully.
-- Clarify that `cwd` applies to process commands and top-level `if` conditions; `wait` and `watch` checks use procman's working directory.
+- Clarify that `cwd` applies to process commands; `wait` and `watch` checks use procman's working directory.
 
 ## [0.23.8] - 2026-04-25
 

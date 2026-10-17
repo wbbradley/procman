@@ -252,9 +252,8 @@ service api {
 
 The working directory for the spawned process. Relative paths resolve against the `.pman` file's
 directory (not procman's working directory); absolute paths are used verbatim. The value is an
-expression, so `args.*` references and string interpolation work. The process command and its
-top-level `if` condition run in this directory; `wait` and `watch` checks use procman's working
-directory. Omitting `cwd` inherits procman's working directory. When
+expression, so `args.*` references and string interpolation work. Process commands run in this
+directory; `wait` and `watch` checks use procman's working directory. Omitting `cwd` inherits procman's working directory. When
 combined with `for`, the directory is applied to every fanned-out instance. Startup fails if the
 directory does not exist.
 
